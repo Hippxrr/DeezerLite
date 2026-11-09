@@ -9,7 +9,7 @@
 A lightweight, native Deezer client for iPhone: a **SwiftUI** interface on top of a **Rust** engine that handles
 networking, the play queue and audio.
 
-> 💬 **Contact**: on Discord, **@chippooo** (on request).
+> 💬 **Contact**: on Discord, `@chippooo.` (on request).
 >
 > 🤖 **Vibe-coded project**: largely written with AI, and tested step by step on a real iPhone.
 >
