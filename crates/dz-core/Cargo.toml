@@ -1,0 +1,13 @@
+[package]
+name = "dz-core"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+tokio.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+dz-api.workspace = true
+dz-audio.workspace = true
+dz-stream.workspace = true
+dz-offline.workspace = true

@@ -1,0 +1,35 @@
+# Affiche seulement les versions de macOS, d'Xcode et du SDK iOS de chaque machine de GitHub. Ne construit rien.
+name: Vérifier les machines (macOS, Xcode)
+
+# Lancé à la main seulement : onglet Actions > Vérifier les machines (macOS, Xcode) > Run workflow.
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-26]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 5
+    steps:
+      - name: macOS
+        run: sw_vers
+
+      - name: Xcode installés
+        run: ls -d /Applications/Xcode*.app
+
+      - name: Xcode par défaut
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Xcode que la CI de l'app choisirait (le plus récent, hors beta)
+        run: |
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -v -i beta | sort -V | tail -1)
+          echo "Choisi : $latest"
+          if [ -n "$latest" ]; then sudo xcode-select -s "$latest"; fi
+          xcodebuild -version
+          echo "SDK iOS : $(xcrun --sdk iphoneos --show-sdk-version)"
+          swift --version

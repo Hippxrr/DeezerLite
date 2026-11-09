@@ -1,0 +1,22 @@
+[package]
+name = "dz-ffi"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[lib]
+# staticlib pour l'app iOS ; lib pour cargo check / tests sur l'ordinateur.
+crate-type = ["staticlib", "lib"]
+
+[dependencies]
+dz-api.workspace = true
+dz-audio.workspace = true
+dz-core.workspace = true
+dz-decrypt.workspace = true
+dz-offline.workspace = true
+uniffi.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+keyring.workspace = true
+serde.workspace = true
+serde_json.workspace = true

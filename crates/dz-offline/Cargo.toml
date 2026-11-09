@@ -1,0 +1,16 @@
+[package]
+name = "dz-offline"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[dependencies]
+dz-api.workspace = true
+dz-stream.workspace = true
+dz-decrypt.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+reqwest.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true

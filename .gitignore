@@ -1,0 +1,7 @@
+/target
+/build
+/ios/Generated
+/ios/*.xcodeproj
+*.ipa
+.DS_Store
+/Cargo.lock

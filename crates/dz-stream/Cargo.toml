@@ -1,0 +1,16 @@
+[package]
+name = "dz-stream"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+tokio.workspace = true
+reqwest.workspace = true
+futures-util.workspace = true
+bytes = "1"
+symphonia.workspace = true
+thiserror.workspace = true
+lru.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread"] }

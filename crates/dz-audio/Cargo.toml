@@ -1,0 +1,18 @@
+[package]
+name = "dz-audio"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+symphonia.workspace = true
+rtrb.workspace = true
+rubato.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+# iPhone : la sortie est AVAudioEngine (côté Swift), pas cpal.
+[target.'cfg(not(target_os = "ios"))'.dependencies]
+cpal.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

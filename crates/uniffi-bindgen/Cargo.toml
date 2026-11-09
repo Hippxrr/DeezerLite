@@ -1,0 +1,10 @@
+[package]
+name = "uniffi-bindgen"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+publish = false
+
+# Crate à part : générer le Swift ne doit pas recompiler tout le cœur pour le Mac.
+[dependencies]
+uniffi = { workspace = true, features = ["cli"] }

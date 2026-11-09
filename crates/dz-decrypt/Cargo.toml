@@ -1,0 +1,9 @@
+[package]
+name = "dz-decrypt"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+dz-stream.workspace = true
+md-5.workspace = true
+blowfish.workspace = true

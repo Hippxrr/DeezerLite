@@ -1,0 +1,98 @@
+# Construit une IPA non signée, publiée comme artefact du run (7 jours), jamais comme Release.
+# Le dépôt doit rester privé : l'IPA contient le cœur compilé.
+name: iOS (IPA non signée)
+
+# Lancé à la main seulement : onglet Actions > iOS (IPA non signée) > Run workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version de l'app, format 1.0.6 (vide = celle du projet)"
+        type: string
+        default: ""
+
+concurrency:
+  group: ios-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Xcode le plus récent
+        run: |
+          # SDK d'iOS 26 (Liquid Glass) si le runner l'a ; sinon le Xcode par défaut (l'app se construit sans le verre).
+          latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -v -i beta | sort -V | tail -1)
+          if [ -n "$latest" ]; then sudo xcode-select -s "$latest"; fi
+          xcodebuild -version
+
+      - name: Rust pour iPhone
+        run: rustup target add aarch64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: XcodeGen
+        run: brew install xcodegen
+
+      - name: Cœur Rust -> XCFramework
+        run: bash scripts/build-core.sh
+
+      - name: Version de l'app
+        env:
+          VERSION: ${{ inputs.version }}
+          BUILD: ${{ github.run_number }}
+        run: |
+          if [ -n "$VERSION" ]; then
+            if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::Version invalide « $VERSION » : utilise trois nombres séparés par des points, par exemple 1.0.6"
+              exit 1
+            fi
+            sed -i '' -E "s/(MARKETING_VERSION: )\"[^\"]*\"/\1\"$VERSION\"/" ios/project.yml
+          fi
+          # Numéro de build : celui du run, toujours croissant (iOS s'en sert pour distinguer deux installations).
+          sed -i '' -E "s/(CURRENT_PROJECT_VERSION: )\"[^\"]*\"/\1\"$BUILD\"/" ios/project.yml
+          v=$(sed -nE 's/.*MARKETING_VERSION: "([^"]*)".*/\1/p' ios/project.yml)
+          echo "APP_VERSION=$v" >> "$GITHUB_ENV"
+          echo "Version $v (build $BUILD)"
+
+      - name: Projet Xcode
+        run: xcodegen generate --spec ios/project.yml
+
+      - name: Build de l'app (sans signature)
+        run: |
+          # Journal complet dans un fichier ; en cas d'échec, seules les erreurs sont affichées (et reprises dans le résumé du run).
+          if ! xcodebuild \
+            -project ios/DeezerLite.xcodeproj \
+            -scheme DeezerLite \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build/dd \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build > build/xcodebuild.log 2>&1; then
+            echo "===== Erreurs de compilation ====="
+            grep -E "error:" build/xcodebuild.log | sed 's|.*/ios/DeezerLite/||' | sort -u | head -40 | tee build/errors.txt
+            sed 's/^/::error::/' build/errors.txt
+            exit 1
+          fi
+
+      - name: IPA
+        run: |
+          mkdir -p build/ipa/Payload
+          cp -R build/dd/Build/Products/Release-iphoneos/DeezerLite.app build/ipa/Payload/
+          # Build sans signature = droits (CarPlay) absents de l'app. Signature ad hoc avec le fichier de droits :
+          # ils sont inscrits dans l'app, et l'outil de re-signature les reprend (s'ils figurent aussi dans le profil).
+          codesign --force --sign - --entitlements ios/DeezerLite/App/DeezerLite.entitlements build/ipa/Payload/DeezerLite.app
+          echo "Droits inscrits dans l'app :"
+          codesign -d --entitlements - build/ipa/Payload/DeezerLite.app
+          (cd build/ipa && zip -qry "../DeezerLite-$APP_VERSION.ipa" Payload)
+          du -h "build/DeezerLite-$APP_VERSION.ipa"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DeezerLite-${{ env.APP_VERSION }}-ipa
+          path: build/DeezerLite-${{ env.APP_VERSION }}.ipa
+          retention-days: 7
