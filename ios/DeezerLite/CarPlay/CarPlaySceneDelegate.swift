@@ -50,6 +50,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 
         interfaceController.setRootTemplate(CPTabBarTemplate(templates: [home, library, recent]), animated: false, completion: nil)
 
+        player.retrySessionFromCarPlay()
         Task {
             await player.loadHome(force: false)
             await player.loadLibrary(0, force: false)
@@ -156,6 +157,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     }
 
     private func openLibrary(_ tab: Int, title: String) {
+        player.retrySessionFromCarPlay()
         let template = CPListTemplate(title: title, sections: [])
         template.emptyViewTitleVariants = [tr("Chargement…")]
         observe(while: template) { [weak self] in
@@ -213,6 +215,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     }
 
     private func openDetail(_ route: Route, title: String) {
+        player.retrySessionFromCarPlay()
         let template = CPListTemplate(title: title, sections: [])
         template.emptyViewTitleVariants = [tr("Chargement…")]
         push(template)

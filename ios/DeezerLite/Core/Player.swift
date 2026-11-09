@@ -1094,6 +1094,13 @@ final class Player {
         }
     }
 
+    /// CarPlay connecté ou utilisé : nouvel essai d'ouverture de session (les essais automatiques ont pu s'arrêter, et le
+    /// retour dans l'app qui les relance n'arrive jamais avec l'iPhone dans la poche).
+    func retrySessionFromCarPlay() {
+        sessionRetries = 0
+        retrySessionIfNeeded()
+    }
+
     private func retrySessionIfNeeded() {
         guard loggedIn == true, !sessionReady, !restoringSession, networkSignature != "none" else { return }
         Task { await restore() }
@@ -1115,6 +1122,13 @@ final class Player {
     /// Session expirée : les copies affichées au lancement ne restent pas en mémoire (la connexion suivante peut être
     /// celle d'un autre compte). Les téléchargements ne sont pas concernés.
     private func forgetAccountCopies() {
+        // Plus de compte ouvert : la musique s'arrête et l'écran verrouillé se vide (avant, le son continuait derrière
+        // l'écran de connexion).
+        attempt { try $0.pause() }
+        status = Status(playing: false, positionMs: 0, durationMs: 0)
+        loading = false
+        isFlow = false
+        NowPlaying.update(track: nil, status: status)
         profileGeneration += 1
         profileEpoch += 1
         lovedIds = []
@@ -1172,6 +1186,8 @@ final class Player {
         refreshed = []
         lyricsCache = [:]
         noLyrics = []
+        likeTasks = [:]
+        likeGeneration = [:]
         creditsTrack = nil
         showFullPlayer = false
         clearHistory()
@@ -1375,6 +1391,9 @@ final class Player {
 
     /// Dernier envoi « j'aime » de chaque titre (voir `setLiked`).
     @ObservationIgnored private var likeTasks: [Int64: Task<Void, Never>] = [:]
+    /// Numéro du dernier appui sur « j'aime » de chaque titre : un envoi refusé ne défait l'affichage que s'il est le
+    /// dernier (sinon il effaçait le choix plus récent, pourtant bien enregistré chez Deezer).
+    @ObservationIgnored private var likeGeneration: [Int64: Int] = [:]
 
     func setLiked(_ track: Track, _ liked: Bool) {
         guard let core else { return }
@@ -1385,6 +1404,8 @@ final class Player {
         // Appuis rapides (j'aime puis plus) : envoyés à Deezer l'un après l'autre, dans l'ordre, pour que le dernier
         // choix soit bien celui gardé.
         let previous = likeTasks[track.id]
+        likeGeneration[track.id, default: 0] += 1
+        let mine = likeGeneration[track.id] ?? 0
         likeTasks[track.id] = Task {
             await previous?.value
             do {
@@ -1485,6 +1506,7 @@ final class Player {
 
     func pause() {
         resumePolicy.userDecided()
+        defer { saveLastSession() } // position de la pause gardée pour la reprise au lancement
         attempt { try $0.pause() }
         refreshStatus()
     }
@@ -1513,7 +1535,7 @@ final class Player {
             if queue.indices.contains(queueIndex + delta) { restoreLastSession(last, index: queueIndex + delta, position: 0) }
             return
         }
-        let target = (skipTarget ?? queueIndex) + delta
+        let target = (skipTarget ?? awaitedIndex ?? queueIndex) + delta
         guard queue.indices.contains(target) else {
             // Bout de la file (Flow, répétition) : le cœur décide, une fois par rafale.
             if skipTarget == nil { attempt { try delta > 0 ? $0.next() : $0.previous() } }
@@ -1523,20 +1545,46 @@ final class Player {
         current = queue[target]
         shownIndex = target
         startLoading()
+        NowPlaying.update(track: current, status: Status(playing: false, positionMs: 0, durationMs: 0))
         if skipWindow == nil {
             attempt { try $0.queuePlay(index: UInt32(target)) }
             sentTarget = target
+            awaiting = (target, Date())
         }
         skipTarget = target
         skipWindow?.cancel()
         skipWindow = Task {
             try? await Task.sleep(for: .milliseconds(180))
             guard !Task.isCancelled else { return }
-            if let t = skipTarget, t != sentTarget { attempt { try $0.queuePlay(index: UInt32(t)) } }
+            if let t = skipTarget, t != sentTarget {
+                attempt { try $0.queuePlay(index: UInt32(t)) }
+                awaiting = (t, Date())
+            }
             skipTarget = nil
             sentTarget = nil
             skipWindow = nil
         }
+    }
+
+    /// Mêmes informations affichées (le cœur renvoie souvent le même titre plusieurs fois à chaque changement).
+    private static func sameTrack(_ a: Track, _ b: Track) -> Bool {
+        a.id == b.id && a.title == b.title && a.artist == b.artist && a.album == b.album && a.durationS == b.durationS
+            && a.coverUrl == b.coverUrl && a.quality == b.quality && a.artistId == b.artistId && a.albumId == b.albumId
+            && a.artists.count == b.artists.count
+    }
+
+    /// Mise à jour d'un seul titre de la file (artistes complétés, pochette réparée) : remplacé là où il apparaît.
+    private func updateQueued(_ track: Track) {
+        for i in queue.indices where queue[i].id == track.id && !Self.sameTrack(queue[i], track) { queue[i] = track }
+    }
+
+    /// Titre demandé au cœur et pas encore confirmé par lui (sur réseau lent, il le résout avant de répondre). Un nouvel
+    /// appui sur « suivant » part de lui, pas de l'ancien titre : avant, le 2e appui redemandait le même titre.
+    /// Oublié au bout de 20 s (titre impossible à charger : le cœur ne le confirmera jamais).
+    @ObservationIgnored private var awaiting: (index: Int, at: Date)?
+    private var awaitedIndex: Int? {
+        guard let a = awaiting, Date().timeIntervalSince(a.at) < 20 else { return nil }
+        return a.index
     }
 
     func seek(seconds: Double) {
@@ -1822,7 +1870,7 @@ final class Player {
             // Deux adresses Deezer différentes, en revanche : pochette réparée par le cœur (l'ancienne n'existait plus).
             if let shown = current, shown.id == track.id, let cover = shown.coverUrl,
                !(cover.hasPrefix("http") && track.coverUrl?.hasPrefix("http") == true) { track.coverUrl = cover }
-            current = track
+            if current.map({ !Self.sameTrack($0, track) }) ?? true { current = track }
             // Aussi pour les enchaînements automatiques (fin de titre), qui n'ont pas de signal « son lancé ».
             scheduleCheck()
             // Nouveau titre : état réel du moteur (lecture, position, durée) relu tout de suite pour l'écran verrouillé.
@@ -1861,12 +1909,18 @@ final class Player {
             queueIndex = Int(index)
         case .queueIndex(let index):
             if queueIndex != Int(index) { queueIndex = Int(index) }
+            if awaiting?.index == Int(index) { awaiting = nil } // titre demandé confirmé
+            // Dernière écoute gardée à chaque changement de titre : iOS peut fermer l'app suspendue sans prévenir
+            // (et ne prévient pas non plus quand CarPlay l'a lancée en arrière-plan).
+            saveLastSession()
         case .queueInsert(let at, let tracks, let index):
             queue.insert(contentsOf: tracks, at: min(Int(at), queue.count))
             queueIndex = Int(index)
         case .queueRemove(let at, let index):
             if queue.indices.contains(Int(at)) { queue.remove(at: Int(at)) }
             queueIndex = Int(index)
+        case .queueUpdate(let track):
+            updateQueued(track)
         case .queueMove(let from, let to, let index):
             if queue.indices.contains(Int(from)), queue.indices.contains(Int(to)) {
                 queue.insert(queue.remove(at: Int(from)), at: Int(to))
@@ -1885,7 +1939,8 @@ final class Player {
         }
         // Comparé avant d'écrire : avec @Observable, même une valeur identique redessine tout ce qui la lit
         // (carrousels du mini-lecteur et du grand lecteur, file d'attente, CarPlay).
-        if skipTarget == nil, shownIndex != queueIndex { shownIndex = queueIndex }
+        // Titre demandé pas encore confirmé : l'affichage reste dessus (le cœur peut d'abord renvoyer l'ancien index).
+        if skipTarget == nil, awaitedIndex == nil, shownIndex != queueIndex { shownIndex = queueIndex }
         NowPlaying.setSkips(next: hasNext, previous: hasPrevious)
     }
 
@@ -1937,7 +1992,7 @@ final class Player {
                     let wasPlaying = self.core?.status().playing ?? false
                     self.pause()
                     self.resumePolicy.earbudsRemoved(uid: previous, wasPlaying: wasPlaying)
-                } else if self.resumePolicy.earbudsReturned(currentOutputs: current) {
+                } else if !self.resumePolicy.interrupted, self.resumePolicy.earbudsReturned(currentOutputs: current) {
                     // Les mêmes écouteurs sont revenus (AirPods remis) : la musique reprend, comme dans les autres apps.
                     self.resume()
                 }

@@ -4,4 +4,3 @@
 /ios/*.xcodeproj
 *.ipa
 .DS_Store
-/Cargo.lock

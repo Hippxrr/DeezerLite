@@ -42,6 +42,7 @@ private struct WebLoginView: UIViewRepresentable {
         // Site « ordinateur » : la version mobile pousse vers l'app Deezer au lieu d'afficher la connexion.
         web.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
         web.navigationDelegate = context.coordinator
+        web.uiDelegate = context.coordinator
         config.websiteDataStore.httpCookieStore.add(context.coordinator)
         context.coordinator.store = config.websiteDataStore.httpCookieStore
         if let url = URL(string: "https://www.deezer.com/login") { web.load(URLRequest(url: url)) }
@@ -53,10 +54,19 @@ private struct WebLoginView: UIViewRepresentable {
     static func dismantleUIView(_ web: WKWebView, coordinator: Coordinator) {
         web.stopLoading()
         web.navigationDelegate = nil
+        web.uiDelegate = nil
         coordinator.store?.remove(coordinator)
     }
 
-    final class Coordinator: NSObject, WKHTTPCookieStoreObserver, WKNavigationDelegate {
+    final class Coordinator: NSObject, WKHTTPCookieStoreObserver, WKNavigationDelegate, WKUIDelegate {
+        /// Lien ou bouton qui ouvre une nouvelle fenêtre (connexion par un réseau social) : chargé dans la page elle-même,
+        /// au lieu d'être ignoré sans rien faire.
+        func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                     for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+            if navigationAction.targetFrame == nil { webView.load(navigationAction.request) }
+            return nil
+        }
+
         private let parent: WebLoginView
         weak var store: WKHTTPCookieStore?
         private var done = false

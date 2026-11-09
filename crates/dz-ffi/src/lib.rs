@@ -400,6 +400,8 @@ pub enum Event {
     QueueInsert { at: u32, tracks: Vec<Track>, index: u32 },
     QueueRemove { at: u32, index: u32 },
     QueueMove { from: u32, to: u32, index: u32 },
+    /// Un seul titre de la file a changé (artistes complétés, pochette réparée).
+    QueueUpdate { track: Track },
     DownloadsChanged,
 }
 
@@ -569,6 +571,11 @@ impl Core {
                     CoreEvent::QueueEdit(QueueEdit::Move { from, to, index }) => {
                         Event::QueueMove { from: from as u32, to: to as u32, index: index as u32 }
                     }
+                    CoreEvent::QueueEdit(QueueEdit::Update { track, .. }) => {
+                        let out = Event::QueueUpdate { track: Track::from(&track) };
+                        remember(&k, vec![track]);
+                        out
+                    }
                 };
                 l.on_event(out);
             }
@@ -639,8 +646,22 @@ impl Core {
                 self.repair_lyrics();
                 Ok(true)
             }
-            Err(dz_api::DeezerError::InvalidArl) => Ok(false),
+            Err(dz_api::DeezerError::InvalidArl) => {
+                // Session refusée : ces copies ne s'affichent plus au lancement, avant l'écran de connexion.
+                self.forget_account_copies();
+                Ok(false)
+            }
             Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Efface les copies de l'accueil, de la bibliothèque et des titres aimés (communes à tous les profils) : à la
+    /// connexion, au changement de profil et quand la session est refusée, elles appartenaient à un autre compte ou
+    /// profil, et s'affichaient au lancement (surtout hors ligne). Rien d'autre n'est touché (écoutes en attente,
+    /// téléchargements).
+    fn forget_account_copies(&self) {
+        for name in ["home.json", "library-0.json", "library-1.json", "library-2.json", "loved-ids.json", "loved-card.json"] {
+            let _ = std::fs::remove_file(self.cache_dir.join(name));
         }
     }
 
@@ -672,6 +693,7 @@ impl Core {
         keyring::Entry::new(SERVICE, USER)
             .and_then(|e| e.set_password(&arl))
             .map_err(|e| CoreError::Keychain(e.to_string()))?;
+        self.forget_account_copies(); // peut-être un autre compte que le précédent
         let _ = self.player.send(PlayerCmd::FlushListens);
         self.repair_lyrics();
         Ok(())
@@ -756,6 +778,7 @@ impl Core {
     pub async fn switch_profile(&self, id: u64) -> Result<(), CoreError> {
         let api = self.api.clone();
         self.run(async move { api.switch_profile(id).await.map(|_| ()) }).await??;
+        self.forget_account_copies(); // celles du profil d'avant
         // Écoutes de ce profil gardées sans réseau : elles partent maintenant qu'il est ouvert.
         let _ = self.player.send(PlayerCmd::FlushListens);
         Ok(())

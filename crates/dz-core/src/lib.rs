@@ -107,6 +107,8 @@ pub enum QueueEdit {
     Insert { at: usize, tracks: Vec<TrackInfo>, index: usize },
     Remove { at: usize, index: usize },
     Move { from: usize, to: usize, index: usize },
+    /// Un titre de la file a changé (artistes complétés, pochette réparée) : seul lui voyage, pas toute la file.
+    Update { track: TrackInfo, index: usize },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -334,7 +336,11 @@ fn offline_format(quality: Option<&str>, ext: &str) -> String {
 /// compter l'écoute deux fois. Une autre erreur (délai dépassé…) a pu arriver chez Deezer : elle n'est pas renvoyée.
 fn not_delivered(e: &DeezerError) -> bool {
     match e {
-        DeezerError::Http(h) => h.is_connect(),
+        // Réponse « trop de requêtes » (429) ou serveur indisponible (502, 503, 504) : Deezer n'a pas traité l'écoute,
+        // on peut la renvoyer sans doublon. Pas 500 : la requête a pu être traitée en partie.
+        DeezerError::Http(h) => {
+            h.is_connect() || h.status().is_some_and(|s| matches!(s.as_u16(), 429 | 502 | 503 | 504))
+        }
         DeezerError::Gateway(g) => g.to_ascii_uppercase().contains("QUOTA"),
         DeezerError::InvalidArl | DeezerError::SessionExpired => true,
         _ => false,
@@ -473,7 +479,21 @@ impl Actor {
                 Some(ev) = erx.recv() => self.on_engine(ev).await,
                 _ = tokio::time::sleep_until(next_tick) => {
                     self.maybe_recover().await;
-                    self.maybe_prefetch().await;
+                    // Préparation du titre suivant (réseau, parfois lente) : une commande qui arrive pendant ce temps
+                    // (suivant, saut, pause…) passe avant. La préparation est abandonnée et refaite au tour suivant.
+                    // Avant, les commandes attendaient la fin de la préparation (jusqu'à une minute sur réseau faible).
+                    let interrupted = tokio::select! {
+                        _ = self.maybe_prefetch() => None,
+                        cmd = rx.recv() => Some(cmd),
+                    };
+                    if let Some(cmd) = interrupted {
+                        self.prefetched = None;
+                        self.prefetched_idx = None;
+                        match cmd {
+                            Some(c) => self.on_cmd(c).await,
+                            None => return,
+                        }
+                    }
                     let busy = self.recover_at.is_some() || self.engine.shared.playing.load(Ordering::Relaxed);
                     next_tick = tokio::time::Instant::now() + Duration::from_secs(if busy { 1 } else { IDLE_TICK_S });
                 }
@@ -576,9 +596,9 @@ impl Actor {
                     if let Ok(mut s) = self.snap.lock() {
                         s.current = Some(now.clone());
                     }
-                    let _ = self.events.send(CoreEvent::Track(now));
+                    let _ = self.events.send(CoreEvent::Track(now.clone()));
                 }
-                self.emit_queue();
+                self.emit_edit(QueueEdit::Update { track: now, index: self.index });
             }
             PlayerCmd::CoverFixed { id, cover } => {
                 let Some(info) = self.infos.get_mut(&id) else { return };
@@ -589,9 +609,9 @@ impl Actor {
                     if let Ok(mut s) = self.snap.lock() {
                         s.current = Some(now.clone());
                     }
-                    let _ = self.events.send(CoreEvent::Track(now));
+                    let _ = self.events.send(CoreEvent::Track(now.clone()));
                 }
-                self.emit_queue();
+                self.emit_edit(QueueEdit::Update { track: now, index: self.index });
             }
             PlayerCmd::FlowMore { tracks } => {
                 self.flow_fetching = false;
@@ -687,7 +707,9 @@ impl Actor {
                 if index < self.queue.len() {
                     self.index = index;
                     self.retries = 0;
-                    self.play_current().await;
+                    // Le bouton « suivant » de l'app passe par ici (titre visé dans la file), pas par `Next` : le titre
+                    // déjà préparé y était résolu et retéléchargé une seconde fois.
+                    self.play_prefetched_or_current().await;
                     self.emit_index();
                 }
             }
@@ -710,7 +732,26 @@ impl Actor {
                 self.streams.push((LOCAL_ID, cancel));
             }
             PlayerCmd::Pause => self.engine.pause(),
-            PlayerCmd::Resume => self.engine.resume(),
+            PlayerCmd::Resume => {
+                let sh = &self.engine.shared;
+                if sh.idle.load(Ordering::Relaxed) && self.queue.get(self.index).is_some() {
+                    // Plus rien dans le moteur (file terminée, titre en échec) : une simple reprise ne jouait rien. Le titre
+                    // affiché est rechargé, à sa position s'il n'était pas fini, sinon depuis le début.
+                    let (pos, dur) = (sh.position_ms.load(Ordering::Relaxed), sh.duration_ms.load(Ordering::Relaxed));
+                    let resume_at = (pos > 1000 && pos + 2000 < dur).then_some(pos);
+                    if resume_at.is_some() {
+                        self.reload_id = self.queue.get(self.index).copied(); // même écoute, pas une nouvelle
+                    }
+                    self.retries = 0;
+                    self.play_current().await;
+                    if let Some(pos) = resume_at {
+                        self.engine.seek(pos);
+                    }
+                    self.emit_index();
+                } else {
+                    self.engine.resume();
+                }
+            }
             PlayerCmd::Seek { ms } => self.engine.seek(ms),
             PlayerCmd::Volume(v) => self.engine.set_volume(v),
             PlayerCmd::Quality(q) => {
@@ -719,8 +760,13 @@ impl Actor {
                 }
                 self.quality = q;
                 self.prefetched = None;
-                // Titre Deezer en cours : rechargé dans la nouvelle qualité, à la même position.
-                let playing_deezer = self
+                // Suivant déjà préparé dans l'ancienne qualité : lâché, il sera refait dans la nouvelle.
+                self.engine.clear_next();
+                // Titre Deezer qui joue : rechargé dans la nouvelle qualité, à la même position. En pause (ou coupé par
+                // un appel), il n'est pas rechargé : le rechargement relançait la musique toute seule, par exemple en
+                // passant du Wi-Fi à la 4G. La nouvelle qualité vaut alors à partir du titre suivant.
+                let paused = self.engine.shared.paused.load(Ordering::Relaxed);
+                let playing_deezer = !paused && self
                     .queue
                     .get(self.index)
                     .is_some_and(|&id| {
@@ -791,7 +837,7 @@ impl Actor {
                 };
                 if let Some(i) = next {
                     self.index = i;
-                    self.play_current().await;
+                    self.play_prefetched_or_current().await;
                 }
             }
             PlayerCmd::Prev => {
@@ -1000,6 +1046,17 @@ impl Actor {
         }
     }
 
+    /// Joue le titre `index` de la file. S'il est déjà préparé (à partir de 80 % du titre en cours), le moteur passe
+    /// directement dessus, avec ce qui est déjà téléchargé ; sinon il est chargé normalement.
+    async fn play_prefetched_or_current(&mut self) {
+        let id = self.queue.get(self.index).copied();
+        if id.is_some() && self.prefetched == id && self.prefetched_idx == Some(self.index) {
+            self.engine.skip_next();
+        } else {
+            self.play_current().await;
+        }
+    }
+
     async fn play_current(&mut self) {
         let Some(&id) = self.queue.get(self.index) else { return };
         self.prefetched = None;
@@ -1142,6 +1199,12 @@ impl Actor {
                 }
             }
             EngineEvent::StateChanged => {} // la boucle notifie `changed` après chaque événement
+            // Le titre préparé n'était plus disponible dans le moteur : chargement normal du titre demandé.
+            EngineEvent::SkipFailed => {
+                self.prefetched = None;
+                self.prefetched_idx = None;
+                self.play_current().await;
+            }
             EngineEvent::DeviceLost => {
                 self.error("Sortie audio perdue (casque ou périphérique débranché ?). Lecture en pause : appuie sur lecture pour reprendre.");
             }
@@ -1235,6 +1298,12 @@ pub fn apply_edit(queue: &mut Vec<TrackInfo>, index: &mut usize, edit: &QueueEdi
             if *from < queue.len() && *to < queue.len() {
                 let t = queue.remove(*from);
                 queue.insert(*to, t);
+            }
+            *index = *i;
+        }
+        QueueEdit::Update { track, index: i } => {
+            for t in queue.iter_mut().filter(|t| t.id == track.id) {
+                *t = track.clone();
             }
             *index = *i;
         }

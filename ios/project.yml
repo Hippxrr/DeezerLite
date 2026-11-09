@@ -28,6 +28,8 @@ targets:
         UILaunchScreen: {}
         # Le son continue écran verrouillé.
         UIBackgroundModes: [audio]
+        # Partage du récap du mois : « Enregistrer l'image » ajoute la photo (sans ce texte, iOS fermait l'app).
+        NSPhotoLibraryAddUsageDescription: "Enregistrer l'image de ton mois dans Photos."
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         ITSAppUsesNonExemptEncryption: false
         # CarPlay : l'écran de la voiture est une scène à part ; celle du téléphone reste gérée par SwiftUI.

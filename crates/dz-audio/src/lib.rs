@@ -54,6 +54,8 @@ pub enum EngineEvent {
     Error { id: i64, msg: String },
     /// Le périphérique de sortie a disparu (casque débranché…) : la lecture est mise en pause.
     DeviceLost,
+    /// `skip_next` demandé alors qu'aucune piste suivante n'était prête (déjà commencée en fondu…).
+    SkipFailed,
 }
 
 /// État partagé avec le reste de l'application. `paused` et `volume` sont lus directement par le
@@ -78,6 +80,9 @@ pub struct Shared {
     pub levels_on: AtomicBool,
     /// Niveaux (efficaces) des graves, médiums et aigus du dernier bloc joué (bits f32), avant volume et égaliseur.
     pub levels: [AtomicU32; 3],
+    /// Plus rien à jouer dans le moteur (dernier titre fini, ou titre impossible à ouvrir) : une reprise ne ferait rien,
+    /// le lecteur doit recharger le titre.
+    pub idle: AtomicBool,
 }
 
 impl Default for Shared {
@@ -95,6 +100,7 @@ impl Default for Shared {
             out_info: Mutex::new(String::new()),
             levels_on: AtomicBool::new(false),
             levels: [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
+            idle: AtomicBool::new(false),
         }
     }
 }
@@ -108,6 +114,8 @@ enum Cmd {
     Stop,
     /// Oublie la piste suivante préchargée (la file d'attente a changé).
     ClearNext,
+    /// Passe tout de suite à la piste suivante préchargée (sans la retélécharger) ; `SkipFailed` s'il n'y en a pas.
+    SkipNext,
     /// Choisit le périphérique de sortie (`None` = périphérique par défaut du système).
     SetDevice(Option<String>),
     /// Rouvre la sortie actuelle (iOS : après un appel ou un redémarrage du service audio, l'ancienne est arrêtée sans erreur).
@@ -151,6 +159,7 @@ impl Engine {
     pub fn seek(&self, ms: u64) { let _ = self.tx.send(Cmd::Seek(ms)); }
     pub fn stop(&self) { let _ = self.tx.send(Cmd::Stop); }
     pub fn clear_next(&self) { let _ = self.tx.send(Cmd::ClearNext); }
+    pub fn skip_next(&self) { let _ = self.tx.send(Cmd::SkipNext); }
     /// Fondu enchaîné entre deux pistes (0 à 12 s ; 0 = enchaînement sans coupure classique).
     pub fn set_crossfade(&self, ms: u64) { self.shared.crossfade_ms.store(ms.min(12_000), Ordering::Relaxed); }
     /// Gain en décibels (−10 à +12 dB) : négatif = son plus faible. Au-delà de 0 dB, un limiteur doux évite l'écrêtage brutal.
@@ -312,6 +321,10 @@ struct Renderer {
     eq: EqState,
     bands: Bands,
     channels: usize,
+    /// Pause au bloc précédent : le passage pause / lecture se fait en fondu (sinon un petit clic).
+    was_paused: bool,
+    /// Durée du fondu en trames (5 ms).
+    ramp: usize,
     /// iPhone : trames entrelacées le temps de les séparer en gauche / droite (alloué une fois, à la création).
     #[cfg(target_os = "ios")]
     scratch: Vec<f32>,
@@ -325,6 +338,8 @@ impl Renderer {
             eq: EqState::new(rate, channels),
             bands: Bands::new(rate),
             channels,
+            was_paused: false,
+            ramp: (rate as usize / 200).max(1),
             #[cfg(target_os = "ios")]
             scratch: vec![0.0; 4096 * channels.max(1)],
         }
@@ -333,7 +348,7 @@ impl Renderer {
     /// Remplit `data` (échantillons entrelacés). `silence` et `conv` : le format d'échantillon de la sortie.
     #[inline]
     fn render<T: Copy>(&mut self, data: &mut [T], silence: T, conv: impl Fn(f32) -> T) {
-        let Self { cons, ctl, eq, bands, channels, .. } = self;
+        let Self { cons, ctl, eq, bands, channels, was_paused, ramp, .. } = self;
         let req = ctl.flush_req.load(Ordering::Acquire);
         if req != ctl.flush_ack.load(Ordering::Relaxed) {
             while cons.pop().is_ok() {}
@@ -341,11 +356,18 @@ impl Renderer {
             data.fill(silence);
             return;
         }
-        if ctl.shared.paused.load(Ordering::Relaxed) {
+        let paused = ctl.shared.paused.load(Ordering::Relaxed);
+        if paused && *was_paused {
             data.fill(silence);
             bands.publish_silence(&ctl.shared);
             return;
         }
+        // Pause qui commence : le son descend à zéro en 5 ms, puis silence (le reste du tampon est gardé pour la reprise).
+        // Reprise : il remonte en 5 ms. Sans ce fondu, la coupure nette faisait parfois un petit clic.
+        let fade_out = paused;
+        let fade_in = !paused && *was_paused;
+        *was_paused = paused;
+        let ramp = (*ramp).max(1);
         let measure = ctl.shared.levels_on.load(Ordering::Relaxed);
         let vol = f32::from_bits(ctl.shared.volume.load(Ordering::Relaxed)) * f32::from_bits(ctl.shared.boost.load(Ordering::Relaxed));
         eq.set(std::array::from_fn(|i| ctl.shared.eq[i].load(Ordering::Relaxed)));
@@ -358,15 +380,20 @@ impl Renderer {
         // sans jamais décaler la gauche et la droite.
         let mut starved = false;
         for (i, s) in data.iter_mut().enumerate() {
+            let frame = i / ch;
             if i % ch == 0 && !starved {
-                starved = cons.slots() < ch;
+                starved = (fade_out && frame >= ramp) || cons.slots() < ch;
             }
             match if starved { None } else { cons.pop().ok() } {
                 Some(v) => {
                     if measure {
                         bands.push(v, i % ch == ch - 1, ch);
                     }
-                    let y = eq.process(i % ch, v) * vol;
+                    let mut y = eq.process(i % ch, v) * vol;
+                    if fade_out || fade_in {
+                        let g = (frame as f32 / ramp as f32).min(1.0);
+                        y *= if fade_out { 1.0 - g } else { g };
+                    }
                     *s = conv(if limit { soft_limit(y) } else { y });
                     n += 1;
                 }
@@ -1164,6 +1191,7 @@ impl Worker {
     }
 
     fn start_track(&mut self, track: Track, start_ms: u64) {
+        self.shared.idle.store(false, Ordering::Relaxed);
         self.shared.duration_ms.store(track.duration_ms, Ordering::Relaxed);
         let seq = self.next_seq;
         self.next_seq += 1;
@@ -1196,6 +1224,7 @@ impl Worker {
                     }
                     Err(e) => {
                         // Rien à jouer : la sortie s'arrêtera dans 30 s si le lecteur ne relance rien (voir `idle_stop_at`).
+                        self.shared.idle.store(true, Ordering::Relaxed);
                         self.idle_stop_at = Some(Instant::now() + IDLE_STOP);
                         self.err(id, e.to_string());
                     }
@@ -1217,6 +1246,13 @@ impl Worker {
                 self.next = Some(p);
             }
             Cmd::ClearNext => self.next = None,
+            // Même chose qu'un chargement, avec la piste déjà préparée (et déjà en partie ou entièrement téléchargée).
+            Cmd::SkipNext => match self.next.take() {
+                Some(p) => self.handle(Cmd::Load { id: p.id, src: p.src, ext: p.ext }),
+                None => {
+                    let _ = self.events.send(EngineEvent::SkipFailed);
+                }
+            },
             Cmd::Pause => self.set_paused(true),
             Cmd::Resume => {
                 // Sortie perdue puis reprise : on la rouvre (sur le périphérique disponible) à l'endroit où on s'était arrêté.
@@ -1441,6 +1477,9 @@ impl Worker {
             if let Err(e) = track.fill(ch, 1) {
                 let id = track.id;
                 self.cur = None;
+                // Le suivant préparé est lâché aussi : sinon le moteur ne voyait jamais la fin (ni « fini », ni suivant)
+                // et tournait sur du silence en gardant l'app éveillée. Le lecteur retente ou passe au suivant lui-même.
+                self.next = None;
                 self.fail(id, e);
                 return None;
             }
@@ -1490,6 +1529,7 @@ impl Worker {
             self.segments.clear();
             self.announced = None;
             self.shared.playing.store(false, Ordering::Relaxed);
+            self.shared.idle.store(true, Ordering::Relaxed);
             // Dernier titre joué : la sortie s'arrêtera dans 30 s si rien n'est relancé d'ici là (voir `idle_stop_at`).
             self.idle_stop_at = Some(Instant::now() + IDLE_STOP);
             let _ = self.events.send(EngineEvent::Finished { id });

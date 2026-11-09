@@ -196,6 +196,7 @@ struct SearchView: View {
             searching = false
             return
         }
+        failed = false
         pending = Task {
             try? await Task.sleep(for: delay)
             guard !Task.isCancelled else { return }

@@ -11,10 +11,19 @@ enum GlassBarMetrics {
     /// Écart entre les ronds et le mini-lecteur quand la barre est réduite.
     static let foldedGap: CGFloat = 10
 
-    /// Place à laisser sous les pages, au-dessus de la zone sûre du bas (34 points) : la fin des listes reste accessible.
+    /// Place à laisser sous les pages, au-dessus de la zone sûre du bas : la fin des listes reste accessible. La barre est
+    /// posée à `bottom` du bord de l'écran ; la zone sûre vaut 34 points sur les iPhone sans bouton, 0 avec (iPhone SE),
+    /// où la fin des listes restait cachée sous la barre.
+    @MainActor
     static func pageSpace(mini: Bool) -> CGFloat {
-        let bar = barHeight + bottom - 34 + 8
+        let bar = max(0, barHeight + bottom - safeBottom) + 8
         return mini ? bar + small + gap : bar
+    }
+
+    @MainActor
+    private static var safeBottom: CGFloat {
+        let windows = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+        return (windows.first(where: \.isKeyWindow) ?? windows.first)?.safeAreaInsets.bottom ?? 34
     }
 }
 

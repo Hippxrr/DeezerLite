@@ -273,10 +273,10 @@ struct MainTabs: View {
     private var ownTabs: some View {
         ZStack {
             ownPage(0, TabStack(active: tab == 0, popRequest: homePop) { HomeView() })
-            if visited.contains(1) {
+            if visited.contains(1) || tab == 1 {
                 ownPage(1, TabStack(active: tab == 1, popRequest: searchFocus) { SearchView(focusRequest: searchFocus) })
             }
-            if visited.contains(2) {
+            if visited.contains(2) || tab == 2 {
                 ownPage(2, TabStack(active: tab == 2, popRequest: libraryPop) { LibraryView() })
             }
             VStack {
@@ -289,6 +289,7 @@ struct MainTabs: View {
         }
         .background(ScrollCollapse(active: !player.showFullPlayer && (player.current != nil || player.loading),
                                    collapsed: barCollapsed) { barCollapsed = $0 })
+        .onChange(of: player.current == nil && !player.loading) { _, empty in if empty { barCollapsed = false } }
     }
 
     @ViewBuilder

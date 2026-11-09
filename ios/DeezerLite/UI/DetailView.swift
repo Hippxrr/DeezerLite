@@ -127,9 +127,11 @@ struct DetailView: View {
 
     /// Toute la liste dans l'ordre choisi (gardée en mémoire, voir `SortedTracks`).
     private func full(_ d: Detail) -> [Track] {
-        let first = d.tracks.first?.id ?? 0
-        let last = d.tracks.last?.id ?? 0
-        return sorted.get("\(d.kind)|\(d.id)|\(d.tracks.count)|\(first)|\(last)|\(sortRaw)|\(sortReversed)") {
+        // Empreinte de tous les titres, dans l'ordre : une playlist réordonnée ou modifiée au milieu n'est plus confondue
+        // avec l'ancienne (même nombre de titres, mêmes extrémités), qui restait affichée et jouée.
+        var print = Hasher()
+        for t in d.tracks { print.combine(t.id) }
+        return sorted.get("\(d.kind)|\(d.id)|\(d.tracks.count)|\(print.finalize())|\(sortRaw)|\(sortReversed)") {
             sort.apply(d.tracks, reversed: sortReversed)
         }
     }
