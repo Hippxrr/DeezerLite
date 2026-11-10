@@ -275,7 +275,9 @@ struct MainTabs: View {
                 tabLabel(tr("Recherche"), Image(systemName: "magnifyingglass"))
             }
         }
-        .tabBarMinimizeBehavior(.onScrollDown)
+        // Réduite en défilant seulement quand le mini-lecteur est là (elle lui fait de la place) : sans titre en cours,
+        // la barre restait sinon réduite à l'onglet ouvert, bibliothèque cachée, pour rien.
+        .tabBarMinimizeBehavior(player.current != nil || player.loading ? .onScrollDown : .never)
         .tabViewBottomAccessory(isEnabled: player.current != nil || player.loading) {
             BarMiniPlayer().environment(player)
         }
