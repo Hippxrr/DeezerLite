@@ -326,7 +326,7 @@ profile also includes the CarPlay entitlement.
 ### Versioning
 
 The app version is fixed in the code: `MARKETING_VERSION` in `ios/project.yml`, currently **2.4.0**. A build made
-on the Mac always carries that version, there is nothing to choose. To release a new version, change that line.
+on the Mac always carries that version, there is nothing to choose.
 
 ### If something goes wrong
 
