@@ -129,9 +129,9 @@ struct DetailView: View {
     private func full(_ d: Detail) -> [Track] {
         // Empreinte de tous les titres, dans l'ordre : une playlist réordonnée ou modifiée au milieu n'est plus confondue
         // avec l'ancienne (même nombre de titres, mêmes extrémités), qui restait affichée et jouée.
-        var print = Hasher()
-        for t in d.tracks { print.combine(t.id) }
-        return sorted.get("\(d.kind)|\(d.id)|\(d.tracks.count)|\(print.finalize())|\(sortRaw)|\(sortReversed)") {
+        var fingerprint = Hasher()
+        for t in d.tracks { fingerprint.combine(t.id) }
+        return sorted.get("\(d.kind)|\(d.id)|\(d.tracks.count)|\(fingerprint.finalize())|\(sortRaw)|\(sortReversed)") {
             sort.apply(d.tracks, reversed: sortReversed)
         }
     }

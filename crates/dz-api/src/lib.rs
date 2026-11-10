@@ -214,7 +214,11 @@ impl DeezerClient {
             .use_rustls_tls()
             .http2_adaptive_window(true)
             .pool_max_idle_per_host(2)
-            .pool_idle_timeout(std::time::Duration::from_secs(60))
+            // Téléphone : la radio (4G/5G, Wi-Fi) reste allumée une dizaine de secondes après chaque échange. Une connexion
+            // inactive est fermée dans ce délai, pendant que la radio est encore allumée. Gardée 60 s, elle recevait plus
+            // tard un paquet de maintien (TCP) puis sa fermeture, qui réveillaient la radio pour rien entre deux titres
+            // (les requêtes suivantes arrivent de toute façon des minutes plus tard, sur une connexion neuve).
+            .pool_idle_timeout(std::time::Duration::from_secs(10))
             .connect_timeout(std::time::Duration::from_secs(10))
             .read_timeout(std::time::Duration::from_secs(20))
             // Changement de réseau (Wi-Fi <-> 4G/5G, mise en veille) : une connexion restée sur l'ancien réseau est
@@ -222,7 +226,8 @@ impl DeezerClient {
             .http2_keep_alive_interval(std::time::Duration::from_secs(15))
             .http2_keep_alive_timeout(std::time::Duration::from_secs(5))
             .http2_keep_alive_while_idle(false)
-            .tcp_keepalive(std::time::Duration::from_secs(30))
+            // Plus long que la vie d'une connexion inactive (10 s) : il ne sert que pendant un long téléchargement.
+            .tcp_keepalive(std::time::Duration::from_secs(75))
             .build()?)
     }
 

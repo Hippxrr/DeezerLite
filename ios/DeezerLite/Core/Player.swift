@@ -114,12 +114,14 @@ final class Player {
         kind == "loved" ? 0 : id
     }
 
-    /// Qualité qui convient au réseau du moment ; le titre en cours n'est rechargé (à la même position) que si elle change.
-    private func applyQuality() {
+    /// Qualité qui convient au réseau du moment. `reload` : choix fait dans les réglages, le titre en cours est rechargé
+    /// tout de suite (à la même position). Changement de réseau : la qualité vaut à partir du titre suivant, sans
+    /// retélécharger celui en cours.
+    private func applyQuality(reload: Bool = false) {
         let wanted = onCellular ? cellularQuality : quality
         guard wanted != appliedQuality else { return }
         appliedQuality = wanted
-        attempt { try $0.setQuality(quality: wanted) }
+        attempt { try $0.setQuality(quality: wanted, reload: reload) }
     }
 
     /// Passage Wi-Fi <-> 4G/5G : la qualité suit le réseau. Les connexions restées sur l'ancien réseau sont repérées
@@ -170,13 +172,13 @@ final class Player {
     func setQuality(_ q: AudioQuality) {
         quality = q
         UserDefaults.standard.set(Player.raw(q), forKey: "quality")
-        applyQuality()
+        applyQuality(reload: true)
     }
 
     func setCellularQuality(_ q: AudioQuality) {
         cellularQuality = q
         UserDefaults.standard.set(Player.raw(q), forKey: "cellularQuality")
-        applyQuality()
+        applyQuality(reload: true)
     }
 
     func setDownloadQuality(_ q: AudioQuality) {
@@ -1883,6 +1885,8 @@ final class Player {
             status = s
             statusAt = Date()
         case .error(let m):
+            // Titre demandé impossible à charger : le cœur reste sur l'ancien, l'affichage aussi.
+            awaiting = nil
             // Le titre demandé n'a pas pu être chargé : le cœur revient au titre qui joue encore (événements
             // QueueIndex et Track) ; on abandonne aussi la rafale de suivant / précédent en cours.
             loading = false
@@ -1907,6 +1911,9 @@ final class Player {
         case .queue(let tracks, let index):
             queue = tracks
             queueIndex = Int(index)
+            // Nouvelle file (autre album, playlist…) : un titre demandé dans l'ancienne n'est plus attendu (sinon le
+            // « suivant » d'après partait de son index, dans la nouvelle file, pendant 20 s).
+            awaiting = nil
         case .queueIndex(let index):
             if queueIndex != Int(index) { queueIndex = Int(index) }
             if awaiting?.index == Int(index) { awaiting = nil } // titre demandé confirmé

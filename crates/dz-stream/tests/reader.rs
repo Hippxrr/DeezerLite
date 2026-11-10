@@ -245,3 +245,100 @@ fn network_cut_resumes_even_when_the_server_ignores_range() {
     assert!(out[..full].iter().zip(&body).all(|(a, b)| *a == b ^ 0xFF), "chaque bloc déchiffré avec le bon numéro");
     assert_eq!(&out[full..], &body[full..]);
 }
+
+/// Serveur lent (environ 400 Ko/s) qui sert chaque connexion dans son propre fil, avec ou sans prise en charge de `Range`.
+/// Renvoie l'adresse et la liste des débuts de requête reçus.
+fn serve_slow(body: Vec<u8>, honor_range: bool) -> (String, Arc<std::sync::Mutex<Vec<u64>>>) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    let starts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = starts.clone();
+    let body = Arc::new(body);
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            let body = body.clone();
+            let seen = seen.clone();
+            std::thread::spawn(move || {
+                let mut s = s;
+                let mut buf = [0u8; 2048];
+                let n = s.read(&mut buf).unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+                let from = req
+                    .lines()
+                    .find_map(|l| l.strip_prefix("range: bytes=").map(|r| r.trim_end_matches('-').trim().parse::<usize>().unwrap_or(0)))
+                    .filter(|_| honor_range)
+                    .unwrap_or(0);
+                seen.lock().unwrap().push(from as u64);
+                let head = if from > 0 {
+                    format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n",
+                        body.len() - from, from, body.len() - 1, body.len()
+                    )
+                } else {
+                    format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())
+                };
+                if s.write_all(head.as_bytes()).is_err() {
+                    return;
+                }
+                for part in body[from..].chunks(8 * 1024) {
+                    if s.write_all(part).is_err() {
+                        return; // connexion fermée par le lecteur (saut ailleurs, fin)
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            });
+        }
+    });
+    (format!("http://{addr}/t.flac"), starts)
+}
+
+fn big_body() -> Vec<u8> {
+    (0..3_000_000u32).map(|i| (i.wrapping_mul(7) % 253) as u8).collect()
+}
+
+#[test]
+fn far_seek_restarts_the_download_there_and_fills_the_gap_afterwards() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let body = big_body();
+    let (url, starts) = serve_slow(body.clone(), true);
+    let mut r = StreamReader::spawn(rt.handle(), reqwest::Client::new(), url, Arc::new(Xor));
+    assert!(r.is_seekable());
+
+    // Saut à 90 % : au rythme du serveur, il faudrait ~7 s pour y arriver dans l'ordre.
+    let target = 2_700_001u64;
+    let t = std::time::Instant::now();
+    r.seek(SeekFrom::Start(target)).unwrap();
+    let mut b = [0u8; 64];
+    r.read_exact(&mut b).unwrap();
+    assert!(t.elapsed() < Duration::from_secs(2), "saut servi en {:?}", t.elapsed());
+    let at = target as usize;
+    let expect: Vec<u8> = (at..at + 64).map(|i| if i / CHUNK < body.len() / CHUNK { body[i] ^ 0xFF } else { body[i] }).collect();
+    assert_eq!(b.to_vec(), expect, "bon déchiffrement après le saut (numéro de bloc recalculé)");
+    let requested = starts.lock().unwrap().clone();
+    assert!(requested.contains(&(target / CHUNK as u64 * CHUNK as u64)), "relancé au bloc du saut : {requested:?}");
+
+    // Puis tout le titre, depuis le début : le trou laissé avant le saut est comblé.
+    r.seek(SeekFrom::Start(0)).unwrap();
+    let mut out = Vec::new();
+    r.read_to_end(&mut out).unwrap();
+    assert_eq!(out.len(), body.len());
+    let full = body.len() / CHUNK * CHUNK;
+    assert!(out[..full].iter().zip(&body).all(|(a, b)| *a == b ^ 0xFF));
+    assert_eq!(&out[full..], &body[full..]);
+}
+
+#[test]
+fn far_seek_waits_normally_when_the_server_cannot_resume() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let body: Vec<u8> = big_body()[..600_000].to_vec();
+    let (url, _) = serve_slow(body.clone(), false);
+    let mut r = StreamReader::spawn(rt.handle(), reqwest::Client::new(), url, Arc::new(Passthrough));
+    r.seek(SeekFrom::Start(590_000)).unwrap();
+    let mut b = [0u8; 100];
+    r.read_exact(&mut b).unwrap();
+    assert_eq!(b.to_vec(), body[590_000..590_100].to_vec());
+    r.seek(SeekFrom::Start(0)).unwrap();
+    let mut out = Vec::new();
+    r.read_to_end(&mut out).unwrap();
+    assert_eq!(out, body);
+}

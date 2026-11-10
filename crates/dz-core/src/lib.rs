@@ -77,7 +77,9 @@ pub enum PlayerCmd {
     Close,
     Volume(f32),
     /// Change la qualité ; la piste en cours est rechargée à la même position.
-    Quality(Quality),
+    /// `reload` : recharger tout de suite le titre en cours dans la nouvelle qualité (choix de l'utilisateur) ; sinon
+    /// elle vaut à partir du titre suivant (changement de réseau).
+    Quality { quality: Quality, reload: bool },
     Shuffle(bool),
     Repeat(RepeatMode),
     /// Envoie à Deezer les écoutes gardées faute de réseau (retour du réseau, session ouverte).
@@ -216,7 +218,7 @@ pub fn spawn_player(
         cmd_tx, flow: false, flow_fetching: false,
         api, decryptors, offline, engine, events, changed, snap: snapshot,
         quality: Quality::Flac, shuffle: false, repeat: RepeatMode::Off, original: Vec::new(), rng: seed(), prefetched_idx: None, retries: 0, recover_at: None, queue: Vec::new(), index: 0, infos: HashMap::new(), prefetched: None, enriched: std::collections::HashSet::new(), covers_checked: std::collections::HashSet::new(),
-        formats: HashMap::new(), listen: None, restart: false, reload_id: None, streams: Vec::new(),
+        formats: HashMap::new(), listen: None, restart: false, reload_id: None, listens_waiting: false, streams: Vec::new(),
     };
     tokio::spawn(actor.run(rx, erx));
     handle
@@ -261,6 +263,8 @@ struct Actor {
     restart: bool,
     /// Titre rechargé à la même position (coupure réseau, changement de qualité) : la même écoute continue.
     reload_id: Option<i64>,
+    /// Écoutes terminées, déjà gardées sur le disque, dont l'envoi attend le prochain échange réseau (voir `finish_listen`).
+    listens_waiting: bool,
     /// Flux réseau confiés au moteur audio (titre en cours, suivant préchargé). Le moteur lit et traite les commandes
     /// sur le même thread : une lecture bloquée sur un réseau figé le rendait sourd (suivant, stop) jusqu'à ~1 min.
     /// Ils sont annulés quand ils sont remplacés ou arrêtés, ce qui rend la main au moteur tout de suite.
@@ -499,6 +503,10 @@ impl Actor {
                 }
             }
             self.track_listen();
+            // Plus rien ne joue (pause, arrêt, fin de file, erreur) : les écoutes en attente partent tout de suite.
+            if self.listens_waiting && !self.engine.shared.playing.load(Ordering::Relaxed) {
+                self.flush_waiting_listens();
+            }
             self.changed.notify_waiters();
         }
     }
@@ -553,13 +561,21 @@ impl Actor {
     /// Écoute terminée : signalée si le titre a joué assez longtemps. Elle est d'abord écrite dans la file sur le disque
     /// (en remplaçant celle mise de côté, dans la même écriture), puis envoyée, et retirée de la file une fois partie :
     /// une app fermée juste après un changement de titre, sans réseau, ne perd plus l'écoute.
-    fn finish_listen(&self, done: Listen) {
+    fn finish_listen(&mut self, done: Listen) {
         let counts = done.counts();
         match &self.offline {
             Some(store) => {
                 let queued = store.close_listen(counts.then(|| done.pending()), done.generation).unwrap_or(false);
                 if queued {
-                    tokio::spawn(flush_listens(self.api.clone(), store.clone()));
+                    if self.engine.shared.playing.load(Ordering::Relaxed) {
+                        // La lecture continue (titre suivant) : l'écoute, déjà gardée sur le disque, part avec la
+                        // préparation du titre suivant, quand la radio du téléphone est déjà allumée. Envoyée seule au
+                        // changement de titre, elle la rallumait à chaque titre. Ce qui compte n'est pas changé : seul le
+                        // moment de l'envoi l'est (une à quelques minutes plus tard), et elle n'est jamais perdue.
+                        self.listens_waiting = true;
+                    } else {
+                        tokio::spawn(flush_listens(self.api.clone(), store.clone()));
+                    }
                 }
             }
             // Sans stockage (pas de téléchargements) : envoi direct, comme avant.
@@ -567,6 +583,15 @@ impl Actor {
                 tokio::spawn(send_listen(self.api.clone(), None, done.pending(), done.generation));
             }
             None => {}
+        }
+    }
+
+    /// Envoie les écoutes gardées en attente (voir `finish_listen`).
+    fn flush_waiting_listens(&mut self) {
+        if std::mem::take(&mut self.listens_waiting) {
+            if let Some(store) = self.offline.clone() {
+                tokio::spawn(flush_listens(self.api.clone(), store));
+            }
         }
     }
 
@@ -754,7 +779,7 @@ impl Actor {
             }
             PlayerCmd::Seek { ms } => self.engine.seek(ms),
             PlayerCmd::Volume(v) => self.engine.set_volume(v),
-            PlayerCmd::Quality(q) => {
+            PlayerCmd::Quality { quality: q, reload } => {
                 if q == self.quality {
                     return;
                 }
@@ -765,8 +790,10 @@ impl Actor {
                 // Titre Deezer qui joue : rechargé dans la nouvelle qualité, à la même position. En pause (ou coupé par
                 // un appel), il n'est pas rechargé : le rechargement relançait la musique toute seule, par exemple en
                 // passant du Wi-Fi à la 4G. La nouvelle qualité vaut alors à partir du titre suivant.
+                // Changement de réseau (Wi-Fi <-> 4G) : le titre en cours, en général déjà entièrement téléchargé, n'est pas
+                // retéléchargé dans l'autre qualité (en 4G, c'était jusqu'à 30 Mo de données et de radio pour rien).
                 let paused = self.engine.shared.paused.load(Ordering::Relaxed);
-                let playing_deezer = !paused && self
+                let playing_deezer = reload && !paused && self
                     .queue
                     .get(self.index)
                     .is_some_and(|&id| {
@@ -1273,7 +1300,13 @@ impl Actor {
                     keep
                 });
                 self.streams.extend(r.cancel.map(|c| (next, c)));
-                self.engine.queue_next(next, r.src, r.ext)
+                self.engine.queue_next(next, r.src, r.ext);
+                self.flush_waiting_listens();
+                // Fiche complète (artistes) et vérification de la pochette du titre suivant : faites maintenant, pendant
+                // son téléchargement, plutôt qu'au changement de titre. Les échanges réseau sont regroupés, la radio se
+                // réveille moins souvent.
+                self.maybe_enrich(next);
+                self.check_cover(next);
             }
             Err(e) => self.error(format!("préchargement: {e}")),
         }
@@ -1355,6 +1388,7 @@ mod tests {
             listen: None,
             restart: false,
             reload_id: None,
+            listens_waiting: false,
             streams: Vec::new(),
         }
     }

@@ -8,7 +8,7 @@
 use std::io::{self, Read, Seek, SeekFrom};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use symphonia::core::io::MediaSource;
 use tokio::runtime::Handle;
 
@@ -79,22 +79,20 @@ impl Store {
         Ok(file)
     }
 
-    fn len(&self) -> u64 {
-        match self {
-            Store::Disk { len, .. } => *len,
-            Store::Mem(v) => v.len() as u64,
-        }
-    }
-
-    fn append(&mut self, buf: &[u8]) -> io::Result<()> {
+    /// Écrit `buf` à la position `pos` (n'importe où : après un saut, le titre arrive par morceaux).
+    fn write_at(&mut self, pos: u64, buf: &[u8]) -> io::Result<()> {
+        let end = pos + buf.len() as u64;
         match self {
             Store::Mem(v) => {
-                v.extend_from_slice(buf);
+                if (v.len() as u64) < end {
+                    v.resize(end as usize, 0);
+                }
+                v[pos as usize..end as usize].copy_from_slice(buf);
                 Ok(())
             }
             Store::Disk { file, len } => {
-                write_all_at(file, buf, *len)?;
-                *len += buf.len() as u64;
+                write_all_at(file, buf, pos)?;
+                *len = (*len).max(end);
                 Ok(())
             }
         }
@@ -154,6 +152,17 @@ fn read_exact_at(f: &std::fs::File, buf: &mut [u8], off: u64) -> io::Result<()> 
 
 struct State {
     data: Store,
+    /// Plages déjà reçues et déchiffrées `[début, fin)`, triées et disjointes. Le titre peut arriver par morceaux :
+    /// un saut loin devant relance le téléchargement à cet endroit, les trous sont comblés ensuite.
+    ranges: Vec<(u64, u64)>,
+    /// Position où le téléchargement en cours écrit (alignée sur CHUNK).
+    cursor: u64,
+    /// Position demandée par le lecteur (saut loin devant, ou dans un trou), à télécharger tout de suite.
+    want: Option<u64>,
+    /// Position vers laquelle le téléchargement est en train d'être relancé.
+    seeking_to: Option<u64>,
+    /// Le serveur ne sait pas reprendre au milieu : plus de saut, on attend le téléchargement dans l'ordre.
+    no_seek: bool,
     total: Option<u64>,
     /// Les en-têtes HTTP sont arrivés (ou la requête a échoué) : `total` est définitif.
     headers: bool,
@@ -166,13 +175,69 @@ struct State {
 
 impl Default for State {
     fn default() -> Self {
-        Self { data: Store::new(), total: None, headers: false, done: false, closed: false, cancelled: false, err: None }
+        Self {
+            data: Store::new(),
+            ranges: Vec::new(),
+            cursor: 0,
+            want: None,
+            seeking_to: None,
+            no_seek: false,
+            total: None,
+            headers: false,
+            done: false,
+            closed: false,
+            cancelled: false,
+            err: None,
+        }
+    }
+}
+
+/// Saut plus proche que ça de l'endroit en cours de téléchargement : on attend qu'il y arrive, c'est plus rapide qu'une
+/// nouvelle requête.
+const NEAR: u64 = 512 * 1024;
+
+impl State {
+    /// Octets disponibles d'un seul tenant à partir de `pos`.
+    fn available_at(&self, pos: u64) -> u64 {
+        self.ranges.iter().find(|(start, end)| *start <= pos && pos < *end).map_or(0, |(_, end)| end - pos)
+    }
+
+    /// Enregistre `[start, end)` comme reçu, en fusionnant avec les plages voisines. Renvoie la fin de la plage
+    /// fusionnée qui contient `start`.
+    fn add_range(&mut self, start: u64, end: u64) -> u64 {
+        let (mut start, mut end) = (start, end);
+        self.ranges.retain(|&(s, e)| {
+            if e < start || s > end {
+                true
+            } else {
+                start = start.min(s);
+                end = end.max(e);
+                false
+            }
+        });
+        let at = self.ranges.partition_point(|&(s, _)| s < start);
+        self.ranges.insert(at, (start, end));
+        end
+    }
+
+    /// Premier octet pas encore reçu (`None` : titre complet).
+    fn first_gap(&self, total: u64) -> Option<u64> {
+        let mut expected = 0;
+        for &(start, end) in &self.ranges {
+            if start > expected {
+                return Some(expected);
+            }
+            expected = expected.max(end);
+        }
+        (expected < total).then_some(expected)
     }
 }
 
 struct Inner {
     state: Mutex<State>,
     cv: Condvar,
+    /// Réveille la tâche de téléchargement (le lecteur demande un saut).
+    wake: tokio::sync::Notify,
     /// Tâche de téléchargement, arrêtée tout de suite à l'annulation (sans attendre le paquet suivant).
     task: Mutex<Option<tokio::task::AbortHandle>>,
 }
@@ -238,16 +303,20 @@ pub struct StreamReader {
 impl StreamReader {
     /// Démarre le téléchargement sur le runtime `rt` et renvoie immédiatement.
     ///
-    /// TODO(seek lointain) : si `pos` dépasse largement `downloaded`, relancer la requête avec
-    /// `Range: bytes=<aligné sur CHUNK>-` plutôt que d'attendre. Le déchiffreur indexé par
-    /// bloc rend ça possible sans état.
+    /// Un saut loin devant (ou dans un trou) relance le téléchargement à cet endroit (`Range: bytes=<aligné sur
+    /// CHUNK>-`, déchiffrement repris au bloc `position / CHUNK`) au lieu d'attendre que tout ce qui précède arrive.
     pub fn spawn(
         rt: &Handle,
         http: reqwest::Client,
         url: String,
         dec: Arc<dyn ChunkDecryptor>,
     ) -> Self {
-        let inner = Arc::new(Inner { state: Mutex::new(State::default()), cv: Condvar::new(), task: Mutex::new(None) });
+        let inner = Arc::new(Inner {
+            state: Mutex::new(State::default()),
+            cv: Condvar::new(),
+            wake: tokio::sync::Notify::new(),
+            task: Mutex::new(None),
+        });
         let task_inner = inner.clone();
         let handle = rt.spawn(async move {
             let _end = TaskEnd(task_inner.clone());
@@ -280,8 +349,15 @@ impl StreamReader {
 
     /// Octets déjà disponibles (pour piloter le préchargement / la jauge de buffer).
     pub fn buffered(&self) -> u64 {
-        self.inner.lock().map(|s| s.data.len()).unwrap_or(0)
+        self.inner.lock().map(|s| s.available_at(0)).unwrap_or(0)
     }
+}
+
+/// Ce qui réveille la boucle de téléchargement.
+enum Event {
+    Data(Option<reqwest::Result<bytes::Bytes>>),
+    Switched(Option<ByteStream>),
+    Wake,
 }
 
 async fn pump(
@@ -291,97 +367,203 @@ async fn pump(
     dec: Arc<dyn ChunkDecryptor>,
 ) -> Result<(), StreamError> {
     let resp = http.get(url).send().await?.error_for_status()?;
+    let total = resp.content_length();
     {
         let mut st = inner.lock()?;
-        st.total = resp.content_length();
+        st.total = total;
         st.headers = true;
     }
     inner.cv.notify_all();
 
-    let mut stream = resp.bytes_stream().boxed();
+    let mut stream: Option<ByteStream> = Some(resp.bytes_stream().boxed());
+    // Position du flux en cours de réception (toujours alignée sur CHUNK : seuls des blocs complets sont écrits).
+    let mut cursor = 0u64;
     let mut pending: Vec<u8> = Vec::with_capacity(CHUNK * 4);
-    let mut index = 0u64;
     let mut resumes = 0u32;
+    // Relance en cours ailleurs dans le titre : (position, demandée par le lecteur ?, requête). Le flux en cours continue
+    // pendant ce temps : rien n'est perdu si le serveur répond lentement.
+    let mut switching: Option<(u64, bool, futures_util::future::BoxFuture<'static, Option<ByteStream>>)> = None;
 
     loop {
-        let failure: StreamError = match stream.next().await {
-            Some(Ok(bytes)) => {
+        // Saut demandé par le lecteur : relance là-bas (remplace une relance interne en cours).
+        if let Some(target) = take_want(inner)? {
+            if total.is_some() && switching.as_ref().is_none_or(|(t, _, _)| *t != target) {
+                switching = Some((target, true, resume_from(http.clone(), url.to_owned(), target, total, false).boxed()));
+            }
+        }
+        let event = tokio::select! {
+            biased;
+            r = async { (&mut switching.as_mut().expect("relance").2).await }, if switching.is_some() => Event::Switched(r),
+            _ = inner.wake.notified() => Event::Wake,
+            item = async { stream.as_mut().expect("flux").next().await }, if stream.is_some() => Event::Data(item),
+        };
+        let failure: StreamError = match event {
+            Event::Wake => continue,
+            Event::Switched(Some(next)) => {
+                let (target, _, _) = switching.take().expect("relance");
+                stream = Some(next);
+                cursor = target;
+                pending.clear();
+                resumes = 0;
+                let mut st = inner.lock()?;
+                st.cursor = target;
+                st.seeking_to = None;
+                continue;
+            }
+            Event::Switched(None) => {
+                let (_, asked, _) = switching.take().expect("relance");
+                {
+                    let mut st = inner.lock()?;
+                    st.seeking_to = None;
+                    // Le serveur ne sait pas reprendre au milieu : le lecteur attendra le téléchargement dans l'ordre.
+                    if asked {
+                        st.no_seek = true;
+                    }
+                }
+                inner.cv.notify_all();
+                if stream.is_some() {
+                    continue;
+                }
+                StreamError::Truncated
+            }
+            Event::Data(Some(Ok(bytes))) => {
                 pending.extend_from_slice(&bytes);
                 let full = pending.len() / CHUNK * CHUNK;
                 if full == 0 {
                     continue;
                 }
-                // Déchiffrement HORS du verrou.
-                let mut ready: Vec<u8> = pending.drain(..full).collect();
-                for chunk in ready.chunks_exact_mut(CHUNK) {
-                    dec.decrypt_chunk(index, chunk);
-                    index += 1;
+                // Déchiffrement HORS du verrou, en place, avec le numéro de bloc de cette position dans le titre.
+                let first = cursor / CHUNK as u64;
+                for (i, chunk) in pending[..full].chunks_exact_mut(CHUNK).enumerate() {
+                    dec.decrypt_chunk(first + i as u64, chunk);
                 }
-                let mut st = inner.lock()?;
-                if st.closed {
-                    return Ok(());
-                }
-                if let Err(e) = st.data.append(&ready) {
-                    st.err = Some(format!("tampon du flux : {e}"));
-                    drop(st);
-                    inner.cv.notify_all();
-                    return Ok(());
-                }
-                drop(st);
+                let reached = {
+                    let mut st = inner.lock()?;
+                    if st.closed {
+                        return Ok(());
+                    }
+                    if let Err(e) = st.data.write_at(cursor, &pending[..full]) {
+                        st.err = Some(format!("tampon du flux : {e}"));
+                        drop(st);
+                        inner.cv.notify_all();
+                        return Ok(());
+                    }
+                    let reached = st.add_range(cursor, cursor + full as u64);
+                    st.cursor = cursor + full as u64;
+                    reached
+                };
                 inner.cv.notify_all();
+                pending.drain(..full);
+                cursor += full as u64;
                 // Des données sont arrivées : les coupures précédentes ne comptent plus.
                 resumes = 0;
+                // Arrivé sur une partie déjà reçue (après un saut) : on passe à la suivante qui manque.
+                if reached > cursor && switching.is_none() {
+                    if let Some(total) = total {
+                        let next = if reached >= total { inner.lock()?.first_gap(total) } else { Some(reached) };
+                        match next {
+                            Some(next) => switching = Some(start_switch(inner, &http, url, next, total)?),
+                            None => return finish(inner),
+                        }
+                    }
+                }
                 continue;
             }
-            Some(Err(e)) => e.into(),
-            None => {
+            Event::Data(Some(Err(e))) => e.into(),
+            Event::Data(None) => {
                 // Fin du flux : complète, ou connexion fermée proprement avant la fin (le titre s'arrêtait alors
                 // en plein milieu, sans erreur ni reprise).
-                let stored = inner.lock()?.data.len();
-                let received = stored + pending.len() as u64;
-                let total = inner.lock()?.total;
+                let received = cursor + pending.len() as u64;
                 if total.is_some_and(|t| received < t) {
                     StreamError::Truncated
                 } else {
-                    break;
+                    // Dernier bloc partiel : laissé tel quel (non aligné sur CHUNK).
+                    if !pending.is_empty() {
+                        let mut st = inner.lock()?;
+                        if st.closed {
+                            return Ok(());
+                        }
+                        if let Err(e) = st.data.write_at(cursor, &pending) {
+                            st.err = Some(format!("tampon du flux : {e}"));
+                            drop(st);
+                            inner.cv.notify_all();
+                            return Ok(());
+                        }
+                        st.add_range(cursor, received);
+                        drop(st);
+                        inner.cv.notify_all();
+                        pending.clear();
+                    }
+                    stream = None;
+                    // Fin du titre atteinte après un saut : on revient combler ce qui manque avant.
+                    let gap = match total {
+                        Some(total) => inner.lock()?.first_gap(total).map(|gap| (gap, total)),
+                        None => None,
+                    };
+                    match gap {
+                        Some((gap, total)) => {
+                            if switching.is_none() {
+                                switching = Some(start_switch(inner, &http, url, gap, total)?);
+                            }
+                            continue;
+                        }
+                        None => return finish(inner),
+                    }
                 }
             }
         };
 
         // Coupure en cours de route : on reprend là où on en était (requête partielle) au lieu de tout recommencer.
-        // Ce qui est déjà stocké est toujours aligné sur CHUNK : le déchiffrement reprend au bon bloc.
+        // La position est toujours alignée sur CHUNK : le déchiffrement reprend au bon bloc.
+        stream = None;
+        // Une relance est déjà en route (saut) : elle prend le relais.
+        if switching.is_some() {
+            continue;
+        }
         resumes += 1;
-        let (have, total, closed) = {
-            let st = inner.lock()?;
-            (st.data.len(), st.total, st.closed)
-        };
-        if closed {
+        if inner.lock()?.closed {
             return Ok(());
         }
         if resumes > MAX_RESUMES || total.is_none() {
             return Err(failure);
         }
         tokio::time::sleep(std::time::Duration::from_millis(500 * u64::from(resumes))).await;
-        match resume_from(&http, url, have, total).await {
+        match resume_from(http.clone(), url.to_owned(), cursor, total, true).await {
             Some(s) => {
-                stream = s;
+                stream = Some(s);
                 pending.clear();
-                index = have / CHUNK as u64;
             }
             None => return Err(failure),
         }
     }
+}
 
-    // Dernier bloc partiel : laissé tel quel (non aligné sur CHUNK). Un seul verrou : avant, un second `lock()`
-    // dans la branche d'erreur attendait le premier, encore tenu, et bloquait la tâche pour toujours.
-    if !pending.is_empty() {
-        let mut st = inner.lock()?;
-        if !st.closed {
-            if let Err(e) = st.data.append(&pending) {
-                st.err = Some(format!("tampon du flux : {e}"));
-            }
-        }
+/// Saut demandé par le lecteur, s'il y en a un (aligné sur CHUNK).
+fn take_want(inner: &Inner) -> Result<Option<u64>, StreamError> {
+    let mut st = inner.lock()?;
+    let want = st.want.take().map(|pos| pos / CHUNK as u64 * CHUNK as u64);
+    if want.is_some() {
+        st.seeking_to = want;
     }
+    Ok(want)
+}
+
+/// Relance interne (combler un trou) vers `target`.
+fn start_switch(
+    inner: &Inner,
+    http: &reqwest::Client,
+    url: &str,
+    target: u64,
+    total: u64,
+) -> Result<(u64, bool, futures_util::future::BoxFuture<'static, Option<ByteStream>>), StreamError> {
+    inner.lock()?.seeking_to = Some(target);
+    Ok((target, false, resume_from(http.clone(), url.to_owned(), target, Some(total), true).boxed()))
+}
+
+/// Titre entièrement reçu.
+fn finish(inner: &Inner) -> Result<(), StreamError> {
+    inner.lock()?.seeking_to = None;
+    inner.cv.notify_all();
     Ok(())
 }
 
@@ -391,10 +573,12 @@ type ByteStream = futures_util::stream::BoxStream<'static, reqwest::Result<bytes
 /// l'octet demandé (le son serait alors décalé et le déchiffrement faux). Un serveur qui ignore la demande et renvoie
 /// tout le fichier (réponse 200 de la bonne taille : certains CDN et proxys) est accepté : les `from` premiers octets,
 /// déjà reçus, sont sautés. Avant, le titre s'arrêtait là et tout était retéléchargé depuis le début.
-async fn resume_from(http: &reqwest::Client, url: &str, from: u64, total: Option<u64>) -> Option<ByteStream> {
-    let resp = http.get(url).header(reqwest::header::RANGE, format!("bytes={from}-")).send().await.ok()?;
+/// `allow_full` : accepter un serveur qui renvoie tout le fichier (utile après une coupure ; inutile pour un saut, qui
+/// serait alors aussi long que d'attendre).
+async fn resume_from(http: reqwest::Client, url: String, from: u64, total: Option<u64>, allow_full: bool) -> Option<ByteStream> {
+    let resp = http.get(&url).header(reqwest::header::RANGE, format!("bytes={from}-")).send().await.ok()?;
     if resp.status() == reqwest::StatusCode::OK {
-        if total.is_none() || resp.content_length() != total {
+        if !allow_full || total.is_none() || resp.content_length() != total {
             return None;
         }
         return Some(skip_prefix(resp.bytes_stream().boxed(), from));
@@ -449,17 +633,30 @@ impl Read for StreamReader {
             if st.cancelled {
                 return Err(io::Error::other(CANCELLED));
             }
-            let avail = st.data.len();
-            if self.pos < avail {
-                let n = st.data.read_at(self.pos, out)?;
+            let avail = st.available_at(self.pos);
+            if avail > 0 {
+                let len = out.len().min(avail as usize);
+                let n = st.data.read_at(self.pos, &mut out[..len])?;
                 self.pos += n as u64;
                 return Ok(n);
+            }
+            if st.total.is_some_and(|total| self.pos >= total) {
+                return Ok(0);
             }
             if let Some(e) = &st.err {
                 return Err(io::Error::other(e.clone()));
             }
             if st.done {
-                return Ok(0);
+                // Taille inconnue : fin du flux. Sinon, le téléchargement s'est arrêté avant d'arriver ici.
+                return if st.total.is_none() { Ok(0) } else { Err(io::Error::other("flux interrompu avant la fin")) };
+            }
+            // Loin de l'endroit en cours de téléchargement (saut loin devant, ou dans un trou) : relancé ici tout de
+            // suite, au lieu d'attendre que tout ce qui précède arrive.
+            let aligned = self.pos / CHUNK as u64 * CHUNK as u64;
+            let near = st.cursor <= self.pos && self.pos < st.cursor + NEAR;
+            if st.total.is_some() && !st.no_seek && !near && st.want.is_none() && st.seeking_to != Some(aligned) {
+                st.want = Some(self.pos);
+                self.inner.wake.notify_one();
             }
             st = self.inner.cv.wait(st).map_err(|_| io::Error::other("condvar empoisonnée"))?;
         }
@@ -479,7 +676,7 @@ impl Seek for StreamReader {
         if new < 0 {
             return Err(io::Error::from(io::ErrorKind::InvalidInput));
         }
-        // Un seek au-delà de la zone téléchargée est permis : `read` attendra les octets.
+        // Un seek au-delà de la zone téléchargée est permis : `read` relancera le téléchargement à cet endroit.
         self.pos = new as u64;
         Ok(self.pos)
     }

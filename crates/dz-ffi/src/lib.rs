@@ -945,8 +945,9 @@ impl Core {
         Ok(parse_credits(&v))
     }
 
-    pub fn set_quality(&self, quality: AudioQuality) -> Result<(), CoreError> {
-        self.send(PlayerCmd::Quality(quality.into()))
+    /// `reload` : recharger tout de suite le titre en cours (choix de l'utilisateur) ; sinon, à partir du titre suivant.
+    pub fn set_quality(&self, quality: AudioQuality, reload: bool) -> Result<(), CoreError> {
+        self.send(PlayerCmd::Quality { quality: quality.into(), reload })
     }
 
     pub fn set_download_quality(&self, quality: AudioQuality) {
