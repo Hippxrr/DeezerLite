@@ -272,8 +272,20 @@ struct TrackRow: View {
     private static let tapSlop: CGFloat = 16
 
     private func activate() {
+        guard !track.unavailable else { return }
         onPlay?()
         player.play(list, at: index)
+    }
+
+    /// Titre pas encore sorti : sa date de sortie ; retiré : « Indisponible ».
+    private var unavailableLabel: String {
+        let parser = DateFormatter()
+        parser.locale = Locale(identifier: "en_US_POSIX")
+        parser.dateFormat = "yyyy-MM-dd"
+        if let raw = track.releaseDate, let date = parser.date(from: String(raw.prefix(10))), date > Date() {
+            return tr("Sortie le %@", date.formatted(.dateTime.day().month(.abbreviated)))
+        }
+        return tr("Indisponible")
     }
 
     private func drag(_ dx: CGFloat) {
@@ -346,7 +358,7 @@ struct TrackRow: View {
                 }
                 VStack(alignment: .leading, spacing: 3) {
                     Text(track.title).font(.body.weight(.medium)).lineLimit(1).foregroundStyle(isCurrent ? Theme.accent : .primary)
-                    Text(track.artist).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                    Text(track.unavailable ? unavailableLabel : track.artist).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 8)
                 if let update = downloadUpdate {
@@ -365,8 +377,11 @@ struct TrackRow: View {
             }
             .contentShape(Rectangle())
             .animation(.easeOut(duration: 0.2), value: isCurrent)
+            // Pas encore sorti (ou retiré) : grisé, et un appui ne fait rien.
+            .opacity(track.unavailable ? 0.4 : 1)
         }
         .buttonStyle(.pressable)
+        .disabled(track.unavailable)
         // Aperçu de l'appui long aux coins arrondis, comme dans les apps d'Apple (au lieu d'un rectangle découpé net).
         .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 10, style: .continuous))
         .offset(x: swipe)
@@ -384,7 +399,7 @@ struct TrackRow: View {
                     .animation(.easeOut(duration: 0.15), value: ready)
             }
         }
-        .modifier(SwipeRight(enabled: swipeToQueue, onChanged: drag, onEnded: { release(completed: $0) }))
+        .modifier(SwipeRight(enabled: swipeToQueue && !track.unavailable, onChanged: drag, onEnded: { release(completed: $0) }))
         .sensoryFeedback(.impact(weight: .medium), trigger: queued)
         .sensoryFeedback(.selection, trigger: swipe >= Self.swipeThreshold) { _, ready in ready }
         .contextMenu {

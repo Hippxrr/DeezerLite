@@ -193,6 +193,10 @@ pub struct Track {
     pub release_date: Option<String>,
     /// Tous les artistes crédités, dans l'ordre de Deezer (pour « Aller à l'artiste » sur un feat).
     pub artists: Vec<ArtistRef>,
+    /// Pas lisible sur Deezer : titre pas encore sorti (album en prévente, seuls certains titres sont déjà là) ou retiré,
+    /// sans titre de remplacement. L'app le grise et ne le lance pas.
+    #[uniffi(default = false)]
+    pub unavailable: bool,
 }
 
 impl From<&TrackInfo> for Track {
@@ -211,6 +215,7 @@ impl From<&TrackInfo> for Track {
             added_at: t.added_at,
             release_date: t.release_date.clone(),
             artists: t.artists.iter().filter(|a| a.id != 0).map(|a| ArtistRef { id: a.id, name: a.name.clone() }).collect(),
+            unavailable: t.restricted && t.fallback_id.is_none(),
         }
     }
 }

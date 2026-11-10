@@ -1435,6 +1435,19 @@ final class Player {
 
     func play(_ tracks: [Track], at index: Int) {
         guard tracks.indices.contains(index) else { return }
+        // Titres pas encore sortis ou retirés : hors de la file (Deezer les refuse, la lecture s'arrêtait dessus). Le titre
+        // demandé lui-même indisponible (« Lecture » d'un album dont le 1er titre n'est pas sorti) : le suivant lisible.
+        if tracks.contains(where: \.unavailable) {
+            let order = Array(tracks[index...]) + Array(tracks[..<index])
+            guard let start = order.first(where: { !$0.unavailable }) else {
+                showToast(tr("Pas encore disponible sur Deezer"))
+                return
+            }
+            let playable = tracks.filter { !$0.unavailable }
+            guard let at = playable.firstIndex(where: { $0.id == start.id }) else { return }
+            play(playable, at: at)
+            return
+        }
         pendingRestore = nil
         activateOutput()
         current = tracks[index]
