@@ -854,7 +854,10 @@ final class Player {
                     if let observer { NotificationCenter.default.removeObserver(observer) }
                     KeychainAccess.allowWhileLocked()
                     guard let self, !self.sessionReady else { return }
-                    if let core = self.core, self.loggedIn != true, core.hasSavedLogin() { self.showSavedCopy(core) }
+                    if let core = self.core, self.loggedIn != true, core.hasSavedLogin() {
+                        self.loggedIn = true
+                        Task { await self.showSavedCopy(core) }
+                    }
                     Task { await self.restore() }
                 }
             }

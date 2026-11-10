@@ -243,21 +243,29 @@ struct DetailView: View {
         }
     }
 
-    var body: some View {
+    /// Contenu de la page avec sa position gardée quand la loupe s'ouvre ou se ferme (à part de `body` : tout au même
+    /// endroit dépassait ce que le compilateur sait vérifier).
+    private var pageWithPosition: some View {
         pageContent
-        .scrollPosition(id: $scrollIndex, anchor: .top)
-        .onChange(of: scrollIndex) { _, index in
-            // Positions de la liste complète seulement (pas des résultats filtrés), et pas pendant la reconstruction.
-            if query.isEmpty, Date().timeIntervalSince(searchToggledAt) > 0.5 { keptIndex = index }
-        }
-        .onChange(of: searching) {
-            searchToggledAt = Date()
-            let target = keptIndex
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(60))
-                scrollIndex = target
+            .scrollPosition(id: $scrollIndex, anchor: .top)
+            .onChange(of: scrollIndex) { _, index in
+                // Positions de la liste complète seulement (pas des résultats filtrés), et pas pendant la reconstruction.
+                if query.isEmpty, Date().timeIntervalSince(searchToggledAt) > 0.5 { keptIndex = index }
             }
+            .onChange(of: searching) { restorePosition() }
+    }
+
+    private func restorePosition() {
+        searchToggledAt = Date()
+        let target = keptIndex
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(60))
+            scrollIndex = target
         }
+    }
+
+    var body: some View {
+        pageWithPosition
         .scrollDismissesKeyboard(.interactively)
         .background(alignment: .top) {
             LinearGradient(colors: [tint.opacity(colorScheme == .dark ? 0.75 : 0.3), .clear], startPoint: .top, endPoint: .bottom)
