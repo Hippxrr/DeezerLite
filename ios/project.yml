@@ -32,6 +32,10 @@ targets:
           UIColorName: LaunchBackground
         # Le son continue écran verrouillé.
         UIBackgroundModes: [audio]
+        # iPhone ProMotion : les animations de l'app (glissement du mini-lecteur, barre d'onglets, ressorts) peuvent monter
+        # à 120 Hz. Sans cette clé, iOS les bloque à 60 Hz (seul le défilement des listes allait à 120 Hz). L'écran
+        # redescend tout seul quand rien ne bouge : pas de consommation en plus au repos.
+        CADisableMinimumFrameDurationOnPhone: true
         # Partage du récap du mois : « Enregistrer l'image » ajoute la photo (sans ce texte, iOS fermait l'app).
         NSPhotoLibraryAddUsageDescription: "Enregistrer l'image de ton mois dans Photos."
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
