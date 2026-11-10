@@ -586,7 +586,7 @@ dependencies = [
 
 [[package]]
 name = "dz-api"
-version = "0.1.0"
+version = "2.4.0"
 dependencies = [
  "futures-util",
  "reqwest",
@@ -600,7 +600,7 @@ dependencies = [
 
 [[package]]
 name = "dz-audio"
-version = "0.1.0"
+version = "2.4.0"
 dependencies = [
  "cpal",
  "rtrb",
@@ -612,7 +612,7 @@ dependencies = [
 
 [[package]]
 name = "dz-core"
-version = "0.1.0"
+version = "2.4.0"
 dependencies = [
  "dz-api",
  "dz-audio",
@@ -625,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "dz-decrypt"
-version = "0.1.0"
+version = "2.4.0"
 dependencies = [
  "blowfish",
  "dz-stream",
@@ -634,7 +634,7 @@ dependencies = [
 
 [[package]]
 name = "dz-ffi"
-version = "0.1.0"
+version = "2.4.0"
 dependencies = [
  "dz-api",
  "dz-audio",
@@ -651,7 +651,7 @@ dependencies = [
 
 [[package]]
 name = "dz-offline"
-version = "0.1.0"
+version = "2.4.0"
 dependencies = [
  "dz-api",
  "dz-decrypt",
@@ -666,7 +666,7 @@ dependencies = [
 
 [[package]]
 name = "dz-stream"
-version = "0.1.0"
+version = "2.4.0"
 dependencies = [
  "bytes",
  "futures-util",
@@ -2621,7 +2621,7 @@ dependencies = [
 
 [[package]]
 name = "uniffi-bindgen"
-version = "0.1.0"
+version = "2.4.0"
 dependencies = [
  "uniffi",
 ]
