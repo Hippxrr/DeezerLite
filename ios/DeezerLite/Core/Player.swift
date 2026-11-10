@@ -861,23 +861,45 @@ final class Player {
         }
         // Déjà connecté : l'app s'ouvre tout de suite sur la dernière copie (accueil, bibliothèque),
         // pendant que la session Deezer s'ouvre en arrière-plan.
-        if let core, core.hasSavedLogin() { showSavedCopy(core) }
+        if let core, core.hasSavedLogin() {
+            loggedIn = true
+            if resumeOnLaunch, let last = LastSession.load() { showLastSession(last) }
+            Task { await showSavedCopy(core) }
+        } else {
+            launchReady = true
+        }
         Task { await restore() }
     }
 
-    private func showSavedCopy(_ core: Core) {
-        loggedIn = true
-        if reco.anyVisible {
-            let saved = core.cachedHome()
-            if !saved.isEmpty { home = saved }
-        }
-        for tab in 0...2 {
-            let list = core.cachedLibrary(tab: UInt8(tab))
-            if !list.isEmpty { library[tab] = list }
-        }
-        lovedIds = Set(core.cachedLovedIds())
-        lovedCard = core.cachedLovedCard()
-        if resumeOnLaunch, let last = LastSession.load() { showLastSession(last) }
+    /// Copies du téléphone affichées (ou rien à afficher) : l'écran de lancement peut s'effacer.
+    private(set) var launchReady = false
+
+    /// Copies de l'accueil, de la bibliothèque et des titres aimés lues sur le téléphone.
+    private struct SavedCopy: @unchecked Sendable {
+        var home: [Shelf]
+        var library: [[Card]]
+        var loved: [Int64]
+        var lovedCard: Card?
+    }
+
+    /// Lues hors du thread principal (avant, l'écran attendait ces lectures pour s'afficher), pendant l'animation de
+    /// lancement. Ce qui est déjà arrivé de Deezer entre-temps n'est pas remplacé par la copie.
+    private func showSavedCopy(_ core: Core) async {
+        let wantHome = reco.anyVisible
+        let gen = profileGeneration
+        let copy = await Task.detached(priority: .userInitiated) {
+            SavedCopy(home: wantHome ? core.cachedHome() : [],
+                      library: (0...2).map { core.cachedLibrary(tab: UInt8($0)) },
+                      loved: core.cachedLovedIds(),
+                      lovedCard: core.cachedLovedCard())
+        }.value
+        defer { launchReady = true }
+        // Session refusée ou profil changé pendant la lecture : ces copies ne sont plus les bonnes.
+        guard gen == profileGeneration else { return }
+        if home == nil, !copy.home.isEmpty { home = copy.home }
+        for (tab, list) in copy.library.enumerated() where library[tab] == nil && !list.isEmpty { library[tab] = list }
+        if lovedIds.isEmpty { lovedIds = Set(copy.loved) }
+        if lovedCard == nil { lovedCard = copy.lovedCard }
     }
 
     /// L'app rouverte après qu'iOS l'a fermée : même titre, même file, même position, en pause.
@@ -1318,8 +1340,32 @@ final class Player {
     }
 
     /// Petit cache : les 12 dernières pages ouvertes (copies hors ligne comprises).
+    /// Jour (« AAAA-MM-JJ », heure du téléphone) où chaque page gardée en mémoire a été chargée.
+    @ObservationIgnored private var detailDay: [Route: String] = [:]
+
+    private static func day(_ date: Date = Date()) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f.string(from: date)
+    }
+
+    /// Page gardée avec des titres qui n'étaient pas encore sortis à son chargement, et dont la date de sortie est
+    /// arrivée : elle est rechargée pour qu'ils se dégrisent tout seuls. Les titres retirés (date déjà passée au
+    /// chargement) ne comptent pas : sinon la page serait redemandée à chaque visite.
+    private func hasNewReleases(_ detail: Detail, route: Route) -> Bool {
+        guard let loaded = detailDay[route] else { return false }
+        let today = Self.day()
+        guard today > loaded else { return false }
+        return detail.tracks.contains { track in
+            guard track.unavailable, let release = track.releaseDate.map({ String($0.prefix(10)) }) else { return false }
+            return release > loaded && release <= today
+        }
+    }
+
     private func cacheDetail(_ detail: Detail, for route: Route) {
         details[route] = detail
+        detailDay[route] = Self.day()
         detailOrder.removeAll { $0 == route }
         detailOrder.append(route)
         if detailOrder.count > maxDetails { details[detailOrder.removeFirst()] = nil }
@@ -1341,7 +1387,7 @@ final class Player {
         }
         // Copie hors ligne gardée pendant une coupure (ou avant l'ouverture de la session) : plus resservie une fois
         // Deezer joignable, sinon la page restait limitée aux titres du téléphone jusqu'à un rafraîchissement manuel.
-        if !force, let hit = details[route], !hit.offline { return hit }
+        if !force, let hit = details[route], !hit.offline, !hasNewReleases(hit, route: route) { return hit }
         let gen = profileGeneration
         let result: Detail? = await load(nil as Detail?) { core in
             switch route {

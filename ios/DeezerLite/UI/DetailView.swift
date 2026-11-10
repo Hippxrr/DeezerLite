@@ -71,6 +71,12 @@ struct DetailView: View {
     @State private var sorted = SortedTracks()
     /// Champ de recherche affiché seulement après un appui sur la loupe.
     @State private var searching = false
+    /// Ligne de la liste en haut de l'écran (suivie par la vue défilante).
+    @State private var scrollIndex: Int?
+    /// Dernière position dans la liste complète (hors recherche tapée) : celle remise à l'ouverture et à la fermeture de
+    /// la loupe. Le champ de recherche reconstruit toute la page, qui revenait sinon en haut.
+    @State private var keptIndex: Int?
+    @State private var searchToggledAt = Date.distantPast
     /// Confirmation avant de supprimer le téléchargement de la collection (corbeille de la barre du haut).
     @State private var confirmRemoveDownload = false
     @AppStorage private var sortRaw: String
@@ -239,6 +245,19 @@ struct DetailView: View {
 
     var body: some View {
         pageContent
+        .scrollPosition(id: $scrollIndex, anchor: .top)
+        .onChange(of: scrollIndex) { _, index in
+            // Positions de la liste complète seulement (pas des résultats filtrés), et pas pendant la reconstruction.
+            if query.isEmpty, Date().timeIntervalSince(searchToggledAt) > 0.5 { keptIndex = index }
+        }
+        .onChange(of: searching) {
+            searchToggledAt = Date()
+            let target = keptIndex
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(60))
+                scrollIndex = target
+            }
+        }
         .scrollDismissesKeyboard(.interactively)
         .background(alignment: .top) {
             LinearGradient(colors: [tint.opacity(colorScheme == .dark ? 0.75 : 0.3), .clear], startPoint: .top, endPoint: .bottom)
@@ -379,6 +398,8 @@ struct DetailView: View {
                          onRemove: removable ? { remove(track) } : nil)
             }
         }
+        // Lignes repérées par la vue défilante (position gardée quand la loupe s'ouvre ou se ferme, voir `body`).
+        .scrollTargetLayout()
         .padding(.horizontal, 16)
     }
 

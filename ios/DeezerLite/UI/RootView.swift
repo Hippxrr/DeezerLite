@@ -14,9 +14,43 @@ private struct WindowStyle: UIViewRepresentable {
     func updateUIView(_ uiView: Probe, context: Context) {}
 }
 
+/// Au lancement : le logo de l'écran de démarrage d'iOS, repris au même endroit, grossit un peu et s'efface, puis l'app
+/// apparaît, déjà remplie (les copies du téléphone sont lues pendant ce temps). Moins d'une seconde, jamais bloqué.
+private struct LaunchCover: View {
+    @Environment(Player.self) private var player
+    let done: () -> Void
+    @State private var leaving = false
+
+    var body: some View {
+        ZStack {
+            Color("LaunchBackground")
+            Image("LaunchLogo")
+                .resizable()
+                .frame(width: 120, height: 120)
+                .scaleEffect(leaving ? 1.25 : 1)
+        }
+        .ignoresSafeArea()
+        .opacity(leaving ? 0 : 1)
+        .allowsHitTesting(!leaving)
+        .accessibilityHidden(true)
+        .task {
+            let start = Date()
+            // Copies lues, et au moins un court instant pour que l'animation ne paraisse pas saccadée. Au plus 1 s.
+            while Date().timeIntervalSince(start) < 1, !player.launchReady || Date().timeIntervalSince(start) < 0.15 {
+                try? await Task.sleep(for: .milliseconds(30))
+            }
+            withAnimation(.easeIn(duration: 0.35)) { leaving = true }
+            try? await Task.sleep(for: .milliseconds(360))
+            done()
+        }
+    }
+}
+
 struct RootView: View {
     @Environment(Player.self) private var player
     @Environment(\.scenePhase) private var phase
+    /// Animation de lancement : seulement quand l'app s'ouvre à l'écran (pas lancée en arrière-plan par CarPlay ou l'audio).
+    @State private var launchCover = UIApplication.shared.applicationState != .background
 
     var body: some View {
         Group {
@@ -47,6 +81,9 @@ struct RootView: View {
             }
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: player.toast)
+        .overlay {
+            if launchCover { LaunchCover { launchCover = false } }
+        }
         .alert("Deezer Lite", isPresented: Binding(get: { player.message != nil }, set: { if !$0 { player.message = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {
