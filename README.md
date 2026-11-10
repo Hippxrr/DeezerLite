@@ -26,7 +26,7 @@ networking, the play queue and audio.
 |---|---|
 | Device | iPhone, iOS 17 or later |
 | Display name | Deezer |
-| Version | 2.1.0 |
+| Version | 2.2.0 |
 | Bundle ID | `com.hippxrr.deezerlite` |
 | UI | SwiftUI, Observation, Liquid Glass on iOS 26 |
 | Engine | Rust (2021 edition), bridged to Swift with UniFFI 0.29 |
