@@ -4,6 +4,9 @@ members = ["crates/*"]
 
 [workspace.package]
 edition = "2021"
+# Version figée des crates Rust : ne plus la changer. Elle n'apparaît nulle part dans l'app (la version affichée par
+# l'iPhone est MARKETING_VERSION dans ios/project.yml). La changer modifie Cargo.lock, ce qui vide le cache de
+# compilation de la CI : toutes les dépendances étaient recompilées à chaque nouvelle version.
 version = "2.5.0"
 license = "AGPL-3.0-only"
 
