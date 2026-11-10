@@ -1309,6 +1309,7 @@ impl Worker {
                 self.next = None;
                 self.flush();
                 self.announced = None;
+                self.shared.idle.store(true, Ordering::Relaxed);
                 self.shared.playing.store(false, Ordering::Relaxed);
                 self.shared.position_ms.store(0, Ordering::Relaxed);
                 // Arrêt demandé : la sortie s'arrête tout de suite au lieu de tourner sur du silence (le prochain titre la relance).

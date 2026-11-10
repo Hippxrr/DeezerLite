@@ -1106,14 +1106,19 @@ impl Actor {
                 // Le titre demandé n'a pas pu être chargé (réseau coupé, changement de réseau…) : si un autre titre
                 // joue encore, la file revient dessus, pour que l'interface ne montre pas un titre qu'on n'entend pas.
                 let playing = self.engine.shared.current_id.load(Ordering::Relaxed);
-                if playing != 0 && playing != id {
-                    if let Some(pos) = self.queue.iter().position(|&q| q == playing) {
-                        self.index = pos;
-                        self.emit_index();
-                        if let Some(info) = self.infos.get(&playing) {
-                            let _ = self.events.send(CoreEvent::Track(info.clone()));
-                        }
+                let back = (playing != 0 && playing != id).then(|| self.queue.iter().position(|&q| q == playing)).flatten();
+                if let Some(pos) = back {
+                    self.index = pos;
+                    self.emit_index();
+                    if let Some(info) = self.infos.get(&playing) {
+                        let _ = self.events.send(CoreEvent::Track(info.clone()));
                     }
+                } else if playing != id {
+                    // Le titre qui jouait n'est plus dans la file (autre album, recherche…) : il est arrêté, l'interface
+                    // montre le titre demandé en pause, et un appui sur lecture le retente (moteur vide, voir `Resume`).
+                    // Avant, l'ancien son continuait derrière la pochette du titre qui ne s'était pas lancé.
+                    self.engine.stop();
+                    let _ = self.events.send(CoreEvent::Stopped);
                 }
                 self.error(e);
             }

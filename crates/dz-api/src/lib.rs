@@ -714,7 +714,19 @@ fn is_write(method: &str) -> bool {
                 async move {
                     let r = match self.track_info(id).await {
                         Ok(fresh) => match fresh.track_token.clone() {
-                            Some(t) => self.media_once(&t, quality).await.map(|media| ResolvedMedia { media, stream_id: id, info: fresh }),
+                            Some(t) => match self.media_once(&t, quality).await {
+                                // Jeton neuf refusé lui aussi : la licence de lecture a expiré en même temps (app restée
+                                // ouverte longtemps). Session renouvelée, puis nouvel essai avec le jeton neuf. Avant, aucun
+                                // essai ne renouvelait les deux, et le titre ne se lançait pas (« jeton expiré »).
+                                Err(DeezerError::MediaRefused(_) | DeezerError::LicenseRejected | DeezerError::NoMediaSource) => {
+                                    match self.init_session().await {
+                                        Ok(_) => self.media_once(&t, quality).await,
+                                        Err(e) => Err(e),
+                                    }
+                                }
+                                other => other,
+                            }
+                            .map(|media| ResolvedMedia { media, stream_id: id, info: fresh }),
                             None => Err(DeezerError::NoMediaSource),
                         },
                         Err(e) => Err(e),
