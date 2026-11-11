@@ -8,8 +8,6 @@ import SwiftUI
 final class SlideState {
     var dx: CGFloat = 0
     @ObservationIgnored var axis: Axis?
-    /// Moment du dernier mouvement du doigt (voir `HeadStartSpring`).
-    @ObservationIgnored var lastMove = Date.distantPast
 
     /// Geste annulé par le système (appel, Centre de contrôle), donc sans `onEnded` : tout revient en place. Une fin
     /// normale a déjà remis `axis` à zéro, rien à faire alors.
@@ -139,7 +137,7 @@ struct MiniPlayer: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 8)
                     // Bulle flottante (verre qui réagit au doigt sur iOS 26).
-                    .surface(bubble, interactive: false, material: true)
+                    .surface(bubble, material: true)
                     .overlay { progress(bubble) },
                 bubble
             )
@@ -174,6 +172,10 @@ private struct MiniCarousel: View {
         .onChange(of: swiping) { _, on in if !on { slide.recover { steps.settle(slide: slide, player: player) } } }
     }
 
+    /// Avance du ressort au lâcher (voir `HeadStartSpring`), réglée sur la vidéo : à 0, l'image du lâcher restait figée ;
+    /// à ~20 ms, la première image allait trop loin et la suivante presque pas (un autre accroc).
+    private static let releaseHeadStart: TimeInterval = 0.01
+
     private func swipe(width: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 12, coordinateSpace: .global)
             .updating($swiping) { _, state, _ in state = true }
@@ -187,7 +189,6 @@ private struct MiniCarousel: View {
                 let blocked = (v.translation.width < 0 && !player.queue.indices.contains(base + 1))
                     || (v.translation.width > 0 && !player.queue.indices.contains(base - 1))
                 slide.dx = blocked ? v.translation.width * 0.25 : v.translation.width
-                slide.lastMove = .now
             }
             .onEnded { v in
                 let horizontal = slide.axis == .horizontal
@@ -198,8 +199,7 @@ private struct MiniCarousel: View {
                 let forward = fling < -width * 0.35 && player.queue.indices.contains(base + 1)
                 let backward = fling > width * 0.35 && player.queue.indices.contains(base - 1)
                 steps.land(delta: forward ? 1 : backward ? -1 : 0, distance: width + MiniStrip.gap, velocity: v.velocity.width,
-                           bounce: false, headStart: min(max(Date.now.timeIntervalSince(slide.lastMove), 1 / 120), 1 / 30),
-                           slide: slide, player: player)
+                           bounce: false, headStart: Self.releaseHeadStart, slide: slide, player: player)
             }
     }
 }
