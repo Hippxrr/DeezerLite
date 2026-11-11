@@ -199,6 +199,9 @@ struct SettingsView: View {
     @Environment(Player.self) private var player
     @Environment(\.dismiss) private var dismiss
     @State private var confirmLogout = false
+    /// Place prise par les pochettes enregistrées (relue à l'ouverture des Réglages et après effacement).
+    @State private var coverBytes = 0
+    @State private var confirmClearCovers = false
     /// Onglet affiché (gardé d'une ouverture à l'autre).
     @AppStorage("settingsTab") private var tab = SettingsTab.general
     /// Onglets du bas sans leur nom (voir `MainTabs`).
@@ -479,8 +482,30 @@ struct SettingsView: View {
         }
 
         group(tr("Stockage")) {
-            Button { CoverLoader.shared.clear(); player.showToast(tr("Pochettes effacées")) } label: {
-                row("photo", tr("Effacer les pochettes enregistrées")) { EmptyView() }
+            Button { confirmClearCovers = true } label: {
+                row("photo", tr("Effacer les pochettes enregistrées")) {
+                    Text(ByteCountFormatter.string(fromByteCount: Int64(coverBytes), countStyle: .file)).foregroundStyle(.secondary)
+                }
+            }
+            .buttonStyle(.plain)
+            .task { coverBytes = CoverLoader.shared.diskUsage }
+            .confirmationDialog(tr("Effacer les pochettes enregistrées ?"), isPresented: $confirmClearCovers, titleVisibility: .visible) {
+                Button(tr("Effacer"), role: .destructive) {
+                    CoverLoader.shared.clear()
+                    coverBytes = CoverLoader.shared.diskUsage
+                    player.showToast(tr("Pochettes effacées"))
+                }
+                Button(tr("Annuler"), role: .cancel) {}
+            } message: {
+                Text(tr("Seules les pochettes gardées pour un affichage rapide sont effacées. Elles sont retéléchargées quand elles réapparaissent à l'écran. Tes téléchargements, ta session, ton historique et tes réglages ne sont pas touchés."))
+            }
+            divider
+            // Ce qui prend vraiment de la place : les téléchargements. Leur taille, et leur page pour en supprimer.
+            NavigationLink { LibrarySectionView(section: .downloads).environment(player) } label: {
+                row("arrow.down.circle", tr("Téléchargements")) {
+                    Text(ByteCountFormatter.string(fromByteCount: Int64(player.downloadBytes), countStyle: .file)).foregroundStyle(.secondary)
+                    chevron
+                }
             }
             .buttonStyle(.plain)
         }

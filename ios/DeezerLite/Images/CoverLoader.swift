@@ -38,6 +38,9 @@ final class CoverLoader: @unchecked Sendable {
         }
     }
 
+    /// Place occupée par les pochettes enregistrées sur le téléphone (octets), affichée dans les Réglages.
+    var diskUsage: Int { session.configuration.urlCache?.currentDiskUsage ?? 0 }
+
     /// Déconnexion : pochettes en mémoire et sur le disque effacées.
     func clear() {
         cache.removeAllObjects()
