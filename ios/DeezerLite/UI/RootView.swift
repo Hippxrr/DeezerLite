@@ -15,8 +15,8 @@ private struct WindowStyle: UIViewRepresentable {
 }
 
 /// Au lancement : le logo de l'écran de démarrage d'iOS, repris exactement au même endroit. Il se contracte un instant,
-/// puis le cœur s'ouvre et grandit jusqu'à couvrir l'écran : l'app apparaît à travers lui, déjà remplie (les copies du
-/// téléphone sont lues pendant ce temps), en se posant de son côté. Moins d'une seconde, jamais bloqué.
+/// puis file vers l'avant en s'effaçant pendant que le fond disparaît et que l'app, déjà remplie (les copies du
+/// téléphone sont lues pendant ce temps), se pose à sa taille. Moins d'une seconde, jamais bloqué.
 /// « Réduire les animations » : simple fondu.
 private struct LaunchCover: View {
     @Environment(Player.self) private var player
@@ -26,8 +26,8 @@ private struct LaunchCover: View {
     let done: () -> Void
     @State private var logoScale: CGFloat = 1
     @State private var logoOpacity: Double = 1
-    /// Taille du trou en forme de cœur dans le fond (rien au départ).
-    @State private var holeScale: CGFloat = 0.001
+    @State private var logoBlur: CGFloat = 0
+    @State private var backgroundOpacity: Double = 1
     @State private var coverOpacity: Double = 1
     @State private var leaving = false
 
@@ -38,14 +38,8 @@ private struct LaunchCover: View {
 
     var body: some View {
         ZStack {
-            // Fond percé d'un cœur : on voit l'app à travers.
-            Color("LaunchBackground")
-                .mask {
-                    Rectangle()
-                        .overlay { logo.scaleEffect(holeScale).blendMode(.destinationOut) }
-                        .compositingGroup()
-                }
-            logo.scaleEffect(logoScale).opacity(logoOpacity)
+            Color("LaunchBackground").opacity(backgroundOpacity)
+            logo.scaleEffect(logoScale).blur(radius: logoBlur).opacity(logoOpacity)
         }
         .ignoresSafeArea()
         .opacity(coverOpacity)
@@ -68,19 +62,16 @@ private struct LaunchCover: View {
             // 1. Le cœur prend son élan : il se contracte.
             withAnimation(.easeInOut(duration: 0.2)) { logoScale = 0.86 }
             try? await Task.sleep(for: .milliseconds(200))
-            // 2. Il s'ouvre : le trou part de sa taille exacte et grandit avec lui, lentement puis de plus en plus vite,
-            // jusqu'à dépasser l'écran. Le logo coloré s'efface dans les premiers instants, l'app apparaît dans le cœur.
-            holeScale = 0.86
+            // 2. Il file vers l'avant (vers soi) en se floutant et s'efface ; le fond disparaît juste derrière lui, et l'app
+            // se pose à sa taille.
             onReveal()
-            let grow = Animation.timingCurve(0.6, 0, 0.8, 0.25, duration: 0.6)
-            withAnimation(grow) {
-                holeScale = 26
-                logoScale = 26
+            withAnimation(.timingCurve(0.5, 0, 0.75, 0.4, duration: 0.45)) {
+                logoScale = 2.4
+                logoBlur = 6
             }
-            withAnimation(.easeOut(duration: 0.16)) { logoOpacity = 0 }
-            // Les fins espaces entre les barres du cœur ne restent jamais à l'écran.
-            withAnimation(.easeOut(duration: 0.2).delay(0.4)) { coverOpacity = 0 }
-            try? await Task.sleep(for: .milliseconds(620))
+            withAnimation(.easeIn(duration: 0.3)) { logoOpacity = 0 }
+            withAnimation(.easeOut(duration: 0.4).delay(0.05)) { backgroundOpacity = 0 }
+            try? await Task.sleep(for: .milliseconds(470))
             done()
         }
     }
@@ -103,7 +94,7 @@ struct RootView: View {
             }
         }
         // Pendant l'ouverture du cœur, l'app se pose à sa taille (au lieu d'être déjà là, immobile, derrière).
-        .scaleEffect(launchRevealed ? 1 : 0.9)
+        .scaleEffect(launchRevealed ? 1 : 0.94)
         .background(Theme.background.ignoresSafeArea())
         .background(WindowStyle())
         .onChange(of: phase) { _, now in

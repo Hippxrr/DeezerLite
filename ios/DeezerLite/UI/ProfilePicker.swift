@@ -104,8 +104,6 @@ struct ProfileButton: View {
                         .background(Theme.card, in: Circle())
                 }
             }
-            // Fin liseré autour de la photo, lisible sur tous les fonds.
-            .overlay { Circle().strokeBorder(Color.primary.opacity(0.18), lineWidth: 2.5) }
             .frame(width: 44, height: 44)
             .contentShape(Circle())
         }

@@ -141,7 +141,7 @@ private struct MiniCarousel: View {
                 .contentShape(Rectangle())
                 .gesture(swipe(width: width))
         }
-        .onChange(of: swiping) { _, on in if !on { slide.recover() } }
+        .onChange(of: swiping) { _, on in if !on { slide.recover { steps.settle(slide: slide, player: player) } } }
     }
 
     private func swipe(width: CGFloat) -> some Gesture {
@@ -164,11 +164,11 @@ private struct MiniCarousel: View {
                 let forward = fling < -width * 0.35 && player.queue.indices.contains(base + 1)
                 let backward = fling > width * 0.35 && player.queue.indices.contains(base - 1)
                 guard forward || backward else {
-                    withAnimation(softSpring(distance: -slide.dx, velocity: v.velocity.width, bounce: false)) { slide.dx = 0 }
+                    steps.land(softSpring(distance: -slide.dx, velocity: v.velocity.width, bounce: false), slide: slide, player: player)
                     return
                 }
                 steps.take(forward ? 1 : -1, slide: slide, distance: width + MiniStrip.gap, player: player)
-                withAnimation(softSpring(distance: -slide.dx, velocity: v.velocity.width, bounce: false)) { slide.dx = 0 }
+                steps.land(softSpring(distance: -slide.dx, velocity: v.velocity.width, bounce: false), slide: slide, player: player)
             }
     }
 }
@@ -186,8 +186,9 @@ struct BarMiniPlayer: View {
 #endif
 
 /// Titres d'avance pris par un carrousel. Au lâcher, seul le carrousel avance (le voisin prend la place exacte
-/// du titre en cours) ; le lecteur n'est prévenu qu'une fois le geste posé, en un seul saut même après plusieurs
-/// glissements. Tout le reste de l'app (titre, barre, listes) se met donc à jour après l'animation, pas pendant.
+/// du titre en cours) ; le lecteur n'est prévenu qu'une fois le titre arrivé à sa place (fin de l'animation), en un
+/// seul saut même après plusieurs glissements. Avant, il l'était 0,3 s après le lâcher, en plein milieu de l'arrivée
+/// du titre suivant : le changement de titre (chargement, listes, lecteur, écran verrouillé) saccadait sa fin de course.
 @Observable
 final class CarouselSteps {
     var pending = 0
@@ -214,10 +215,30 @@ final class CarouselSteps {
             pending += delta
             slide.dx += delta > 0 ? distance : -distance
         }
+        // Filet de sécurité si la fin d'animation n'arrive jamais (vue retirée…) ; normalement c'est `land` qui prévient.
+        schedule(slide: slide, player: player, after: .milliseconds(1500))
+    }
+
+    /// Ramène le carrousel à sa place, puis, une fois arrivé, transmet au lecteur les titres pris.
+    @MainActor func land(_ animation: Animation, slide: SlideState, player: Player) {
+        withAnimation(animation, completionCriteria: .logicallyComplete) {
+            slide.dx = 0
+        } completion: { [weak self] in
+            MainActor.assumeIsolated { self?.schedule(slide: slide, player: player, after: .milliseconds(80)) }
+        }
+    }
+
+    /// Geste annulé par le système : rien de pris n'est perdu.
+    @MainActor func settle(slide: SlideState, player: Player) {
+        schedule(slide: slide, player: player, after: .milliseconds(450))
+    }
+
+    /// Prévient le lecteur, sauf si un nouveau glissement a commencé (sa fin s'en chargera).
+    @MainActor private func schedule(slide: SlideState, player: Player, after delay: Duration) {
         flush?.cancel()
         flush = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(300))
-            guard let self, !Task.isCancelled, self.pending != 0 else { return }
+            try? await Task.sleep(for: delay)
+            guard let self, !Task.isCancelled, self.pending != 0, slide.axis == nil else { return }
             let k = self.pending
             var t = Transaction()
             t.disablesAnimations = true
@@ -296,8 +317,11 @@ struct ProgressLine: View {
             let fraction = min(max(player.position(at: ctx.date) / total, 0), 1)
             ZStack(alignment: .leading) {
                 track
+                // Pendant la lecture, la barre avance par petits pas (moins d'un point toutes les 0,5 s), sans animation :
+                // avec un glissement continu entre deux pas, elle était redessinée à chaque image, en permanence, et avec
+                // elle tout le verre du mini-lecteur, ce qui ralentissait le glissement des titres et le défilement.
                 fill.scaleEffect(x: fraction, anchor: .leading)
-                    .animation(player.status.playing ? .linear(duration: 0.5) : .easeOut(duration: 0.2), value: fraction)
+                    .animation(player.status.playing ? nil : .easeOut(duration: 0.2), value: fraction)
             }
             .frame(height: height)
             .clipShape(Capsule())
@@ -842,14 +866,16 @@ private struct CoverCarousel: View {
                     let forward = fling < -side * 0.35 && steps.neighbor(player, 1) != nil
                     let backward = fling > side * 0.35 && steps.neighbor(player, -1) != nil
                     guard forward || backward else {
-                        withAnimation(softSpring(distance: -slide.dx, velocity: v.velocity.width)) { slide.dx = 0 }
+                        steps.land(softSpring(distance: -slide.dx, velocity: v.velocity.width), slide: slide, player: player)
                         return
                     }
                     steps.take(forward ? 1 : -1, slide: slide, distance: step, player: player)
-                    withAnimation(softSpring(distance: -slide.dx, velocity: v.velocity.width)) { slide.dx = 0 }
+                    steps.land(softSpring(distance: -slide.dx, velocity: v.velocity.width), slide: slide, player: player)
                 }
         )
-        .onChange(of: dragging) { _, on in if !on { slide.recover { pull.recover() } } }
+        .onChange(of: dragging) { _, on in
+            if !on { slide.recover { pull.recover(); steps.settle(slide: slide, player: player) } }
+        }
     }
 }
 
