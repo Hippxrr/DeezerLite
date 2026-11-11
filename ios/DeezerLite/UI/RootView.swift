@@ -381,6 +381,10 @@ struct MainTabs: View {
         ZStack {
             // Grand lecteur ouvert par-dessus : VoiceOver ne lit plus les pages ni le mini-lecteur cachés dessous.
             tabs.accessibilityHidden(player.showFullPlayer)
+                // Ni appui ni effet de verre sur les pages tant que le grand lecteur est ouvert (ou en train de se
+                // fermer) : le verre « interactif » des cartes réagissait au doigt à travers le lecteur, et l'effet
+                // d'appui apparaissait sur la page au moment où il descendait.
+                .allowsHitTesting(!player.showFullPlayer)
             // Mini-lecteur posé au-dessus de la barre d'onglets, sous le grand lecteur. Il ignore le clavier :
             // celui-ci le recouvre simplement, sans rien déplacer ni retirer (le baisser en faisant défiler reste fluide).
             if !MiniPlayerMetrics.inTabBar {
