@@ -220,11 +220,16 @@ final class CarouselSteps {
     }
 
     /// Ramène le carrousel à sa place, puis, une fois arrivé, transmet au lecteur les titres pris.
+    /// Le ressort part au tour suivant : l'échange des titres fait juste avant par `take` est ainsi affiché seul, sans
+    /// animation. Dans la même mise à jour, il était animé avec le ressort, et la pochette du titre suivant traînait
+    /// derrière son texte pendant tout le trajet.
     @MainActor func land(_ animation: Animation, slide: SlideState, player: Player) {
-        withAnimation(animation, completionCriteria: .logicallyComplete) {
-            slide.dx = 0
-        } completion: { [weak self] in
-            MainActor.assumeIsolated { self?.schedule(slide: slide, player: player, after: .milliseconds(80)) }
+        DispatchQueue.main.async { [weak self] in
+            withAnimation(animation, completionCriteria: .logicallyComplete) {
+                slide.dx = 0
+            } completion: { [weak self] in
+                MainActor.assumeIsolated { self?.schedule(slide: slide, player: player, after: .milliseconds(80)) }
+            }
         }
     }
 
@@ -265,10 +270,6 @@ private struct MiniStrip: View {
             MiniInfo(track: steps.current(player), placeholder: tr("Chargement…"), side: cover).frame(width: width)
             MiniInfo(track: steps.neighbor(player, 1), placeholder: "", side: cover).frame(width: width).accessibilityHidden(true)
         }
-        // Le changement de titres du carrousel (au lâcher) et le ressort qui le ramène à sa place arrivent dans la même mise
-        // à jour : sans ceci, l'échange des pochettes et des textes était animé avec le ressort, et la pochette du titre
-        // suivant traînait derrière son texte et passait dessous pendant tout le trajet. Seul le déplacement est animé.
-        .transaction { $0.animation = nil }
         .offset(x: -(width + Self.gap))
     }
 }
@@ -842,9 +843,6 @@ private struct CoverCarousel: View {
                 .scaleEffect(active ? 1 : 0.8)
                 .animation(.spring(response: 0.5, dampingFraction: 0.72), value: active)
         }
-        // Échange des pochettes au lâcher jamais animé avec le ressort du carrousel (voir `MiniStrip`) ; la taille en
-        // pause / lecture garde son animation, posée plus bas.
-        .transaction { $0.animation = nil }
         .modifier(SlideOffset(state: slide))
         .frame(width: side, height: side)
         .frame(maxWidth: .infinity)
