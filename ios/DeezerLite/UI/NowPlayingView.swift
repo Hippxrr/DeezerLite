@@ -8,6 +8,8 @@ import SwiftUI
 final class SlideState {
     var dx: CGFloat = 0
     @ObservationIgnored var axis: Axis?
+    /// Moment du dernier mouvement du doigt (voir `HeadStartSpring`).
+    @ObservationIgnored var lastMove = Date.distantPast
 
     /// Geste annulé par le système (appel, Centre de contrôle), donc sans `onEnded` : tout revient en place. Une fin
     /// normale a déjà remis `axis` à zéro, rien à faire alors.
@@ -32,9 +34,37 @@ struct SlideOffset: ViewModifier {
 
 /// Ressort doux qui part à la vitesse du doigt (`distance` = chemin restant jusqu'à l'arrivée).
 /// `bounce: false` : amorti juste ce qu'il faut pour s'arrêter pile, sans dépasser (mini-lecteur).
-func softSpring(distance: CGFloat, velocity: CGFloat, bounce: Bool = true) -> Animation {
+func softSpring(distance: CGFloat, velocity: CGFloat, bounce: Bool = true, headStart: TimeInterval = 0) -> Animation {
     let relative = abs(distance) > 1 ? velocity / distance : 0
-    return .interpolatingSpring(mass: 1, stiffness: 190, damping: bounce ? 25 : 28, initialVelocity: relative)
+    let damping: Double = bounce ? 25 : 28
+    guard headStart > 0 else { return .interpolatingSpring(mass: 1, stiffness: 190, damping: damping, initialVelocity: relative) }
+    return Animation(HeadStartSpring(stiffness: 190, damping: damping, initialVelocity: relative, skip: headStart))
+}
+
+/// Ressort qui démarre `skip` secondes « en avance ». Au lâcher, le doigt a fait son dernier mouvement une image plus tôt
+/// et un ressort normal commence immobile : l'image du lâcher restait figée, un petit accroc dans l'élan. Ici, la toute
+/// première image est déjà là où l'élan l'aurait portée.
+private struct HeadStartSpring: CustomAnimation {
+    let stiffness: Double
+    let damping: Double
+    let initialVelocity: Double
+    let skip: TimeInterval
+
+    private var base: Animation {
+        .interpolatingSpring(mass: 1, stiffness: stiffness, damping: damping, initialVelocity: initialVelocity)
+    }
+
+    func animate<V: VectorArithmetic>(value: V, time: TimeInterval, context: inout AnimationContext<V>) -> V? {
+        base.animate(value: value, time: time + skip, context: &context)
+    }
+
+    func velocity<V: VectorArithmetic>(value: V, time: TimeInterval, context: AnimationContext<V>) -> V? {
+        base.velocity(value: value, time: time + skip, context: context)
+    }
+
+    func shouldMerge<V: VectorArithmetic>(previous: Animation, value: V, time: TimeInterval, context: inout AnimationContext<V>) -> Bool {
+        base.shouldMerge(previous: previous, value: value, time: time + skip, context: &context)
+    }
 }
 
 /// Mini-lecteur flottant au-dessus des onglets ; appui = lecteur plein écran.
@@ -109,7 +139,7 @@ struct MiniPlayer: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 8)
                     // Bulle flottante (verre qui réagit au doigt sur iOS 26).
-                    .surface(bubble, material: true)
+                    .surface(bubble, interactive: false, material: true)
                     .overlay { progress(bubble) },
                 bubble
             )
@@ -157,6 +187,7 @@ private struct MiniCarousel: View {
                 let blocked = (v.translation.width < 0 && !player.queue.indices.contains(base + 1))
                     || (v.translation.width > 0 && !player.queue.indices.contains(base - 1))
                 slide.dx = blocked ? v.translation.width * 0.25 : v.translation.width
+                slide.lastMove = .now
             }
             .onEnded { v in
                 let horizontal = slide.axis == .horizontal
@@ -167,7 +198,8 @@ private struct MiniCarousel: View {
                 let forward = fling < -width * 0.35 && player.queue.indices.contains(base + 1)
                 let backward = fling > width * 0.35 && player.queue.indices.contains(base - 1)
                 steps.land(delta: forward ? 1 : backward ? -1 : 0, distance: width + MiniStrip.gap, velocity: v.velocity.width,
-                           bounce: false, slide: slide, player: player)
+                           bounce: false, headStart: min(max(Date.now.timeIntervalSince(slide.lastMove), 1 / 120), 1 / 30),
+                           slide: slide, player: player)
             }
     }
 }
@@ -217,13 +249,15 @@ final class CarouselSteps {
     /// Les titres affichés ne changent qu'une fois arrivé, d'un coup et sans animation (à cet instant, l'image est
     /// identique). Avant, ils changeaient au lâcher, pendant le ressort : la pochette du titre suivant prenait un autre
     /// trajet que son texte et passait dessous.
-    @MainActor func land(delta: Int, distance: CGFloat, velocity: CGFloat, bounce: Bool = true, slide: SlideState, player: Player) {
+    @MainActor func land(delta: Int, distance: CGFloat, velocity: CGFloat, bounce: Bool = true, headStart: TimeInterval = 0,
+                         slide: SlideState, player: Player) {
         landingID += 1
         let id = landingID
         landing = delta
         landingDistance = distance
         let target: CGFloat = delta == 0 ? 0 : delta > 0 ? -distance : distance
-        withAnimation(softSpring(distance: target - slide.dx, velocity: velocity, bounce: bounce), completionCriteria: .logicallyComplete) {
+        withAnimation(softSpring(distance: target - slide.dx, velocity: velocity, bounce: bounce, headStart: headStart),
+                      completionCriteria: .logicallyComplete) {
             slide.dx = target
         } completion: { [weak self] in
             MainActor.assumeIsolated {

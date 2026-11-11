@@ -156,7 +156,9 @@ struct GlassTabBar: View {
                 if hasMini {
                     MiniPlayer(inBar: true, compact: folded)
                         .frame(width: folded ? width - round * 2 : width, height: GlassBarMetrics.small)
-                        .surface(Capsule(), material: true)
+                        // Test : sans réaction du verre au toucher (le verre reste le même à l'écran). Sa réaction au
+                        // lâcher tombait pendant l'élan du carrousel.
+                        .surface(Capsule(), interactive: false, material: true)
                         .offset(x: folded ? round : 0, y: folded ? 0 : -(GlassBarMetrics.barHeight + GlassBarMetrics.gap))
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
