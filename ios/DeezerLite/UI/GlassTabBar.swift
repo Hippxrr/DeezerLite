@@ -156,7 +156,10 @@ struct GlassTabBar: View {
                 if hasMini {
                     MiniPlayer(inBar: true, compact: folded)
                         .frame(width: folded ? width - round * 2 : width, height: GlassBarMetrics.small)
-                        .surface(Capsule(), material: true)
+                        // Verre en fond de la bulle, le contenu dessiné par-dessus : quand le titre glisse, le verre n'a
+                        // rien à recalculer (contenu à l'intérieur du verre, il était refait à chaque image, d'où des
+                        // images ratées pendant l'élan du carrousel ; le grand lecteur, sans verre, était fluide).
+                        .background { Color.clear.surface(Capsule(), interactive: false, material: true) }
                         .offset(x: folded ? round : 0, y: folded ? 0 : -(GlassBarMetrics.barHeight + GlassBarMetrics.gap))
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
