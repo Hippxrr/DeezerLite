@@ -8,6 +8,26 @@ import SwiftUI
 final class SlideState {
     var dx: CGFloat = 0
     @ObservationIgnored var axis: Axis?
+    /// Deux dernières positions du doigt et leur moment : vitesse réelle au lâcher (voir `fingerVelocity`).
+    @ObservationIgnored private var samples: [(x: CGFloat, t: TimeInterval)] = []
+
+    func track(_ x: CGFloat) {
+        samples.append((x, ProcessInfo.processInfo.systemUptime))
+        if samples.count > 2 { samples.removeFirst() }
+    }
+
+    /// Vitesse du doigt sur ses deux derniers mouvements (points par seconde). Celle de `DragGesture` est lissée sur une
+    /// période plus longue et sous-estime un lancer rapide : le ressort partait moins vite que le doigt, et la première
+    /// image après le lâcher semblait freiner d'un coup. `fallback` si les mesures manquent ou sont trop anciennes.
+    func fingerVelocity(fallback: CGFloat) -> CGFloat {
+        defer { samples = [] }
+        guard samples.count == 2 else { return fallback }
+        let (a, b) = (samples[0], samples[1])
+        let dt = b.t - a.t
+        let age = ProcessInfo.processInfo.systemUptime - b.t
+        guard dt > 0.002, dt < 0.05, age < 0.05 else { return fallback }
+        return (b.x - a.x) / dt
+    }
 
     /// Geste annulé par le système (appel, Centre de contrôle), donc sans `onEnded` : tout revient en place. Une fin
     /// normale a déjà remis `axis` à zéro, rien à faire alors.
@@ -189,6 +209,7 @@ private struct MiniCarousel: View {
                 let blocked = (v.translation.width < 0 && !player.queue.indices.contains(base + 1))
                     || (v.translation.width > 0 && !player.queue.indices.contains(base - 1))
                 slide.dx = blocked ? v.translation.width * 0.25 : v.translation.width
+                slide.track(slide.dx)
             }
             .onEnded { v in
                 let horizontal = slide.axis == .horizontal
@@ -198,7 +219,8 @@ private struct MiniCarousel: View {
                 let fling = v.predictedEndTranslation.width
                 let forward = fling < -width * 0.35 && player.queue.indices.contains(base + 1)
                 let backward = fling > width * 0.35 && player.queue.indices.contains(base - 1)
-                steps.land(delta: forward ? 1 : backward ? -1 : 0, distance: width + MiniStrip.gap, velocity: v.velocity.width,
+                steps.land(delta: forward ? 1 : backward ? -1 : 0, distance: width + MiniStrip.gap,
+                           velocity: slide.fingerVelocity(fallback: v.velocity.width),
                            bounce: false, headStart: Self.releaseHeadStart, slide: slide, player: player)
             }
     }
@@ -257,7 +279,9 @@ final class CarouselSteps {
         landingDistance = distance
         let target: CGFloat = delta == 0 ? 0 : delta > 0 ? -distance : distance
         withAnimation(softSpring(distance: target - slide.dx, velocity: velocity, bounce: bounce, headStart: headStart),
-                      completionCriteria: .logicallyComplete) {
+                      // Échange des titres une fois le ressort tout à fait arrêté : à « presque fini », la fin du trajet
+                      // (2 à 3 points) sautait d'un coup.
+                      completionCriteria: .removed) {
             slide.dx = target
         } completion: { [weak self] in
             MainActor.assumeIsolated {
