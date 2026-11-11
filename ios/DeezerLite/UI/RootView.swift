@@ -15,14 +15,12 @@ private struct WindowStyle: UIViewRepresentable {
 }
 
 /// Au lancement : le logo de l'écran de démarrage d'iOS, repris exactement au même endroit. Il se contracte un instant,
-/// puis file vers l'avant en s'effaçant pendant que le fond disparaît et que l'app, déjà remplie (les copies du
-/// téléphone sont lues pendant ce temps), se pose à sa taille. Moins d'une seconde, jamais bloqué.
+/// puis file vers l'avant en s'effaçant pendant que le fond disparaît sur l'app, déjà remplie (les copies du
+/// téléphone sont lues pendant ce temps) et immobile. Moins d'une seconde, jamais bloqué.
 /// « Réduire les animations » : simple fondu.
 private struct LaunchCover: View {
     @Environment(Player.self) private var player
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Le cœur commence à s'ouvrir : l'app derrière se met en place.
-    let onReveal: () -> Void
     let done: () -> Void
     @State private var logoScale: CGFloat = 1
     @State private var logoOpacity: Double = 1
@@ -53,7 +51,6 @@ private struct LaunchCover: View {
             }
             leaving = true
             if reduceMotion {
-                onReveal()
                 withAnimation(.easeOut(duration: 0.3)) { coverOpacity = 0 }
                 try? await Task.sleep(for: .milliseconds(320))
                 done()
@@ -62,9 +59,8 @@ private struct LaunchCover: View {
             // 1. Le cœur prend son élan : il se contracte.
             withAnimation(.easeInOut(duration: 0.2)) { logoScale = 0.86 }
             try? await Task.sleep(for: .milliseconds(200))
-            // 2. Il file vers l'avant (vers soi) en se floutant et s'efface ; le fond disparaît juste derrière lui, et l'app
-            // se pose à sa taille.
-            onReveal()
+            // 2. Il file vers l'avant (vers soi) en se floutant et s'efface ; le fond disparaît juste derrière lui.
+            // L'app ne bouge pas : réduite pendant l'animation, la barre d'onglets se décalait puis sautait en place.
             withAnimation(.timingCurve(0.5, 0, 0.75, 0.4, duration: 0.45)) {
                 logoScale = 2.4
                 logoBlur = 6
@@ -82,8 +78,6 @@ struct RootView: View {
     @Environment(\.scenePhase) private var phase
     /// Animation de lancement : seulement quand l'app s'ouvre à l'écran (pas lancée en arrière-plan par CarPlay ou l'audio).
     @State private var launchCover = UIApplication.shared.applicationState != .background
-    /// L'app derrière l'animation de lancement, un peu en retrait jusqu'à ce que le cœur s'ouvre.
-    @State private var launchRevealed = UIApplication.shared.applicationState == .background
 
     var body: some View {
         Group {
@@ -93,8 +87,6 @@ struct RootView: View {
             case true?: MainTabs()
             }
         }
-        // Pendant l'ouverture du cœur, l'app se pose à sa taille (au lieu d'être déjà là, immobile, derrière).
-        .scaleEffect(launchRevealed ? 1 : 0.94)
         .background(Theme.background.ignoresSafeArea())
         .background(WindowStyle())
         .onChange(of: phase) { _, now in
@@ -118,9 +110,7 @@ struct RootView: View {
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: player.toast)
         .overlay {
             if launchCover {
-                LaunchCover(onReveal: {
-                    withAnimation(.spring(response: 0.75, dampingFraction: 0.86)) { launchRevealed = true }
-                }, done: { launchCover = false })
+                LaunchCover { launchCover = false }
             }
         }
         .alert("Deezer Lite", isPresented: Binding(get: { player.message != nil }, set: { if !$0 { player.message = nil } })) {
