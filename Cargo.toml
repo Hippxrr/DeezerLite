@@ -48,11 +48,9 @@ keyring = { version = "3", features = ["apple-native", "windows-native"] }
 
 [profile.release]
 opt-level = 3
-# LTO « thin » et compilation en parallèle : le cœur se recompile en quelques dizaines de secondes au lieu de près de
-# deux minutes à chaque build (avec « fat » et une seule unité, tout était optimisé d'un bloc, sur un seul cœur du
-# processeur). Différence de taille et de vitesse de l'app imperceptible.
-lto = "thin"
-codegen-units = 16
+# Optimisation maximale du cœur (tout optimisé d'un bloc) : choisi même si chaque build est plus long.
+lto = "fat"
+codegen-units = 1
 panic = "abort"
 # Les symboles de la bibliothèque statique doivent rester pour l'édition de liens : seules les infos de débogage partent.
 strip = "debuginfo"
