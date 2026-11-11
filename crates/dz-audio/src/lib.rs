@@ -321,8 +321,9 @@ struct Renderer {
     eq: EqState,
     bands: Bands,
     channels: usize,
-    /// Pause au bloc précédent : le passage pause / lecture se fait en fondu (sinon un petit clic).
-    was_paused: bool,
+    /// Fondu de 5 ms au passage pause / lecture : `gain` va de 0 (silence) à `ramp` (plein volume), suivi d'un bloc audio
+    /// à l'autre (avec de petits tampons, un fondu calculé bloc par bloc était tronqué : le clic revenait).
+    gain: usize,
     /// Durée du fondu en trames (5 ms).
     ramp: usize,
     /// iPhone : trames entrelacées le temps de les séparer en gauche / droite (alloué une fois, à la création).
@@ -338,7 +339,7 @@ impl Renderer {
             eq: EqState::new(rate, channels),
             bands: Bands::new(rate),
             channels,
-            was_paused: false,
+            gain: (rate as usize / 200).max(1),
             ramp: (rate as usize / 200).max(1),
             #[cfg(target_os = "ios")]
             scratch: vec![0.0; 4096 * channels.max(1)],
@@ -348,7 +349,7 @@ impl Renderer {
     /// Remplit `data` (échantillons entrelacés). `silence` et `conv` : le format d'échantillon de la sortie.
     #[inline]
     fn render<T: Copy>(&mut self, data: &mut [T], silence: T, conv: impl Fn(f32) -> T) {
-        let Self { cons, ctl, eq, bands, channels, was_paused, ramp, .. } = self;
+        let Self { cons, ctl, eq, bands, channels, gain, ramp, .. } = self;
         let req = ctl.flush_req.load(Ordering::Acquire);
         if req != ctl.flush_ack.load(Ordering::Relaxed) {
             while cons.pop().is_ok() {}
@@ -357,16 +358,13 @@ impl Renderer {
             return;
         }
         let paused = ctl.shared.paused.load(Ordering::Relaxed);
-        if paused && *was_paused {
+        if paused && *gain == 0 {
             data.fill(silence);
             bands.publish_silence(&ctl.shared);
             return;
         }
         // Pause qui commence : le son descend à zéro en 5 ms, puis silence (le reste du tampon est gardé pour la reprise).
         // Reprise : il remonte en 5 ms. Sans ce fondu, la coupure nette faisait parfois un petit clic.
-        let fade_out = paused;
-        let fade_in = !paused && *was_paused;
-        *was_paused = paused;
         let ramp = (*ramp).max(1);
         let measure = ctl.shared.levels_on.load(Ordering::Relaxed);
         let vol = f32::from_bits(ctl.shared.volume.load(Ordering::Relaxed)) * f32::from_bits(ctl.shared.boost.load(Ordering::Relaxed));
@@ -380,9 +378,15 @@ impl Renderer {
         // sans jamais décaler la gauche et la droite.
         let mut starved = false;
         for (i, s) in data.iter_mut().enumerate() {
-            let frame = i / ch;
-            if i % ch == 0 && !starved {
-                starved = (fade_out && frame >= ramp) || cons.slots() < ch;
+            if i % ch == 0 {
+                if paused {
+                    *gain = gain.saturating_sub(1);
+                } else if *gain < ramp {
+                    *gain += 1;
+                }
+                if !starved {
+                    starved = (paused && *gain == 0) || cons.slots() < ch;
+                }
             }
             match if starved { None } else { cons.pop().ok() } {
                 Some(v) => {
@@ -390,9 +394,8 @@ impl Renderer {
                         bands.push(v, i % ch == ch - 1, ch);
                     }
                     let mut y = eq.process(i % ch, v) * vol;
-                    if fade_out || fade_in {
-                        let g = (frame as f32 / ramp as f32).min(1.0);
-                        y *= if fade_out { 1.0 - g } else { g };
+                    if *gain < ramp {
+                        y *= *gain as f32 / ramp as f32;
                     }
                     *s = conv(if limit { soft_limit(y) } else { y });
                     n += 1;
@@ -1017,7 +1020,12 @@ impl Worker {
         if o.ctl.failed.load(Ordering::Acquire) {
             // Casque débranché, périphérique désactivé… : pause, on reprendra sur la sortie disponible.
             let pos = self.shared.position_ms.load(Ordering::Relaxed);
-            self.lost_pos = self.cur.is_some().then_some(pos);
+            // Titre réellement entendu (fondu, fin d'enchaînement) : voir `audible_resume`.
+            self.lost_pos = self.audible_resume(pos);
+            // Fin du dernier titre (plus rien à décoder) : une reprise relancera le titre affiché.
+            if self.cur.is_none() {
+                self.shared.idle.store(true, Ordering::Relaxed);
+            }
             self.out = None;
             self.incoming = None;
             self.segments.clear();
@@ -1046,8 +1054,36 @@ impl Worker {
         }
     }
 
+    /// Avant de jeter la sortie : le titre réellement entendu devient `cur`, et la position à laquelle le reprendre est
+    /// renvoyée. Pendant un fondu enchaîné, on entend déjà le titre entrant (la position partagée est la sienne) : il
+    /// était jeté et le titre sortant reprenait à sa position. À la fin d'un enchaînement, `cur` est déjà le titre
+    /// suivant alors qu'on entend encore la fin du précédent : il repart du début, annoncé normalement.
+    fn audible_resume(&mut self, pos: u64) -> Option<u64> {
+        let front = self.segments.front().map(|s| s.id);
+        if let (Some(f), Some(inc)) = (front, self.incoming.as_ref()) {
+            if inc.id == f {
+                self.cur = self.incoming.take();
+                return Some(pos);
+            }
+        }
+        match (&self.cur, front) {
+            (Some(c), Some(f)) if c.id != f => {
+                self.announced = None;
+                Some(0)
+            }
+            (Some(_), _) => Some(pos),
+            (None, _) => None,
+        }
+    }
+
     /// Rouvre la sortie (autre périphérique, autre fréquence possible) et reprend le titre en cours à `resume_ms`.
     fn rebuild_output(&mut self, resume_ms: Option<u64>) -> bool {
+        let resume_ms = match resume_ms {
+            Some(p) => self.audible_resume(p),
+            None => None,
+        };
+        // Fin du dernier titre en train de jouer (plus rien à décoder) : voir plus bas.
+        let tail = if self.cur.is_none() { self.segments.front().map(|s| s.id) } else { None };
         self.out = None;
         self.incoming = None;
         self.leftover.clear();
@@ -1059,7 +1095,23 @@ impl Worker {
         }
         let Some((rate, ch)) = self.out.as_ref().map(|o| (o.rate, o.channels)) else { return false };
         self.flush();
-        let Some(track) = self.cur.as_mut() else { return true };
+        let Some(track) = self.cur.as_mut() else {
+            if let Some(id) = tail {
+                if let Some(p) = self.next.take() {
+                    // Le suivant était prêt : il démarre sur la nouvelle sortie.
+                    self.handle(Cmd::Load { id: p.id, src: p.src, ext: p.ext });
+                } else {
+                    // Le reste du titre est perdu avec l'ancienne sortie : fin du titre, comme s'il avait fini de jouer.
+                    // Avant, rien n'était signalé et la lecture restait bloquée (ni titre suivant, ni reprise possible).
+                    self.announced = None;
+                    self.shared.playing.store(false, Ordering::Relaxed);
+                    self.shared.idle.store(true, Ordering::Relaxed);
+                    self.idle_stop_at = Some(Instant::now() + IDLE_STOP);
+                    let _ = self.events.send(EngineEvent::Finished { id });
+                }
+            }
+            return true;
+        };
         let result = track.reconfigure(rate, ch).and_then(|_| track.seek(resume_ms.unwrap_or(0)));
         match result {
             Ok(actual) => {
@@ -1225,6 +1277,9 @@ impl Worker {
                     Err(e) => {
                         // Rien à jouer : la sortie s'arrêtera dans 30 s si le lecteur ne relance rien (voir `idle_stop_at`).
                         self.shared.idle.store(true, Ordering::Relaxed);
+                        // Plus « en lecture » non plus (l'app et l'écran verrouillé l'affichaient sans aucun son).
+                        self.shared.playing.store(false, Ordering::Relaxed);
+                        let _ = self.events.send(EngineEvent::StateChanged);
                         self.idle_stop_at = Some(Instant::now() + IDLE_STOP);
                         self.err(id, e.to_string());
                     }
@@ -1270,7 +1325,7 @@ impl Worker {
                 }
                 self.device = name;
                 self.last_default_check = Instant::now();
-                if self.out.is_some() && self.cur.is_some() {
+                if self.out.is_some() && (self.cur.is_some() || !self.segments.is_empty()) {
                     // Le titre continue sur le nouveau périphérique, à la même position.
                     let pos = self.shared.position_ms.load(Ordering::Relaxed);
                     self.rebuild_output(Some(pos));

@@ -187,7 +187,8 @@ impl PlayerHandle {
 
     pub fn resume(&self) -> Result<(), PlayerError> {
         self.shared.paused.store(false, Ordering::Relaxed);
-        if self.shared.current_id.load(Ordering::Relaxed) != 0 {
+        // Moteur vide (file terminée, titre en échec) : « en lecture » seulement une fois le titre relancé.
+        if self.shared.current_id.load(Ordering::Relaxed) != 0 && !self.shared.idle.load(Ordering::Relaxed) {
             self.shared.playing.store(true, Ordering::Relaxed);
         }
         self.changed.notify_waiters();
@@ -486,10 +487,25 @@ impl Actor {
                     // Préparation du titre suivant (réseau, parfois lente) : une commande qui arrive pendant ce temps
                     // (suivant, saut, pause…) passe avant. La préparation est abandonnée et refaite au tour suivant.
                     // Avant, les commandes attendaient la fin de la préparation (jusqu'à une minute sur réseau faible).
-                    let interrupted = tokio::select! {
-                        _ = self.maybe_prefetch() => None,
-                        cmd = rx.recv() => Some(cmd),
+                    // Commandes internes (artistes complétés, pochette réparée, suite du Flow) : gardées
+                    // pour après, sans abandonner la préparation (sur réseau lent, elle pouvait ne jamais aboutir).
+                    let mut later = Vec::new();
+                    let interrupted = {
+                        let prefetch = self.maybe_prefetch();
+                        tokio::pin!(prefetch);
+                        loop {
+                            tokio::select! {
+                                _ = &mut prefetch => break None,
+                                cmd = rx.recv() => match cmd {
+                                    Some(c @ (PlayerCmd::Enrich { .. } | PlayerCmd::CoverFixed { .. } | PlayerCmd::FlowMore { .. })) => later.push(c),
+                                    other => break Some(other),
+                                },
+                            }
+                        }
                     };
+                    for c in later {
+                        self.on_cmd(c).await;
+                    }
                     if let Some(cmd) = interrupted {
                         self.prefetched = None;
                         self.prefetched_idx = None;
@@ -1119,6 +1135,9 @@ impl Actor {
                     if let Some(info) = self.infos.get(&playing) {
                         let _ = self.events.send(CoreEvent::Track(info.clone()));
                     }
+                } else if playing == id && self.engine.shared.idle.load(Ordering::Relaxed) {
+                    // Relance d'un titre (moteur vide) impossible : rien ne joue.
+                    self.engine.shared.playing.store(false, Ordering::Relaxed);
                 } else if playing != id {
                     // Le titre qui jouait n'est plus dans la file (autre album, recherche…) : il est arrêté, l'interface
                     // montre le titre demandé en pause, et un appui sur lecture le retente (moteur vide, voir `Resume`).
