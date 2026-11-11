@@ -1077,10 +1077,16 @@ impl Actor {
     /// directement dessus, avec ce qui est déjà téléchargé ; sinon il est chargé normalement.
     async fn play_prefetched_or_current(&mut self) {
         let id = self.queue.get(self.index).copied();
-        if id.is_some() && self.prefetched == id && self.prefetched_idx == Some(self.index) {
-            self.engine.skip_next();
-        } else {
-            self.play_current().await;
+        let info = id.and_then(|id| self.infos.get(&id).cloned());
+        match info {
+            Some(info) if self.prefetched == id && self.prefetched_idx == Some(self.index) => {
+                // Même première annonce que `play_current` (« flux obtenu ») : l'app attend deux annonces du titre
+                // (celle-ci, puis le son audible) avant d'arrêter le chargement. Sans elle, le bouton tournait 20 s
+                // pendant que le titre jouait déjà, avec la barre bloquée à 0:00.
+                let _ = self.events.send(CoreEvent::Track(info));
+                self.engine.skip_next();
+            }
+            _ => self.play_current().await,
         }
     }
 

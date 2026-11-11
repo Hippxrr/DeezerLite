@@ -148,7 +148,10 @@ private struct MiniCarousel: View {
         DragGesture(minimumDistance: 12, coordinateSpace: .global)
             .updating($swiping) { _, state, _ in state = true }
             .onChanged { v in
-                if slide.axis == nil { slide.axis = abs(v.translation.width) > abs(v.translation.height) ? .horizontal : .vertical }
+                if slide.axis == nil {
+                    steps.interrupt(slide: slide)
+                    slide.axis = abs(v.translation.width) > abs(v.translation.height) ? .horizontal : .vertical
+                }
                 guard slide.axis == .horizontal else { return }
                 let base = steps.base(player)
                 let blocked = (v.translation.width < 0 && !player.queue.indices.contains(base + 1))
@@ -163,12 +166,8 @@ private struct MiniCarousel: View {
                 let fling = v.predictedEndTranslation.width
                 let forward = fling < -width * 0.35 && player.queue.indices.contains(base + 1)
                 let backward = fling > width * 0.35 && player.queue.indices.contains(base - 1)
-                guard forward || backward else {
-                    steps.land(softSpring(distance: -slide.dx, velocity: v.velocity.width, bounce: false), slide: slide, player: player)
-                    return
-                }
-                steps.take(forward ? 1 : -1, slide: slide, distance: width + MiniStrip.gap, player: player)
-                steps.land(softSpring(distance: -slide.dx, velocity: v.velocity.width, bounce: false), slide: slide, player: player)
+                steps.land(delta: forward ? 1 : backward ? -1 : 0, distance: width + MiniStrip.gap, velocity: v.velocity.width,
+                           bounce: false, slide: slide, player: player)
             }
     }
 }
@@ -208,28 +207,51 @@ final class CarouselSteps {
         return player.queue.indices.contains(i) ? player.queue[i] : nil
     }
 
-    @MainActor func take(_ delta: Int, slide: SlideState, distance: CGFloat, player: Player) {
+    /// Arrivée en cours vers un titre voisin (-1, 0 ou 1), pas encore prise en compte dans `pending`.
+    @ObservationIgnored private var landing = 0
+    @ObservationIgnored private var landingDistance: CGFloat = 0
+    /// Change à chaque arrivée : la fin d'une ancienne animation (interrompue) ne valide pas la nouvelle.
+    @ObservationIgnored private var landingID = 0
+
+    /// Au lâcher : le carrousel glisse jusqu'au titre voisin (`delta` = ±1) ou revient en place (0), à la vitesse du doigt.
+    /// Les titres affichés ne changent qu'une fois arrivé, d'un coup et sans animation (à cet instant, l'image est
+    /// identique). Avant, ils changeaient au lâcher, pendant le ressort : la pochette du titre suivant prenait un autre
+    /// trajet que son texte et passait dessous.
+    @MainActor func land(delta: Int, distance: CGFloat, velocity: CGFloat, bounce: Bool = true, slide: SlideState, player: Player) {
+        landingID += 1
+        let id = landingID
+        landing = delta
+        landingDistance = distance
+        let target: CGFloat = delta == 0 ? 0 : delta > 0 ? -distance : distance
+        withAnimation(softSpring(distance: target - slide.dx, velocity: velocity, bounce: bounce), completionCriteria: .logicallyComplete) {
+            slide.dx = target
+        } completion: { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self, id == self.landingID else { return }
+                self.commitLanding(slide: slide)
+                self.schedule(slide: slide, player: player, after: .milliseconds(80))
+            }
+        }
+        // Filet de sécurité si la fin d'animation n'arrive jamais (vue retirée…).
+        if delta != 0 { schedule(slide: slide, player: player, after: .milliseconds(1500)) }
+    }
+
+    /// Nouveau glissement commencé pendant une arrivée : celle-ci est validée tout de suite.
+    @MainActor func interrupt(slide: SlideState) {
+        landingID += 1
+        commitLanding(slide: slide)
+    }
+
+    /// Titre voisin arrivé au centre : il devient le titre affiché et le carrousel revient à zéro (même image à l'écran).
+    @MainActor private func commitLanding(slide: SlideState) {
+        guard landing != 0 else { return }
+        let delta = landing
+        landing = 0
         var t = Transaction()
         t.disablesAnimations = true
         withTransaction(t) {
             pending += delta
-            slide.dx += delta > 0 ? distance : -distance
-        }
-        // Filet de sécurité si la fin d'animation n'arrive jamais (vue retirée…) ; normalement c'est `land` qui prévient.
-        schedule(slide: slide, player: player, after: .milliseconds(1500))
-    }
-
-    /// Ramène le carrousel à sa place, puis, une fois arrivé, transmet au lecteur les titres pris.
-    /// Le ressort part au tour suivant : l'échange des titres fait juste avant par `take` est ainsi affiché seul, sans
-    /// animation. Dans la même mise à jour, il était animé avec le ressort, et la pochette du titre suivant traînait
-    /// derrière son texte pendant tout le trajet.
-    @MainActor func land(_ animation: Animation, slide: SlideState, player: Player) {
-        DispatchQueue.main.async { [weak self] in
-            withAnimation(animation, completionCriteria: .logicallyComplete) {
-                slide.dx = 0
-            } completion: { [weak self] in
-                MainActor.assumeIsolated { self?.schedule(slide: slide, player: player, after: .milliseconds(80)) }
-            }
+            slide.dx = 0
         }
     }
 
@@ -853,7 +875,10 @@ private struct CoverCarousel: View {
             DragGesture(minimumDistance: 8, coordinateSpace: .global)
                 .updating($dragging) { _, state, _ in state = true }
                 .onChanged { v in
-                    if slide.axis == nil { slide.axis = abs(v.translation.width) > abs(v.translation.height) ? .horizontal : .vertical }
+                    if slide.axis == nil {
+                    steps.interrupt(slide: slide)
+                    slide.axis = abs(v.translation.width) > abs(v.translation.height) ? .horizontal : .vertical
+                }
                     if slide.axis == .vertical {
                         pull.y = max(0, v.translation.height)
                     } else {
@@ -870,12 +895,8 @@ private struct CoverCarousel: View {
                     let fling = v.predictedEndTranslation.width
                     let forward = fling < -side * 0.35 && steps.neighbor(player, 1) != nil
                     let backward = fling > side * 0.35 && steps.neighbor(player, -1) != nil
-                    guard forward || backward else {
-                        steps.land(softSpring(distance: -slide.dx, velocity: v.velocity.width), slide: slide, player: player)
-                        return
-                    }
-                    steps.take(forward ? 1 : -1, slide: slide, distance: step, player: player)
-                    steps.land(softSpring(distance: -slide.dx, velocity: v.velocity.width), slide: slide, player: player)
+                    steps.land(delta: forward ? 1 : backward ? -1 : 0, distance: step, velocity: v.velocity.width,
+                               slide: slide, player: player)
                 }
         )
         .onChange(of: dragging) { _, on in
