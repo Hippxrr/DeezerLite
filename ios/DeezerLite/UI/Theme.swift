@@ -228,7 +228,11 @@ extension View {
     func surface<S: Shape>(_ shape: S, tint: Color? = nil, interactive: Bool = true, material: Bool = false) -> some View {
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
-            self.glassEffect(liquidGlass(tint: tint, interactive: interactive), in: shape)
+            if interactive {
+                self.modifier(InteractiveGlass(shape: shape, tint: tint))
+            } else {
+                self.glassEffect(liquidGlass(tint: tint, interactive: false), in: shape)
+            }
         } else {
             self.flatSurface(shape, tint: tint, material: material)
         }
@@ -267,7 +271,25 @@ extension View {
     }
 }
 
+extension EnvironmentValues {
+    /// `false` : le verre des surfaces ne réagit plus au doigt (pages cachées sous le grand lecteur).
+    @Entry var glassReactsToTouch = true
+}
+
 #if compiler(>=6.2)
+/// Verre qui réagit au toucher, sauf quand la page est cachée sous le grand lecteur : iOS fait réagir le verre au doigt
+/// même à travers ce qui est posé par-dessus (le lecteur), et l'effet d'appui apparaissait sur la page quand il descendait.
+@available(iOS 26.0, *)
+private struct InteractiveGlass<S: Shape>: ViewModifier {
+    let shape: S
+    let tint: Color?
+    @Environment(\.glassReactsToTouch) private var reacts
+
+    func body(content: Content) -> some View {
+        content.glassEffect(liquidGlass(tint: tint, interactive: reacts), in: shape)
+    }
+}
+
 @available(iOS 26.0, *)
 private func liquidGlass(tint: Color?, interactive: Bool) -> Glass {
     var glass = Glass.regular
