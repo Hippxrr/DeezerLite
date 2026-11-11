@@ -271,6 +271,9 @@ pub struct Detail {
     pub albums: Vec<Card>,
     pub latest: Option<Card>,
     pub related: Vec<Card>,
+    /// Albums d'autres artistes où il est en featuring (page artiste).
+    #[uniffi(default = [])]
+    pub appears_on: Vec<Card>,
     /// Copie hors ligne (Deezer injoignable) : seuls les titres déjà sur le téléphone. À ne jamais réenregistrer
     /// comme collection téléchargée, sinon les titres manquants en disparaîtraient.
     #[uniffi(default = false)]
@@ -899,6 +902,7 @@ impl Core {
                 albums: Vec::new(),
                 latest: None,
                 related: Vec::new(),
+                appears_on: Vec::new(),
                 offline: false,
             }),
             Err(error) => self.offline_detail("loved".into(), 0).ok_or(error),
@@ -926,6 +930,19 @@ impl Core {
     pub async fn playlist_add(&self, playlist_id: u64, track_id: i64) -> Result<(), CoreError> {
         let api = self.api.clone();
         self.run(async move { api.playlist_add(playlist_id, track_id).await }).await??;
+        Ok(())
+    }
+
+    /// Crée une playlist (privée) avec ces titres, éventuellement aucun ; renvoie son identifiant.
+    pub async fn playlist_create(&self, title: String, track_ids: Vec<i64>) -> Result<u64, CoreError> {
+        let api = self.api.clone();
+        Ok(self.run(async move { api.playlist_create(&title, &track_ids).await }).await??)
+    }
+
+    /// Supprime définitivement une playlist de l'utilisateur.
+    pub async fn playlist_delete(&self, playlist_id: u64) -> Result<(), CoreError> {
+        let api = self.api.clone();
+        self.run(async move { api.playlist_delete(playlist_id).await }).await??;
         Ok(())
     }
 
@@ -1063,6 +1080,7 @@ impl Core {
             albums: Vec::new(),
             latest: None,
             related: Vec::new(),
+            appears_on: Vec::new(),
             offline: true,
         };
         remember(&self.known, list);
@@ -1442,6 +1460,7 @@ impl Core {
             albums: cards(c.albums),
             latest: c.latest.map(Card::from),
             related: cards(c.related),
+            appears_on: cards(c.appears_on),
             offline: false,
         };
         remember(&self.known, c.tracks);

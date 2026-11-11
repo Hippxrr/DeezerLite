@@ -65,6 +65,8 @@ pub struct Collection {
     pub tracks: Vec<TrackInfo>,
     /// Discographie de l'artiste, de la plus récente à la plus ancienne (vide pour les autres types).
     pub albums: Vec<Card>,
+    /// Albums d'autres artistes où il est en featuring (« Apparaît dans »), du plus récent au plus ancien.
+    pub appears_on: Vec<Card>,
     /// Dernière sortie mise en avant (page artiste).
     pub latest: Option<Card>,
     /// Artistes similaires (page artiste).
@@ -327,6 +329,35 @@ fn album_cards(items: &[Value]) -> Vec<Card> {
         .collect()
 }
 
+/// Place d'une sortie dans la discographie d'un artiste.
+#[derive(PartialEq)]
+enum ReleaseRole {
+    /// Son album (seul ou en duo).
+    Own,
+    /// Album d'un autre artiste où il est en featuring : « Apparaît dans ».
+    Featured,
+    /// Compilation d'autres artistes, sortie non officielle… : pas affichée.
+    Other,
+}
+
+/// `ROLE_ID` de `album.getDiscography` : 0 = artiste principal, 5 = featuring. Absent (repli sur les albums de la page
+/// artiste) : sa sortie.
+fn release_role(a: &Value, artist: u64) -> ReleaseRole {
+    let compilation = vs(a, "TYPE") == "2" || a.pointer("/SUBTYPES/isCompilation").and_then(Value::as_bool).unwrap_or(false);
+    let official = match a.get("ARTISTS_ALBUMS_IS_OFFICIAL") {
+        Some(Value::Bool(b)) => *b,
+        Some(v) => !matches!(v.as_str(), Some("0") | Some("false")) && v.as_u64() != Some(0),
+        None => true,
+    };
+    let main = vn(a, "ART_ID");
+    match vs(a, "ROLE_ID").as_str() {
+        _ if main == artist => ReleaseRole::Own,
+        "" | "0" if official && !compilation => ReleaseRole::Own,
+        "5" if !compilation => ReleaseRole::Featured,
+        _ => ReleaseRole::Other,
+    }
+}
+
 /// Sortie d'un artiste : sous-titre « Album · 2025 », groupe et date pour le tri et le classement.
 fn release_card(a: &Value) -> Option<Card> {
     let id = vn(a, "ALB_ID");
@@ -524,6 +555,7 @@ impl DeezerClient {
             albums: Vec::new(),
             latest: None,
             related: Vec::new(),
+            appears_on: Vec::new(),
         })
     }
 
@@ -727,6 +759,7 @@ impl DeezerClient {
                     albums: Vec::new(),
                     latest: None,
                     related: Vec::new(),
+                    appears_on: Vec::new(),
                 })
             }
             "playlist" => {
@@ -798,6 +831,7 @@ impl DeezerClient {
                     albums: Vec::new(),
                     latest: None,
                     related: Vec::new(),
+                    appears_on: Vec::new(),
                 })
             }
             "album" => {
@@ -816,6 +850,7 @@ impl DeezerClient {
                     albums: Vec::new(),
                     latest: None,
                     related: Vec::new(),
+                    appears_on: Vec::new(),
                 })
             }
             "artist" => {
@@ -832,8 +867,31 @@ impl DeezerClient {
                     Ok(v) => v.get("data").and_then(Value::as_array).cloned().unwrap_or_default(),
                     Err(_) => data(&r, "ALBUMS").to_vec(), // repli : les albums de la page
                 };
-                let mut releases: Vec<Card> = raw.iter().filter_map(release_card).collect();
+                // Ses sorties d'un côté, les albums d'autres artistes où il est en featuring de l'autre ; les
+                // compilations d'autres artistes (« Hits 2024 »…) ne sont plus mélangées à sa discographie.
+                let mut releases = Vec::new();
+                let mut appears_on = Vec::new();
+                let mut seen = std::collections::HashSet::new();
+                for a in &raw {
+                    if !seen.insert(vn(a, "ALB_ID")) {
+                        continue;
+                    }
+                    match release_role(a, id) {
+                        ReleaseRole::Own => releases.extend(release_card(a)),
+                        ReleaseRole::Featured => appears_on.extend(release_card(a).map(|mut c| {
+                            // Sous-titre : l'artiste de l'album plutôt que son type (« Ninho · 2024 »).
+                            let by = vs(a, "ART_NAME");
+                            if !by.is_empty() {
+                                let year = c.date.get(..4).unwrap_or("").to_owned();
+                                c.subtitle = if year.is_empty() { by } else { format!("{by} · {year}") };
+                            }
+                            c
+                        })),
+                        ReleaseRole::Other => {}
+                    }
+                }
                 releases.sort_by(|a, b| b.date.cmp(&a.date));
+                appears_on.sort_by(|a, b| b.date.cmp(&a.date));
 
                 // Mise en avant : la « highlight » de Deezer si c'est un album, sinon la sortie la plus récente.
                 let latest = r
@@ -854,6 +912,7 @@ impl DeezerClient {
                     cover_url: image("artist", &vs(&d, "ART_PICTURE"), 1000),
                     tracks: tracks(data(&r, "TOP")),
                     albums: releases,
+                    appears_on,
                     latest,
                     related: artist_cards(data(&r, "RELATED_ARTISTS")),
                 })

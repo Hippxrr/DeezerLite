@@ -266,6 +266,8 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         // Page artiste : sa discographie sous ses titres.
         let albums = detail.albums.compactMap(cardItem)
         if !albums.isEmpty { sections.append(CPListSection(items: albums, header: tr("Albums"), sectionIndexTitle: nil)) }
+        let appears = detail.appearsOn.compactMap(cardItem)
+        if !appears.isEmpty { sections.append(CPListSection(items: appears, header: tr("Apparaît dans"), sectionIndexTitle: nil)) }
         template.updateSections(limit(sections))
     }
 

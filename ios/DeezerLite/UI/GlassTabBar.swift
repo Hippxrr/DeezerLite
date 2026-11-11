@@ -96,12 +96,14 @@ struct GlassTabBar: View {
         .buttonStyle(.pressable)
         .accessibilityLabel(title(id))
         .accessibilityAddTraits(id == tab ? .isSelected : [])
-        .animation(.easeOut(duration: 0.15)) { $0.opacity(visible ? 1 : 0) }
+        // Elle réapparaît une fois le mini-lecteur remonté (il passait dessus en même temps).
+        .animation(.easeOut(duration: 0.15).delay(visible && !isSearch ? 0.12 : 0)) { $0.opacity(visible ? 1 : 0) }
         .allowsHitTesting(visible)
         .accessibilityHidden(!visible)
         .offset(x: x)
     }
 
+    /// Fonds de la barre : bulle, rond de la loupe, pastille de l'onglet ouvert.
     private func bar(width: CGFloat) -> some View {
         let third = width / 3
         let slot = Self.order.firstIndex(of: tab) ?? 0
@@ -132,6 +134,13 @@ struct GlassTabBar: View {
                 }
                 .offset(x: third * CGFloat(slot) + 5, y: -6)
                 .opacity(folded ? 0 : 1)
+        }
+    }
+
+    /// Onglets, posés au-dessus du mini-lecteur : quand il monte ou descend, son verre passait sur les icônes et en
+    /// montrait un reflet flou (une maison blanche quelques instants à l'ancienne place de l'onglet).
+    private func buttons(width: CGFloat) -> some View {
+        ZStack(alignment: .bottomLeading) {
             ForEach(Array(Self.order.enumerated()), id: \.element) { index, id in
                 button(id, slot: index, width: width)
             }
@@ -151,6 +160,7 @@ struct GlassTabBar: View {
                         .offset(x: folded ? round : 0, y: folded ? 0 : -(GlassBarMetrics.barHeight + GlassBarMetrics.gap))
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
+                buttons(width: width)
             }
             .frame(width: width, height: geo.size.height, alignment: .bottomLeading)
         }

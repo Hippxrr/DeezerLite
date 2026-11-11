@@ -75,6 +75,12 @@ struct SearchView: View {
     /// Champ de l'app plutôt que celui d'iOS (`searchable`) : celui-ci mettait la page dans son propre conteneur, au fond
     /// noir (le fond choisi ne se voyait pas), et glisser sur la page ne baissait pas son clavier.
     private var searchField: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            // Titre de la page : replié pendant la frappe, pour laisser la place aux résultats.
+            if !typing {
+                PageTitleBar(title: tr("Recherche"))
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
         HStack(spacing: 0) {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -112,6 +118,7 @@ struct SearchView: View {
             .opacity(typing ? 1 : 0)
             .allowsHitTesting(typing)
             .accessibilityHidden(!typing)
+        }
         }
         .animation(.easeOut(duration: 0.2), value: typing)
         .padding(.horizontal, 16)

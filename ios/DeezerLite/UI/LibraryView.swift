@@ -27,7 +27,8 @@ enum LibrarySection: Hashable, CaseIterable {
 struct LibraryView: View {
     @Environment(Player.self) private var player
     @Environment(\.openRoute) private var openRoute
-    @State private var showSettings = false
+    @State private var creating = false
+    @State private var newName = ""
 
     /// Ce qui est déjà sur l'accueil (titres aimés, éléments épinglés) n'est pas répété ici.
     private var playlists: [Card]? {
@@ -39,7 +40,19 @@ struct LibraryView: View {
             VStack(alignment: .leading, spacing: 22) {
                 header
                 sections
-                Text(tr("Playlists")).font(.title3.bold())
+                HStack {
+                    Text(tr("Playlists")).font(.title3.bold())
+                    Spacer()
+                    Button { newName = ""; creating = true } label: {
+                        Image(systemName: "plus")
+                            .font(.system(size: 16, weight: .semibold))
+                            .foregroundStyle(.primary)
+                            .frame(width: 36, height: 36)
+                            .surface(Circle())
+                    }
+                    .buttonStyle(.pressable)
+                    .accessibilityLabel(tr("Nouvelle playlist"))
+                }
                 playlistRows
             }
             .padding(.horizontal, 16)
@@ -52,22 +65,13 @@ struct LibraryView: View {
         }
         // Relancé aussi au changement de profil.
         .task(id: player.profileEpoch) { await player.loadLibrary(0, force: false) }
-        .sheet(isPresented: $showSettings) { SettingsView().environment(player) }
+        .newPlaylistPrompt(isPresented: $creating, name: $newName) { title in
+            Task { await player.createPlaylist(title) }
+        }
     }
 
     private var header: some View {
-        HStack {
-            Spacer()
-            Button { showSettings = true } label: {
-                Image(systemName: "gearshape.fill")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.primary)
-                    .frame(width: 42, height: 42)
-                    .surface(Circle())
-            }
-            .buttonStyle(.pressable)
-            .accessibilityLabel(tr("Réglages"))
-        }
+        PageTitleBar(title: tr("Bibliothèque"))
     }
 
     private var sections: some View {

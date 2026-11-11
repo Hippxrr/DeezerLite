@@ -8,6 +8,9 @@ struct HomeView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
+                PageTitleBar(title: tr("Accueil"))
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, -12)
                 // Flow, titres aimés, épinglés : appui long puis « Réorganiser l'accueil » pour changer l'ordre.
                 VStack(spacing: 12) {
                     ForEach(player.homeItems, id: \.id) { item in row(item) }

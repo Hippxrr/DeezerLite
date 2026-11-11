@@ -41,11 +41,6 @@ func softSpring(distance: CGFloat, velocity: CGFloat, bounce: Bool = true) -> An
 /// Glisser sur le titre : les titres voisins suivent le doigt, comme un carrousel.
 struct MiniPlayer: View {
     @Environment(Player.self) private var player
-    @State private var slide = SlideState()
-    /// Titres d'avance pris par le carrousel, transmis au lecteur une fois le geste posé (voir `CarouselSteps`).
-    @State private var steps = CarouselSteps()
-    /// Doigt posé : revient à `false` même si le système annule le geste, sans `onEnded`.
-    @GestureState private var swiping = false
     /// Dans la barre d'onglets : c'est iOS qui dessine la bulle, et la place est plus petite.
     var inBar = false
     /// Barre réduite, à côté des onglets : seulement la pochette, le titre et lecture / pause.
@@ -60,16 +55,9 @@ struct MiniPlayer: View {
 
     private var row: some View {
         HStack(spacing: 8) {
-            GeometryReader { geo in
-                let width = geo.size.width
-                MiniStrip(width: width, steps: steps, cover: inBar ? 34 : 44)
-                    .modifier(SlideOffset(state: slide))
-                    .frame(width: width, height: geo.size.height, alignment: .leading)
-                    .contentShape(Rectangle())
-                    .gesture(swipe(width: width))
-            }
-            .frame(height: inBar ? 40 : 46)
-            .clipped()
+            MiniCarousel(cover: inBar ? 34 : 44)
+                .frame(height: inBar ? 40 : 46)
+                .clipped()
             PlayButton(size: inBar ? 16 : 19)
             if let t = player.current, !compact {
                 // S'efface tout de suite : il ne suit pas le mini-lecteur qui rétrécit.
@@ -102,7 +90,6 @@ struct MiniPlayer: View {
             .contentShape(shape)
             .onTapGesture { player.showFullPlayer = true }
             .accessibilityAction(named: tr("Ouvrir le lecteur")) { player.showFullPlayer = true }
-            .onChange(of: swiping) { _, on in if !on { slide.recover() } }
     }
 
     @ViewBuilder
@@ -130,6 +117,31 @@ struct MiniPlayer: View {
             // Un peu moins large que la barre d'onglets ; ces marges ne réagissent pas au doigt (la liste dessous, si).
             .padding(.horizontal, 30)
         }
+    }
+
+}
+
+/// Titre du mini-lecteur qu'on fait glisser. À part du mini-lecteur : pendant le glissement, seul ce carrousel est
+/// redessiné (avant, tout le mini-lecteur pouvait l'être à chaque mouvement du doigt : boutons, barre de progression…).
+private struct MiniCarousel: View {
+    @Environment(Player.self) private var player
+    let cover: CGFloat
+    @State private var slide = SlideState()
+    /// Titres d'avance pris par le carrousel, transmis au lecteur une fois le geste posé (voir `CarouselSteps`).
+    @State private var steps = CarouselSteps()
+    /// Doigt posé : revient à `false` même si le système annule le geste, sans `onEnded`.
+    @GestureState private var swiping = false
+
+    var body: some View {
+        GeometryReader { geo in
+            let width = geo.size.width
+            MiniStrip(width: width, steps: steps, cover: cover)
+                .modifier(SlideOffset(state: slide))
+                .frame(width: width, height: geo.size.height, alignment: .leading)
+                .contentShape(Rectangle())
+                .gesture(swipe(width: width))
+        }
+        .onChange(of: swiping) { _, on in if !on { slide.recover() } }
     }
 
     private func swipe(width: CGFloat) -> some Gesture {

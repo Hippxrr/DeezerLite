@@ -1216,6 +1216,8 @@ final class Player {
         likeTasks = [:]
         likeGeneration = [:]
         creditsTrack = nil
+        playlistTrack = nil
+        deletingPlaylist = nil
         showFullPlayer = false
         clearHistory()
         pendingRestore = nil
@@ -1765,6 +1767,47 @@ final class Player {
         CustomCovers.store(customCovers)
         CustomCovers.remove(key: key)
         showToast(tr("Pochette d'origine rétablie"))
+    }
+
+    /// Appui long sur un titre > « Ajouter à une playlist » : titre pour lequel la fenêtre des playlists est ouverte.
+    var playlistTrack: Track?
+    /// Playlist dont la suppression attend la confirmation.
+    var deletingPlaylist: Card?
+
+    /// Crée une playlist (avec ces titres, éventuellement aucun). `false` si Deezer refuse (message affiché).
+    @discardableResult
+    func createPlaylist(_ title: String, with tracks: [Track] = []) async -> Bool {
+        let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let core, !name.isEmpty else { return false }
+        do {
+            _ = try await core.playlistCreate(title: name, trackIds: tracks.map(\.id))
+            showToast(tracks.isEmpty ? tr("Playlist « %@ » créée", name) : tr("Ajouté à « %@ »", name))
+            await loadLibrary(0, force: true)
+            return true
+        } catch {
+            showToast(describe(error), seconds: 4)
+            return false
+        }
+    }
+
+    /// Supprime une de ses playlists chez Deezer (après confirmation). Elle quitte aussi l'accueil si elle y était épinglée.
+    func deletePlaylist(_ card: Card) async {
+        guard let core else { return }
+        do {
+            try await core.playlistDelete(playlistId: card.id)
+            if let i = pins.firstIndex(where: { $0.matches(card) }) {
+                let removed = HomeItem.pin(pins[i]).id
+                pins.remove(at: i)
+                if homeOrder.contains(removed) { setHomeOrder(homeOrder.filter { $0 != removed }) }
+                Pin.save(pins)
+            }
+            library[0]?.removeAll { $0.kind == "playlist" && $0.id == card.id }
+            forgetDetail(kind: "playlist", id: card.id)
+            showToast(tr("Playlist supprimée"))
+            await loadLibrary(0, force: true)
+        } catch {
+            showToast(describe(error), seconds: 4)
+        }
     }
 
     func addToPlaylist(_ playlist: Card, _ track: Track) {

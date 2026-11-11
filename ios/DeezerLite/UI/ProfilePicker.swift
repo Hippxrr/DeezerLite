@@ -66,6 +66,55 @@ struct ProfileBadge: View {
     }
 }
 
+/// Haut des pages principales (Accueil, Recherche, Bibliothèque) : leur nom en gros, et à droite la photo du profil
+/// ouvert, qui ouvre les Réglages.
+struct PageTitleBar: View {
+    let title: String
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Text(title)
+                .font(.largeTitle.bold())
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .accessibilityAddTraits(.isHeader)
+            Spacer(minLength: 0)
+            ProfileButton()
+        }
+    }
+}
+
+/// Photo du profil ouvert (son initiale s'il n'en a pas) : ouvre les Réglages, comme l'engrenage avant.
+struct ProfileButton: View {
+    @Environment(Player.self) private var player
+    @State private var showSettings = false
+    private let side: CGFloat = 40
+
+    var body: some View {
+        Button { showSettings = true } label: {
+            Group {
+                if let profile = player.currentProfile {
+                    ProfileAvatar(profile: profile, side: side)
+                } else {
+                    // Profils pas encore chargés.
+                    Image(systemName: "person.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .frame(width: side, height: side)
+                        .background(Theme.card, in: Circle())
+                }
+            }
+            // Fin liseré autour de la photo, lisible sur tous les fonds.
+            .overlay { Circle().strokeBorder(Color.primary.opacity(0.18), lineWidth: 2.5) }
+            .frame(width: 44, height: 44)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.pressable)
+        .accessibilityLabel(tr("Réglages"))
+        .sheet(isPresented: $showSettings) { SettingsView().environment(player) }
+    }
+}
+
 /// Photo du profil, ou son initiale sur la couleur du thème s'il n'en a pas.
 struct ProfileAvatar: View {
     let profile: Profile

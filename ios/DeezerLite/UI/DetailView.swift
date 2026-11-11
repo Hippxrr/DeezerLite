@@ -57,6 +57,15 @@ final class SortedTracks {
     }
 }
 
+/// Position de la liste (voir `DetailView.scrollMemory`) : une classe simple, que SwiftUI ne surveille pas.
+private final class ScrollMemory {
+    var top: Int?
+    var kept: Int?
+    /// Pas de recherche tapée : la position est celle de la liste complète.
+    var tracking = true
+    var toggledAt = Date.distantPast
+}
+
 /// Page d'une playlist, d'un album, d'un artiste, d'un mix ou des titres aimés.
 struct DetailView: View {
     @Environment(Player.self) private var player
@@ -71,12 +80,11 @@ struct DetailView: View {
     @State private var sorted = SortedTracks()
     /// Champ de recherche affiché seulement après un appui sur la loupe.
     @State private var searching = false
-    /// Ligne de la liste en haut de l'écran (suivie par la vue défilante).
-    @State private var scrollIndex: Int?
-    /// Dernière position dans la liste complète (hors recherche tapée) : celle remise à l'ouverture et à la fermeture de
-    /// la loupe. Le champ de recherche reconstruit toute la page, qui revenait sinon en haut.
-    @State private var keptIndex: Int?
-    @State private var searchToggledAt = Date.distantPast
+    /// Ligne en haut de l'écran et dernière position dans la liste complète (hors recherche tapée), remise à l'ouverture
+    /// et à la fermeture de la loupe. Gardées hors de l'état de la vue : avant, chaque ligne qui passait en haut pendant
+    /// le défilement reconstruisait toute la page (en-tête, barre du haut, liste de centaines de titres), d'où des
+    /// saccades dans les longues playlists.
+    @State private var scrollMemory = ScrollMemory()
     /// Confirmation avant de supprimer le téléchargement de la collection (corbeille de la barre du haut).
     @State private var confirmRemoveDownload = false
     @AppStorage private var sortRaw: String
@@ -246,21 +254,27 @@ struct DetailView: View {
     /// Contenu de la page avec sa position gardée quand la loupe s'ouvre ou se ferme (à part de `body` : tout au même
     /// endroit dépassait ce que le compilateur sait vérifier).
     private var pageWithPosition: some View {
-        pageContent
-            .scrollPosition(id: $scrollIndex, anchor: .top)
-            .onChange(of: scrollIndex) { _, index in
-                // Positions de la liste complète seulement (pas des résultats filtrés), et pas pendant la reconstruction.
-                if query.isEmpty, Date().timeIntervalSince(searchToggledAt) > 0.5 { keptIndex = index }
-            }
-            .onChange(of: searching) { restorePosition() }
+        let memory = scrollMemory
+        return ScrollViewReader { proxy in
+            pageContent
+                // Lue par la vue défilante, écrite à chaque ligne qui passe en haut, sans redessiner la page.
+                .scrollPosition(id: Binding(get: { memory.top }, set: { index in
+                    memory.top = index
+                    // Positions de la liste complète seulement (pas des résultats filtrés), et pas pendant la reconstruction.
+                    if memory.tracking, Date().timeIntervalSince(memory.toggledAt) > 0.5 { memory.kept = index }
+                }), anchor: .top)
+                .onChange(of: query.isEmpty, initial: true) { _, empty in memory.tracking = empty }
+                .onChange(of: searching) { restorePosition(proxy) }
+        }
     }
 
-    private func restorePosition() {
-        searchToggledAt = Date()
-        let target = keptIndex
+    private func restorePosition(_ proxy: ScrollViewProxy) {
+        let memory = scrollMemory
+        memory.toggledAt = Date()
+        guard let target = memory.kept else { return }
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(60))
-            scrollIndex = target
+            proxy.scrollTo(target, anchor: .top)
         }
     }
 
@@ -444,6 +458,7 @@ struct DetailView: View {
         }
         if let latest = d.latest { ShelfRow(title: tr("Dernière sortie"), cards: [latest]) }
         if !d.albums.isEmpty { ShelfRow(title: tr("Discographie"), cards: d.albums) }
+        if !d.appearsOn.isEmpty { ShelfRow(title: tr("Apparaît dans"), cards: d.appearsOn) }
         if !d.related.isEmpty { ShelfRow(title: tr("Artistes similaires"), cards: d.related) }
     }
 }

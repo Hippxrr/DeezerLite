@@ -14,23 +14,41 @@ private struct WindowStyle: UIViewRepresentable {
     func updateUIView(_ uiView: Probe, context: Context) {}
 }
 
-/// Au lancement : le logo de l'écran de démarrage d'iOS, repris au même endroit, grossit un peu et s'efface, puis l'app
-/// apparaît, déjà remplie (les copies du téléphone sont lues pendant ce temps). Moins d'une seconde, jamais bloqué.
+/// Au lancement : le logo de l'écran de démarrage d'iOS, repris exactement au même endroit. Il se contracte un instant,
+/// puis le cœur s'ouvre et grandit jusqu'à couvrir l'écran : l'app apparaît à travers lui, déjà remplie (les copies du
+/// téléphone sont lues pendant ce temps), en se posant de son côté. Moins d'une seconde, jamais bloqué.
+/// « Réduire les animations » : simple fondu.
 private struct LaunchCover: View {
     @Environment(Player.self) private var player
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// Le cœur commence à s'ouvrir : l'app derrière se met en place.
+    let onReveal: () -> Void
     let done: () -> Void
+    @State private var logoScale: CGFloat = 1
+    @State private var logoOpacity: Double = 1
+    /// Taille du trou en forme de cœur dans le fond (rien au départ).
+    @State private var holeScale: CGFloat = 0.001
+    @State private var coverOpacity: Double = 1
     @State private var leaving = false
+
+    /// Même taille et même place que sur l'écran de démarrage d'iOS (image centrée, 120 points).
+    private var logo: some View {
+        Image("LaunchLogo").resizable().frame(width: 120, height: 120)
+    }
 
     var body: some View {
         ZStack {
+            // Fond percé d'un cœur : on voit l'app à travers.
             Color("LaunchBackground")
-            Image("LaunchLogo")
-                .resizable()
-                .frame(width: 120, height: 120)
-                .scaleEffect(leaving ? 1.25 : 1)
+                .mask {
+                    Rectangle()
+                        .overlay { logo.scaleEffect(holeScale).blendMode(.destinationOut) }
+                        .compositingGroup()
+                }
+            logo.scaleEffect(logoScale).opacity(logoOpacity)
         }
         .ignoresSafeArea()
-        .opacity(leaving ? 0 : 1)
+        .opacity(coverOpacity)
         .allowsHitTesting(!leaving)
         .accessibilityHidden(true)
         .task {
@@ -39,8 +57,30 @@ private struct LaunchCover: View {
             while Date().timeIntervalSince(start) < 1, !player.launchReady || Date().timeIntervalSince(start) < 0.15 {
                 try? await Task.sleep(for: .milliseconds(30))
             }
-            withAnimation(.easeIn(duration: 0.35)) { leaving = true }
-            try? await Task.sleep(for: .milliseconds(360))
+            leaving = true
+            if reduceMotion {
+                onReveal()
+                withAnimation(.easeOut(duration: 0.3)) { coverOpacity = 0 }
+                try? await Task.sleep(for: .milliseconds(320))
+                done()
+                return
+            }
+            // 1. Le cœur prend son élan : il se contracte.
+            withAnimation(.easeInOut(duration: 0.2)) { logoScale = 0.86 }
+            try? await Task.sleep(for: .milliseconds(200))
+            // 2. Il s'ouvre : le trou part de sa taille exacte et grandit avec lui, lentement puis de plus en plus vite,
+            // jusqu'à dépasser l'écran. Le logo coloré s'efface dans les premiers instants, l'app apparaît dans le cœur.
+            holeScale = 0.86
+            onReveal()
+            let grow = Animation.timingCurve(0.6, 0, 0.8, 0.25, duration: 0.6)
+            withAnimation(grow) {
+                holeScale = 26
+                logoScale = 26
+            }
+            withAnimation(.easeOut(duration: 0.16)) { logoOpacity = 0 }
+            // Les fins espaces entre les barres du cœur ne restent jamais à l'écran.
+            withAnimation(.easeOut(duration: 0.2).delay(0.4)) { coverOpacity = 0 }
+            try? await Task.sleep(for: .milliseconds(620))
             done()
         }
     }
@@ -51,6 +91,8 @@ struct RootView: View {
     @Environment(\.scenePhase) private var phase
     /// Animation de lancement : seulement quand l'app s'ouvre à l'écran (pas lancée en arrière-plan par CarPlay ou l'audio).
     @State private var launchCover = UIApplication.shared.applicationState != .background
+    /// L'app derrière l'animation de lancement, un peu en retrait jusqu'à ce que le cœur s'ouvre.
+    @State private var launchRevealed = UIApplication.shared.applicationState == .background
 
     var body: some View {
         Group {
@@ -60,6 +102,8 @@ struct RootView: View {
             case true?: MainTabs()
             }
         }
+        // Pendant l'ouverture du cœur, l'app se pose à sa taille (au lieu d'être déjà là, immobile, derrière).
+        .scaleEffect(launchRevealed ? 1 : 0.9)
         .background(Theme.background.ignoresSafeArea())
         .background(WindowStyle())
         .onChange(of: phase) { _, now in
@@ -82,7 +126,11 @@ struct RootView: View {
         }
         .animation(.spring(response: 0.35, dampingFraction: 0.85), value: player.toast)
         .overlay {
-            if launchCover { LaunchCover { launchCover = false } }
+            if launchCover {
+                LaunchCover(onReveal: {
+                    withAnimation(.spring(response: 0.75, dampingFraction: 0.86)) { launchRevealed = true }
+                }, done: { launchCover = false })
+            }
         }
         .alert("Deezer Lite", isPresented: Binding(get: { player.message != nil }, set: { if !$0 { player.message = nil } })) {
             Button("OK", role: .cancel) {}
@@ -403,6 +451,16 @@ struct MainTabs: View {
         }
         .sheet(item: Binding(get: { player.creditsTrack }, set: { player.creditsTrack = $0 })) { track in
             CreditsView(track: track).environment(player).presentationDetents([.medium, .large])
+        }
+        .sheet(item: Binding(get: { player.playlistTrack }, set: { player.playlistTrack = $0 })) { track in
+            PlaylistChooser(track: track).environment(player).presentationDetents([.medium, .large])
+        }
+        .confirmationDialog(tr("Supprimer la playlist ?"),
+                            isPresented: Binding(get: { player.deletingPlaylist != nil }, set: { if !$0 { player.deletingPlaylist = nil } }),
+                            titleVisibility: .visible, presenting: player.deletingPlaylist) { card in
+            Button(tr("Supprimer"), role: .destructive) { Task { await player.deletePlaylist(card) } }
+        } message: { card in
+            Text(tr("« %@ » sera supprimée de ton compte Deezer. Cette action est définitive.", card.title))
         }
     }
 }

@@ -470,6 +470,7 @@ private struct TrackMenu: View, Equatable {
     var body: some View {
         Button { player.queueAdd([track], next: true) } label: { Label(tr("Lire ensuite"), systemImage: "text.line.first.and.arrowtriangle.forward") }
         Button { player.queueAdd([track], next: false) } label: { Label(tr("Ajouter à la file"), systemImage: "text.append") }
+        Button { player.playlistTrack = track } label: { Label(tr("Ajouter à une playlist"), systemImage: "text.badge.plus") }
         if downloaded {
             Button(role: .destructive) { player.removeDownload(track.id) } label: { Label("Supprimer le téléchargement", systemImage: "trash") }
         } else {
@@ -553,6 +554,7 @@ struct CardView: View {
             PinMenu(card: card)
             CoverMenu(card: card)
             ShareCardButton(card: card)
+            DeletePlaylistMenu(card: card)
         }
     }
 }
@@ -772,6 +774,7 @@ struct CardRow: View {
             if let onReorder {
                 Button(action: onReorder) { Label(tr("Réorganiser l'accueil"), systemImage: "arrow.up.arrow.down") }
             }
+            DeletePlaylistMenu(card: card)
         }
     }
 }
