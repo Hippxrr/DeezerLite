@@ -66,6 +66,20 @@ private final class ScrollMemory {
     var toggledAt = Date.distantPast
 }
 
+/// Signale la première ligne visible de la liste (iOS 18 et plus ; avant, la position n'est pas gardée à l'ouverture de
+/// la loupe).
+private struct TopRowTracker: ViewModifier {
+    let onTop: (Int?) -> Void
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onScrollTargetVisibilityChange(idType: Int.self, threshold: 0.5) { ids in onTop(ids.min()) }
+        } else {
+            content
+        }
+    }
+}
+
 /// Page d'une playlist, d'un album, d'un artiste, d'un mix ou des titres aimés.
 struct DetailView: View {
     @Environment(Player.self) private var player
@@ -257,12 +271,14 @@ struct DetailView: View {
         let memory = scrollMemory
         return ScrollViewReader { proxy in
             pageContent
-                // Lue par la vue défilante, écrite à chaque ligne qui passe en haut, sans redessiner la page.
-                .scrollPosition(id: Binding(get: { memory.top }, set: { index in
+                // Ligne du haut seulement observée (aucune position imposée à la liste) : avec une position liée
+                // (`scrollPosition`), SwiftUI la réappliquait parfois quand la page se mettait à jour (changement de titre
+                // depuis le mini-lecteur…) et la liste sautait ailleurs.
+                .modifier(TopRowTracker { index in
                     memory.top = index
                     // Positions de la liste complète seulement (pas des résultats filtrés), et pas pendant la reconstruction.
                     if memory.tracking, Date().timeIntervalSince(memory.toggledAt) > 0.5 { memory.kept = index }
-                }), anchor: .top)
+                })
                 .onChange(of: query.isEmpty, initial: true) { _, empty in memory.tracking = empty }
                 .onChange(of: searching) { restorePosition(proxy) }
         }

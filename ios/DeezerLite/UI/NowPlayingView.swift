@@ -221,7 +221,7 @@ private struct MiniCarousel: View {
                 let backward = fling > width * 0.35 && player.queue.indices.contains(base - 1)
                 steps.land(delta: forward ? 1 : backward ? -1 : 0, distance: width + MiniStrip.gap,
                            velocity: slide.fingerVelocity(fallback: v.velocity.width),
-                           bounce: false, headStart: Self.releaseHeadStart, slide: slide, player: player)
+                           bounce: false, headStart: Self.releaseHeadStart, waitFullStop: true, slide: slide, player: player)
             }
     }
 }
@@ -263,7 +263,6 @@ final class CarouselSteps {
 
     /// Arrivée en cours vers un titre voisin (-1, 0 ou 1), pas encore prise en compte dans `pending`.
     @ObservationIgnored private var landing = 0
-    @ObservationIgnored private var landingDistance: CGFloat = 0
     /// Change à chaque arrivée : la fin d'une ancienne animation (interrompue) ne valide pas la nouvelle.
     @ObservationIgnored private var landingID = 0
 
@@ -271,27 +270,36 @@ final class CarouselSteps {
     /// Les titres affichés ne changent qu'une fois arrivé, d'un coup et sans animation (à cet instant, l'image est
     /// identique). Avant, ils changeaient au lâcher, pendant le ressort : la pochette du titre suivant prenait un autre
     /// trajet que son texte et passait dessous.
+    /// `waitFullStop` : échange des titres une fois le ressort tout à fait arrêté (mini-lecteur : à « presque fini », la fin
+    /// du trajet sautait de 2 à 3 points) ; sinon dès qu'il est presque arrivé, et le son suit aussitôt (grand lecteur, où
+    /// l'attente avant le son se sentait).
     @MainActor func land(delta: Int, distance: CGFloat, velocity: CGFloat, bounce: Bool = true, headStart: TimeInterval = 0,
-                         slide: SlideState, player: Player) {
+                         waitFullStop: Bool = false, slide: SlideState, player: Player) {
         landingID += 1
         let id = landingID
         landing = delta
-        landingDistance = distance
         let target: CGFloat = delta == 0 ? 0 : delta > 0 ? -distance : distance
         withAnimation(softSpring(distance: target - slide.dx, velocity: velocity, bounce: bounce, headStart: headStart),
-                      // Échange des titres une fois le ressort tout à fait arrêté : à « presque fini », la fin du trajet
-                      // (2 à 3 points) sautait d'un coup.
-                      completionCriteria: .removed) {
+                      completionCriteria: waitFullStop ? .removed : .logicallyComplete) {
             slide.dx = target
         } completion: { [weak self] in
             MainActor.assumeIsolated {
                 guard let self, id == self.landingID else { return }
                 self.commitLanding(slide: slide)
-                self.schedule(slide: slide, player: player, after: .milliseconds(80))
+                self.schedule(slide: slide, player: player, after: .milliseconds(waitFullStop ? 80 : 0))
             }
         }
-        // Filet de sécurité si la fin d'animation n'arrive jamais (vue retirée…).
-        if delta != 0 { schedule(slide: slide, player: player, after: .milliseconds(1500)) }
+        // Filet de sécurité si la fin d'animation n'arrive jamais (vue retirée…) : l'arrivée est validée quand même, sinon
+        // le swipe était perdu (le lecteur n'était prévenu que de ce qui était déjà validé).
+        if delta != 0 {
+            Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(1500))
+                guard let self, id == self.landingID, self.landing != 0, slide.axis == nil else { return }
+                self.landingID += 1
+                self.commitLanding(slide: slide)
+                self.schedule(slide: slide, player: player, after: .zero)
+            }
+        }
     }
 
     /// Nouveau glissement commencé pendant une arrivée : celle-ci est validée tout de suite.

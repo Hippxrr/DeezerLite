@@ -1,6 +1,6 @@
 # 🎧 Deezer Lite · iOS
 
-![Version](https://img.shields.io/badge/version-2.5.0-a238ff)
+![Version](https://img.shields.io/badge/version-2.6.0-a238ff)
 ![iOS](https://img.shields.io/badge/iOS-17%2B-black?logo=apple)
 ![Swift](https://img.shields.io/badge/SwiftUI-native-F05138?logo=swift&logoColor=white)
 ![Rust](https://img.shields.io/badge/engine-Rust-B7410E?logo=rust&logoColor=white)
@@ -26,7 +26,7 @@ networking, the play queue and audio.
 |---|---|
 | Device | iPhone, iOS 17 or later |
 | Display name | Deezer |
-| Version | 2.5.0 |
+| Version | 2.6.0 |
 | Bundle ID | `com.hippxrr.deezerlite` |
 | UI | SwiftUI, Observation, Liquid Glass on iOS 26 |
 | Engine | Rust (2021 edition), bridged to Swift with UniFFI 0.29 |
@@ -58,7 +58,8 @@ networking, the play queue and audio.
 - **5-band equalizer** (60 Hz, 230 Hz, 910 Hz, 3.6 kHz, 14 kHz) with about fifteen presets and a custom mode. When
   flat, the signal is left strictly untouched.
 - **Full player**: synced lyrics, editable queue, track credits, sharing, blurred background taken from the cover.
-- **Mini player**: swipe sideways to change track, tap to open the full player; its progress bar can be hidden.
+- **Mini player**: swipe sideways to change track (the carousel follows the finger's speed and lands smoothly), tap
+  to open the full player; its progress bar can be hidden.
 - **Lock screen and Control Center**: title, artwork, position and controls.
 - **CarPlay**: home, library and recent listens on the car screen.
 - **Interruptions handled like Apple's music apps**: playback pauses when another app takes the audio (call, voice
@@ -87,6 +88,11 @@ networking, the play queue and audio.
 - 🔍 **Search**: results as you type, a featured artist with their latest release, tracks, albums, playlists and
   artists; search history.
 - 📚 **Library**: playlists, albums, artists and stats.
+- 🎶 **Your playlists**: create one from the Library, add any track from its long press ("Add to a playlist", with
+  "New playlist" right there), delete your own playlists after confirmation.
+- 🎤 **Artist pages**: popular tracks, latest release, the artist's own discography, a separate "Appears on" row for
+  albums where they are featured (other artists' compilations are left out), similar artists.
+- ⏳ **Unreleased tracks**: shown greyed out with their release date, playable once they are out.
 - 📊 **Official stats**: Deezer's monthly recap (listening time, tracks, artists, genres) as a shareable image, and
   the latest listens from Deezer's history.
 - 👨‍👩‍👧 **Family accounts**: profile picker at launch ("Who's listening?") and profile switching in settings.
@@ -100,6 +106,8 @@ networking, the play queue and audio.
   left, mini player in the middle, search on the right), or the native iOS bar.
 - **Custom playlist covers**, cropped inside the app.
 - **Renamable liked tracks** (on the phone only).
+- **Page headers**: each main page shows its name with your profile picture, which opens the settings.
+- **Storage in settings**: space used by saved covers (with confirmation before erasing) and by downloads.
 
 ### Under the hood
 
@@ -325,7 +333,7 @@ profile also includes the CarPlay entitlement.
 
 ### Versioning
 
-The app version is fixed in the code: `MARKETING_VERSION` in `ios/project.yml`, currently **2.5.0**. A build made
+The app version is fixed in the code: `MARKETING_VERSION` in `ios/project.yml`, currently **2.6.0**. A build made
 on the Mac always carries that version, there is nothing to choose.
 
 ### If something goes wrong
