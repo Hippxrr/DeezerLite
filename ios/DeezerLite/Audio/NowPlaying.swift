@@ -46,8 +46,10 @@ enum NowPlaying {
 
     static func update(track: Track?, status: Status) {
         let center = MPNowPlayingInfoCenter.default()
+        AirPodsDiag.shared.silentPlayer(playing: track != nil && status.playing) // TEMPORAIRE (test AirPods)
         guard let track else {
             center.nowPlayingInfo = nil
+            if AirPodsDiag.on(AirPodsDiag.stateKey) { center.playbackState = .stopped } // TEMPORAIRE (test AirPods)
             shownTrack = nil
             artwork = nil
             return
@@ -92,6 +94,9 @@ enum NowPlaying {
         // TEMPORAIRE (test AirPods) : état annoncé à iOS (lecture ou pause), à chaque changement.
         if (status.playing ? 1.0 : 0.0) != sent.rate { AirPodsDiag.shared.log("Annoncé à iOS : \(status.playing ? "lecture" : "pause")") }
         center.nowPlayingInfo = info
+        // TEMPORAIRE (test AirPods) : état de lecture déclaré à iOS. Apple le dit utile surtout sur Mac (sur iPhone, iOS le
+        // devine d'après le son de l'app), mais c'est peut-être ce qu'il regarde avant d'envoyer la pause au retrait d'un AirPod.
+        if AirPodsDiag.on(AirPodsDiag.stateKey) { center.playbackState = status.playing ? .playing : .paused }
         sent = (Double(status.positionMs) / 1000, status.playing ? 1 : 0, Date())
     }
 

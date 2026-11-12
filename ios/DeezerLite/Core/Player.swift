@@ -815,6 +815,7 @@ final class Player {
         // Qualité choisie lors d'une session précédente (le cœur démarre en FLAC).
         applyQuality()
         watchNetwork()
+        AirPodsDiag.shared.start() // TEMPORAIRE (test AirPods)
         NowPlaying.setup(self)
         observeAudioSession()
         // Mémoire sous pression ou passage en arrière-plan : on oublie les pages et paroles gardées en mémoire

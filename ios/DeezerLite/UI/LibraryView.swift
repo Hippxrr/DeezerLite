@@ -212,8 +212,6 @@ struct SettingsView: View {
     @AppStorage("tabLabelsHidden") private var tabLabelsHidden = false
     @AppStorage("tabBarFull") private var tabBarFull = true
     @AppStorage("miniProgress") private var miniProgress = true
-    /// TEMPORAIRE (test AirPods) : session sans le mode « audio long », appliqué au prochain lancement.
-    @AppStorage(AirPodsDiag.plainPolicyKey) private var diagPlainPolicy = false
 
     enum SettingsTab: String, CaseIterable {
         case general, look, sound, quality
@@ -454,18 +452,22 @@ struct SettingsView: View {
         airPodsTest
     }
 
-    /// TEMPORAIRE (test AirPods, à retirer après) : ce qu'iOS envoie à l'app, et le mode « audio long » désactivable.
+    /// TEMPORAIRE (test AirPods, à retirer après) : ce qu'iOS envoie à l'app, et les essais (voir `AirPodsDiag`).
     private var airPodsTest: some View {
         let diag = AirPodsDiag.shared
         return group("Test AirPods (temporaire)") {
-            Toggle(isOn: $diagPlainPolicy) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Désactiver le mode audio long")
-                    Text("Ferme l'app puis relance-la pour l'appliquer").font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            .tint(Theme.accent)
-            .padding(14)
+            Text("Essais appliqués au lancement : ferme l'app (glisser vers le haut) puis relance-la après un changement.")
+                .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding(14)
+            divider
+            DiagToggle(key: AirPodsDiag.stateKey, initial: true, title: "État de lecture déclaré à iOS")
+            divider
+            DiagToggle(key: AirPodsDiag.legacyKey, initial: true, title: "Ancienne inscription aux commandes")
+            divider
+            DiagToggle(key: AirPodsDiag.silentKey, initial: true, title: "Lecteur Apple muet pendant la musique")
+            divider
+            DiagToggle(key: AirPodsDiag.motionKey, initial: true, title: "Capteurs de mouvement des AirPods")
+            divider
+            DiagToggle(key: AirPodsDiag.plainPolicyKey, initial: false, title: "Désactiver le mode audio long")
             divider
             HStack {
                 Button("Copier le journal") {
@@ -836,5 +838,20 @@ private struct AppIconPicker: View {
             }
         }
         .sensoryFeedback(.selection, trigger: selected)
+    }
+}
+
+/// TEMPORAIRE (test AirPods) : un essai à activer ou non (gardé dans les réglages, appliqué au lancement).
+private struct DiagToggle: View {
+    @AppStorage private var on: Bool
+    let title: String
+
+    init(key: String, initial: Bool, title: String) {
+        _on = AppStorage(wrappedValue: initial, key)
+        self.title = title
+    }
+
+    var body: some View {
+        Toggle(title, isOn: $on).tint(Theme.accent).padding(14)
     }
 }
