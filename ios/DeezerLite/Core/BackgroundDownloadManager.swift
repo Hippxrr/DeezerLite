@@ -287,7 +287,7 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
     private func pump() {
         guard !restoring, core != nil else { return }
         for id in order {
-            if player?.downloadedIds.contains(id) == true {
+            if !finishing.contains(id), player?.downloadedIds.contains(id) == true {
                 removeRecoveredJob(id)
                 continue
             }
@@ -413,7 +413,8 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         }
         job.incomingPath = file.path
         jobs[id] = job
-        save()
+        // Écrit tout de suite, pas 0,3 s plus tard : l'app fermée entre-temps perdait le fichier reçu (retéléchargé).
+        writeJobs(wait: false)
         pump()
     }
 
@@ -489,8 +490,15 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
                 player?.downloadQueuePersistenceFailed()
             }
         }
-        let referenced = Set(jobs.values.compactMap(\.incomingPath))
         let incoming = Self.storageDirectory.appendingPathComponent("Incoming", isDirectory: true)
+        // Chemin enregistré par une version précédente : le dossier de l'app a pu changer de place (mise à jour). Le
+        // fichier est retrouvé par son nom dans le dossier actuel ; avant, il était effacé et le titre retéléchargé.
+        for (id, job) in jobs {
+            guard let path = job.incomingPath else { continue }
+            let current = incoming.appendingPathComponent((path as NSString).lastPathComponent).path
+            if current != path { jobs[id]?.incomingPath = current }
+        }
+        let referenced = Set(jobs.values.compactMap(\.incomingPath))
         if let files = try? FileManager.default.contentsOfDirectory(at: incoming, includingPropertiesForKeys: nil) {
             for file in files where !referenced.contains(file.path) {
                 try? FileManager.default.removeItem(at: file)

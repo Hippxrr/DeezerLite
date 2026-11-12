@@ -472,18 +472,18 @@ private struct TrackMenu: View, Equatable {
         Button { player.queueAdd([track], next: false) } label: { Label(tr("Ajouter à la file"), systemImage: "text.append") }
         Button { player.playlistTrack = track } label: { Label(tr("Ajouter à une playlist"), systemImage: "text.badge.plus") }
         if downloaded {
-            Button(role: .destructive) { player.removeDownload(track.id) } label: { Label("Supprimer le téléchargement", systemImage: "trash") }
+            Button(role: .destructive) { player.removeDownload(track.id) } label: { Label(tr("Supprimer le téléchargement"), systemImage: "trash") }
         } else {
             switch downloadState {
             case .failed:
                 Button { player.download([track]) } label: { Label("Réessayer", systemImage: "arrow.clockwise") }
                 Button(role: .destructive) { player.cancelDownload(track.id) } label: {
-                    Label("Annuler le téléchargement", systemImage: "xmark.circle")
+                    Label(tr("Annuler le téléchargement"), systemImage: "xmark.circle")
                 }
             case .queued, .downloading:
-                Button { player.cancelDownload(track.id) } label: { Label("Annuler le téléchargement", systemImage: "xmark.circle") }
+                Button { player.cancelDownload(track.id) } label: { Label(tr("Annuler le téléchargement"), systemImage: "xmark.circle") }
             default:
-                Button { player.download([track]) } label: { Label("Télécharger", systemImage: "arrow.down.circle") }
+                Button { player.download([track]) } label: { Label(tr("Télécharger"), systemImage: "arrow.down.circle") }
             }
         }
         if canRemove {
@@ -571,11 +571,11 @@ struct DownloadCollectionMenu: View {
             let subject = card.kind == "album" ? "l’album" : card.kind == "loved" ? "les titres aimés" : "la playlist"
             if preparing {
                 // Déjà demandé, la liste des titres arrive de Deezer : pas de second lancement.
-                Button {} label: { Label("Préparation du téléchargement…", systemImage: "hourglass") }
+                Button {} label: { Label(tr("Préparation du téléchargement…"), systemImage: "hourglass") }
                     .disabled(true)
             } else {
                 Button(role: downloaded ? .destructive : nil) { player.toggleDownload(card) } label: {
-                    Label(downloaded ? "Supprimer \(subject) des téléchargements" : "Télécharger \(subject)",
+                    Label(tr(downloaded ? "Supprimer \(subject) des téléchargements" : "Télécharger \(subject)"),
                           systemImage: downloaded ? "trash" : "arrow.down.circle")
                 }
             }

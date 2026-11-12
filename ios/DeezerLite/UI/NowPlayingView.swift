@@ -104,6 +104,8 @@ struct MiniPlayer: View {
     private var row: some View {
         HStack(spacing: 8) {
             MiniCarousel(cover: inBar ? 34 : 44)
+                // Place fixe : au-delà de ces tailles de texte, le titre et l'artiste étaient coupés.
+                .dynamicTypeSize(...(inBar ? DynamicTypeSize.large : DynamicTypeSize.xLarge))
                 .frame(height: inBar ? 40 : 46)
                 .clipped()
             PlayButton(size: inBar ? 16 : 19)
@@ -713,7 +715,7 @@ struct NowPlayingView: View {
     /// « + » (petite bulle de playlists, accrochée au bouton) et cœur.
     @ViewBuilder
     private func trackButtons(size: CGFloat, plus: Bool, heart: Bool) -> some View {
-        if let t = player.current {
+        if let t = player.current, t.id != 0 {
             Button { showPlaylists = true } label: {
                 Image(systemName: "plus.circle.fill")
                     .font(.system(size: size + 4))
@@ -1294,11 +1296,11 @@ private struct LyricsPanel: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .task(id: player.current?.id) {
+        .task(id: player.showFullPlayer ? player.current?.id : nil) {
             loaded = false
             active = -1
             lyrics = nil
-            if let id = player.current?.id { lyrics = await player.lyrics(id) }
+            if player.showFullPlayer, let id = player.current?.id, id != 0 { lyrics = await player.lyrics(id) }
             loaded = true
         }
     }

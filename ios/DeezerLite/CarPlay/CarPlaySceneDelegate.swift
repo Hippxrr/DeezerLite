@@ -289,7 +289,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
         }
         repeatButton.isSelected = player.repeatMode != .off
         var buttons: [CPNowPlayingButton] = [shuffle, repeatButton]
-        if let track = player.current {
+        if let track = player.current, track.id != 0 { // pas pour l'attente du Flow
             let liked = player.lovedIds.contains(track.id)
             if let heart = UIImage(systemName: liked ? "heart.fill" : "heart") {
                 buttons.append(CPNowPlayingImageButton(image: heart) { [weak self] _ in

@@ -225,7 +225,7 @@ struct DetailView: View {
                     Image(systemName: downloaded ? "trash" : "arrow.down.circle")
                         .foregroundStyle(downloaded ? .red : .primary)
                 }
-                .accessibilityLabel(downloaded ? "Supprimer des téléchargements" : "Télécharger la collection")
+                .accessibilityLabel(downloaded ? tr("Supprimer des téléchargements") : tr("Télécharger la collection"))
             }
         }
         if let d = detail, let url = deezerLink(kind: d.kind, id: d.id) {
@@ -311,7 +311,7 @@ struct DetailView: View {
         .task(id: detail?.tracks.count ?? 0) {
             if let d = detail, !d.offline { await player.checkCovers(d.tracks) }
         }
-        .confirmationDialog("Supprimer le téléchargement ?", isPresented: $confirmRemoveDownload, titleVisibility: .visible) {
+        .confirmationDialog(tr("Supprimer le téléchargement ?"), isPresented: $confirmRemoveDownload, titleVisibility: .visible) {
             Button(tr("Supprimer"), role: .destructive) {
                 // Relu au moment de l'appui : la collection a pu être supprimée ailleurs entre-temps.
                 if let d = detail, let collection = player.downloadedCollection(kind: d.kind, id: d.id) {
@@ -328,7 +328,7 @@ struct DetailView: View {
                 }
             }
         } message: {
-            Text("Les titres de « \(pageTitle) » seront supprimés de ce téléphone, sauf ceux qui font aussi partie d'une autre playlist ou d'un autre album téléchargé.")
+            Text(tr("Les titres de « %@ » seront supprimés de ce téléphone, sauf ceux qui font aussi partie d'une autre playlist ou d'un autre album téléchargé.", pageTitle))
         }
         .task { await load(force: false) }
         // Copie hors ligne : un titre supprimé de ce téléphone disparaît aussi de la page.
@@ -449,16 +449,15 @@ struct DetailView: View {
         return "\(tracks.count > 1 ? tr("%@ titres", "\(tracks.count)") : tr("1 titre")) · \(length)"
     }
 
-    /// Retiré de l'écran tout de suite ; remis à sa place si Deezer refuse.
+    /// Retiré de l'écran tout de suite ; remis à sa place si Deezer refuse. Sans animation : les lignes sont repérées par
+    /// leur position (pour garder la position de la liste), et l'animation effaçait la dernière ligne au lieu de celle-ci.
     private func remove(_ track: Track) {
         guard let d = detail, let at = d.tracks.firstIndex(where: { $0.id == track.id }) else { return }
-        withAnimation(.easeOut(duration: 0.25)) { detail?.tracks.remove(at: at) }
+        detail?.tracks.remove(at: at)
         Task {
             guard !(await player.removeFromPlaylist(d.id, track)) else { return }
-            withAnimation(.easeOut(duration: 0.25)) {
-                if detail?.tracks.contains(where: { $0.id == track.id }) == false {
-                    detail?.tracks.insert(track, at: min(at, detail?.tracks.count ?? 0))
-                }
+            if detail?.tracks.contains(where: { $0.id == track.id }) == false {
+                detail?.tracks.insert(track, at: min(at, detail?.tracks.count ?? 0))
             }
         }
     }

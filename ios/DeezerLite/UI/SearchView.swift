@@ -57,6 +57,9 @@ struct SearchView: View {
     @Environment(Player.self) private var player
     @State private var query = ""
     @State private var results: SearchResults?
+    /// Recherche qui a donné `results` : l'artiste en tête est choisi d'après elle (pas d'après ce qui est en train d'être
+    /// tapé, sinon sa carte clignotait à chaque lettre avant l'arrivée des nouveaux résultats).
+    @State private var resultsQuery = ""
     @State private var searching = false
     /// Recherche en attente pendant la frappe (remplacée à chaque lettre).
     @State private var pending: Task<Void, Never>?
@@ -189,7 +192,7 @@ struct SearchView: View {
     private func topArtist(_ r: SearchResults) -> Card? {
         let fold = { (s: String) in s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .trimmingCharacters(in: .whitespaces) }
-        let q = fold(query)
+        let q = fold(resultsQuery)
         return r.artists.first { fold($0.title) == q }
             ?? (q.count >= 3 ? r.artists.first { fold($0.title).hasPrefix(q) } : nil)
     }
@@ -212,7 +215,12 @@ struct SearchView: View {
             // Une frappe plus récente a pris le relais : ce résultat est périmé.
             guard !Task.isCancelled, q == query.trimmingCharacters(in: .whitespaces) else { return }
             failed = found == nil
-            withAnimation(.easeOut(duration: 0.18)) { if let found { results = found } }
+            withAnimation(.easeOut(duration: 0.18)) {
+                if let found {
+                    results = found
+                    resultsQuery = q
+                }
+            }
             searching = false
         }
     }

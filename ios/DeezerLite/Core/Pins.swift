@@ -23,12 +23,13 @@ struct Pin: Codable, Hashable {
     func matches(_ card: Card) -> Bool { card.kind == kind && card.id == id && card.key == key }
 
     static func load() -> [Pin] {
-        guard let data = UserDefaults.standard.data(forKey: "pins") else { return [] }
+        guard let data = UserDefaults.standard.data(forKey: ProfileData.key("pins")) else { return [] }
         return (try? JSONDecoder().decode([Pin].self, from: data)) ?? []
     }
 
     static func save(_ pins: [Pin]) {
-        guard !pins.isEmpty else { UserDefaults.standard.removeObject(forKey: "pins"); return }
-        if let data = try? JSONEncoder().encode(pins) { UserDefaults.standard.set(data, forKey: "pins") }
+        let key = ProfileData.key("pins") // propre au profil ouvert (compte Famille)
+        guard !pins.isEmpty else { UserDefaults.standard.removeObject(forKey: key); return }
+        if let data = try? JSONEncoder().encode(pins) { UserDefaults.standard.set(data, forKey: key) }
     }
 }

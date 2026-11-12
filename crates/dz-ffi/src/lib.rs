@@ -16,6 +16,9 @@ use dz_offline::{DownloadError, OfflineCollection, OfflineStore, PendingDownload
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokio::runtime::Runtime;
 
+/// Augmenté à chaque oubli des copies du compte (changement de profil, connexion) : voir `persist`.
+static COPIES_GEN: AtomicU64 = AtomicU64::new(0);
+
 uniffi::setup_scaffolding!();
 
 // Même trousseau que la version bureau.
@@ -668,6 +671,8 @@ impl Core {
     /// profil, et s'affichaient au lancement (surtout hors ligne). Rien d'autre n'est touché (écoutes en attente,
     /// téléchargements).
     fn forget_account_copies(&self) {
+        // Un chargement encore en route pour le profil (ou compte) d'avant n'écrira plus sa copie (voir `persist`).
+        COPIES_GEN.fetch_add(1, Ordering::AcqRel);
         for name in ["home.json", "library-0.json", "library-1.json", "library-2.json", "loved-ids.json", "loved-card.json"] {
             let _ = std::fs::remove_file(self.cache_dir.join(name));
         }
@@ -712,6 +717,15 @@ impl Core {
     pub async fn logout(&self) -> Result<(), CoreError> {
         let mut first_error: Option<CoreError> = None;
         let _ = self.player.send(PlayerCmd::Close);
+        // Écoutes du compte : la dernière est terminée (le lecteur a traité l'arrêt), puis tout ce qui attend part à
+        // Deezer AVANT l'effacement. Avant, elles étaient effacées sans être envoyées. Quelques secondes au plus : sans
+        // réseau, elles sont effacées avec le compte (rien du compte ne reste sur le téléphone).
+        let done = Arc::new(tokio::sync::Notify::new());
+        if self.player.send(PlayerCmd::Sync(done.clone())).is_ok() {
+            let _ = self.run(async move { tokio::time::timeout(std::time::Duration::from_secs(2), done.notified()).await }).await;
+        }
+        let (api, store) = (self.api.clone(), self.offline.clone());
+        let _ = self.run(async move { tokio::time::timeout(std::time::Duration::from_secs(5), dz_core::send_pending_listens(api, store)).await }).await;
         if let Err(e) = self.offline.clear() {
             first_error.get_or_insert(CoreError::Api(e.to_string()));
         }
@@ -800,6 +814,7 @@ impl Core {
     // --- Catalogue
 
     pub async fn home(&self) -> Result<Vec<Shelf>, CoreError> {
+        let copies = COPIES_GEN.load(Ordering::Acquire); // voir `forget_account_copies`
         let api = self.api.clone();
         let (sections, loved) = self.run(async move { (api.home_sections().await, loved_id(&api).await) }).await?;
         let out: Vec<Shelf> = sections?
@@ -807,7 +822,7 @@ impl Core {
             .filter(|s| !s.items.is_empty())
             .map(|s| Shelf { kind: s.kind.to_owned(), title: s.title, items: mark_loved(cards(s.items), loved) })
             .collect();
-        self.persist("home.json", &out);
+        self.persist(copies, "home.json", &out);
         Ok(out)
     }
 
@@ -820,6 +835,7 @@ impl Core {
     }
 
     pub async fn my_playlists(&self) -> Result<Vec<Card>, CoreError> {
+        let copies = COPIES_GEN.load(Ordering::Acquire); // voir `forget_account_copies`
         let api = self.api.clone();
         let (list, loved) = self.run(async move { (api.user_playlists().await, loved_id(&api).await) }).await?;
         // « Coups de cœur » = les titres aimés : en tête de liste, avec l'image choisie sur Deezer ; ouvre la page Titres aimés.
@@ -828,13 +844,14 @@ impl Core {
             let card = out.remove(i);
             out.insert(0, card);
         }
-        self.persist("library-0.json", &out);
+        self.persist(copies, "library-0.json", &out);
         Ok(out)
     }
 
     /// Fiche de la playlist « Coups de cœur » (avec l'image choisie sur Deezer), demandée directement :
     /// elle ne dépend pas de sa présence dans la liste des playlists. `None` si le compte n'en a pas.
     pub async fn loved_card(&self) -> Result<Option<Card>, CoreError> {
+        let copies = COPIES_GEN.load(Ordering::Acquire); // voir `forget_account_copies`
         let api = self.api.clone();
         let card = self
             .run(async move {
@@ -854,7 +871,7 @@ impl Core {
             c
         });
         if let Some(c) = &out {
-            self.persist("loved-card.json", c);
+            self.persist(copies, "loved-card.json", c);
         }
         Ok(out)
     }
@@ -865,26 +882,29 @@ impl Core {
     }
 
     pub async fn my_albums(&self) -> Result<Vec<Card>, CoreError> {
+        let copies = COPIES_GEN.load(Ordering::Acquire); // voir `forget_account_copies`
         let api = self.api.clone();
         let out = cards(self.run(async move { api.user_albums().await }).await??);
-        self.persist("library-1.json", &out);
+        self.persist(copies, "library-1.json", &out);
         Ok(out)
     }
 
     pub async fn my_artists(&self) -> Result<Vec<Card>, CoreError> {
+        let copies = COPIES_GEN.load(Ordering::Acquire); // voir `forget_account_copies`
         let api = self.api.clone();
         let out = cards(self.run(async move { api.user_artists().await }).await??);
-        self.persist("library-2.json", &out);
+        self.persist(copies, "library-2.json", &out);
         Ok(out)
     }
 
     pub async fn loved(&self) -> Result<Vec<Track>, CoreError> {
+        let copies = COPIES_GEN.load(Ordering::Acquire); // voir `forget_account_copies`
         let api = self.api.clone();
         let mut list = self.run(async move { api.loved_tracks().await }).await??;
         // Du plus récent au plus ancien, comme sur le bureau.
         list.sort_by_key(|t| std::cmp::Reverse(t.added_at.unwrap_or(0)));
         let out = tracks(&list);
-        self.persist("loved-ids.json", &list.iter().map(|t| t.id).collect::<Vec<_>>());
+        self.persist(copies, "loved-ids.json", &list.iter().map(|t| t.id).collect::<Vec<_>>());
         remember(&self.known, list);
         Ok(out)
     }
@@ -1233,6 +1253,9 @@ impl Core {
     pub async fn play_flow(&self) -> Result<(), CoreError> {
         let api = self.api.clone();
         let tracks = self.run(async move { api.flow().await }).await??;
+        if tracks.is_empty() {
+            return Err(CoreError::Api("Flow est vide pour le moment, réessaie dans un instant.".into()));
+        }
         // Seulement une fois Flow reçu : si la requête échoue, aucun `Started` parasite au titre suivant.
         self.mark_play();
         self.send(PlayerCmd::PlayFlow { tracks })
@@ -1412,7 +1435,12 @@ impl Core {
     }
 
     /// Écrit une copie locale en tâche de fond (fichier temporaire puis renommage : jamais de fichier à moitié écrit).
-    fn persist<T: Serialize>(&self, name: &str, value: &T) {
+    /// `copies` : relevé au début du chargement ; profil ou compte changé depuis, la copie n'est pas écrite (elle serait
+    /// affichée sous le nouveau profil au prochain lancement sans réseau).
+    fn persist<T: Serialize>(&self, copies: u64, name: &str, value: &T) {
+        if copies != COPIES_GEN.load(Ordering::Acquire) {
+            return;
+        }
         let Ok(bytes) = serde_json::to_vec(value) else { return };
         let path = self.cache_dir.join(name);
         self.rt.spawn_blocking(move || {

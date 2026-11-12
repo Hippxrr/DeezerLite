@@ -193,7 +193,7 @@ final class Player {
             do {
                 let missing = try await storeDownloadCollection(detail)
                 if missing.isEmpty {
-                    showToast("\(detail.title) est disponible hors ligne")
+                    showToast(tr("%@ est disponible hors ligne", detail.title))
                 } else {
                     download(missing)
                 }
@@ -223,7 +223,8 @@ final class Player {
             // La collection a pu être retirée des téléchargements pendant la requête.
             guard downloadedCollection(kind: kind, id: id) != nil else { return true }
             let missing = try await storeDownloadCollection(fresh)
-            let new = missing.filter { downloadStates[$0.id] == nil }
+            // Sauf ceux annulés ou supprimés à la main (voir `skippedDownloads`).
+            let new = missing.filter { downloadStates[$0.id] == nil && !skippedDownloads.contains($0.id) }
             if !new.isEmpty { download(new) }
             return true
         } catch {
@@ -247,7 +248,7 @@ final class Player {
             refreshDownloads()
             if !downloadedIds.contains(track.id), downloadStates[track.id] == nil { download([track]) }
         } catch {
-            showToast("La copie hors ligne n'a pas pu être actualisée", seconds: 4)
+            showToast(tr("La copie hors ligne n'a pas pu être actualisée"), seconds: 4)
         }
     }
 
@@ -257,7 +258,7 @@ final class Player {
             _ = try core.removeDownloadTrackFromCollection(kind: kind, id: Self.downloadId(kind: kind, id: id), trackId: trackId)
             refreshDownloads()
         } catch {
-            showToast("La copie hors ligne n'a pas pu être actualisée", seconds: 4)
+            showToast(tr("La copie hors ligne n'a pas pu être actualisée"), seconds: 4)
         }
     }
 
@@ -295,19 +296,44 @@ final class Player {
         guard let route = Route(card), !preparingDownloads.contains(key) else { return }
         preparingDownloads.insert(key)
         // Réponse immédiate à l'appui : la liste des titres peut mettre une ou deux secondes à arriver.
-        showToast("Préparation du téléchargement…", seconds: 10)
+        showToast(tr("Préparation du téléchargement…"), seconds: 10)
         Task {
             defer { preparingDownloads.remove(key) }
             if let detail = await detail(route, force: false), !detail.offline {
                 download(detail)
             } else {
-                showToast("Impossible de charger cette collection", seconds: 4)
+                showToast(tr("Impossible de charger cette collection"), seconds: 4)
             }
+        }
+    }
+
+    /// Titres dont le téléchargement a été annulé ou supprimé à la main : la synchro des playlists et albums téléchargés
+    /// (à chaque ouverture de session) ne les relance pas. Un téléchargement redemandé par l'utilisateur les en retire.
+    @ObservationIgnored private var skippedDownloads: Set<Int64> =
+        Set((UserDefaults.standard.array(forKey: "skippedDownloads") as? [NSNumber] ?? []).map(\.int64Value))
+
+    private func skipDownloads(_ ids: [Int64]) {
+        guard !ids.isEmpty else { return }
+        skippedDownloads.formUnion(ids)
+        saveSkippedDownloads()
+    }
+
+    private func saveSkippedDownloads() {
+        if skippedDownloads.isEmpty {
+            UserDefaults.standard.removeObject(forKey: "skippedDownloads")
+        } else {
+            UserDefaults.standard.set(skippedDownloads.map { NSNumber(value: $0) }, forKey: "skippedDownloads")
         }
     }
 
     func download(_ tracks: [Track]) {
         guard core != nil, !tracks.isEmpty else { return }
+        // Redemandés par l'utilisateur : de nouveau suivis par la synchro.
+        let ids = tracks.map(\.id)
+        if !skippedDownloads.isDisjoint(with: ids) {
+            skippedDownloads.subtract(ids)
+            saveSkippedDownloads()
+        }
         let accepted = BackgroundDownloadManager.shared.enqueue(tracks.filter { !downloadedIds.contains($0.id) })
         var nextTracks = downloadTracks
         var nextStates = downloadStates
@@ -319,28 +345,32 @@ final class Player {
         downloadStates = nextStates
         syncDownloadRows(accepted.map(\.id))
         let count = accepted.count
-        showToast(count == 0 ? "Déjà téléchargé ou en cours" : count == 1 ? "1 téléchargement ajouté" : "\(count) téléchargements ajoutés")
+        showToast(count == 0 ? tr("Déjà téléchargé ou en cours") : count == 1 ? tr("1 téléchargement ajouté") : tr("%@ téléchargements ajoutés", "\(count)"))
     }
 
     /// Ordre de la file de téléchargement (pour l'écran Téléchargements).
     var downloadQueueOrder: [Int64] { BackgroundDownloadManager.shared.queueOrder }
 
     func cancelDownload(_ id: Int64) {
+        skipDownloads([id]) // annulé à la main : pas relancé par la synchro
         BackgroundDownloadManager.shared.cancel(id)
     }
 
     func cancelAllDownloads() {
+        skipDownloads(BackgroundDownloadManager.shared.queueOrder) // « Tout arrêter » : rien n'est relancé tout seul
         BackgroundDownloadManager.shared.stopAll()
-        showToast("Téléchargements arrêtés")
+        showToast(tr("Téléchargements arrêtés"))
     }
 
     /// Retire de la liste les téléchargements en échec.
     func clearFailedDownloads() {
+        skipDownloads(downloadStates.filter { $0.value.state == .failed }.map(\.key)) // retirés à la main
         BackgroundDownloadManager.shared.clearFailed()
     }
 
     func removeDownload(_ id: Int64) {
         guard let core else { return }
+        skipDownloads([id]) // supprimé à la main : pas retéléchargé par la synchro de sa playlist ou de son album
         BackgroundDownloadManager.shared.cancel(id)
         do {
             try core.removeDownload(id: id)
@@ -357,7 +387,7 @@ final class Player {
             // Copies hors ligne gardées en mémoire : elles montraient encore la collection supprimée.
             forgetOfflineDetails()
             refreshDownloads()
-            showToast("\(collection.title) supprimé des téléchargements")
+            showToast(tr("%@ supprimé des téléchargements", collection.title))
         } catch { message = describe(error) }
     }
 
@@ -369,7 +399,7 @@ final class Player {
             downloadStates = [:]
             downloadTracks = [:]
             refreshDownloads()
-            showToast("Téléchargements effacés")
+            showToast(tr("Téléchargements effacés"))
         } catch { message = describe(error) }
     }
 
@@ -417,7 +447,7 @@ final class Player {
     }
 
     func downloadQueuePersistenceFailed() {
-        showToast("La file de téléchargement n'a pas pu être enregistrée", seconds: 4)
+        showToast(tr("La file de téléchargement n'a pas pu être enregistrée"), seconds: 4)
     }
 
     func observeDownloads(_ status: TrackDownloadStatus, for id: Int64) {
@@ -630,6 +660,7 @@ final class Player {
     /// Lance un titre de l'historique : sa fiche est redemandée à Deezer si le cœur ne la connaît plus.
     func playHistoryTrack(_ entry: HistoryEntry) {
         guard let core, let id = entry.trackId else { return }
+        let before = current
         pendingRestore = nil
         activateOutput()
         current = Track(id: id, title: entry.title ?? "", artist: entry.subtitle ?? "", album: "", durationS: 0, coverUrl: entry.coverUrl,
@@ -637,7 +668,13 @@ final class Player {
         isFlow = false
         startLoading()
         Task {
-            do { try await core.playById(id: id) } catch { loading = false; showToast(describe(error), seconds: 4) }
+            do {
+                try await core.playById(id: id)
+            } catch {
+                loading = false
+                if current?.id == id { current = before } // rien n'a démarré : le titre qui joue reste affiché
+                showToast(describe(error), seconds: 4)
+            }
         }
     }
 
@@ -943,6 +980,7 @@ final class Player {
                 try await core.restoreQueue(ids: ids, index: UInt32(index), positionMs: index == last.index ? position : 0)
             } catch {
                 loading = false
+                pendingRestore = last // un nouvel appui sur lecture la retente (avant : plus rien ne se passait)
                 showToast(describe(error), seconds: 4)
             }
         }
@@ -1020,6 +1058,10 @@ final class Player {
             Self.savedProfile = p.id
             choosingProfile = false
             profileGeneration += 1
+            // Historique de recherche et éléments épinglés : ceux de ce profil (gardés à part pour chacun).
+            history = HistoryEntry.load()
+            pins = Pin.load()
+            pendingRestore = nil
             profileEpoch += 1
             // Onglets de la bibliothèque déjà ouverts (albums, artistes) : rechargés aussi, sinon ils restaient vides.
             let openTabs = library.keys.filter { $0 != 0 }
@@ -1224,6 +1266,9 @@ final class Player {
         LastSession.clear()
         pins = []
         Pin.save(pins)
+        ProfileData.clearAll() // historique, épinglés et dernière écoute de chaque profil
+        skippedDownloads = []
+        saveSkippedDownloads()
         homeOrder = []
         UserDefaults.standard.removeObject(forKey: "homeOrder")
         setLovedTitle("")
@@ -1509,6 +1554,7 @@ final class Player {
 
     func playFlow() {
         guard let core else { return }
+        let before = (current: current, isFlow: isFlow, restore: pendingRestore)
         pendingRestore = nil
         activateOutput()
         isFlow = true
@@ -1522,7 +1568,14 @@ final class Player {
                 try await core.playFlow()
             } catch {
                 loading = false
-                if current?.id == 0 { current = nil } // rien n'a démarré : l'attente disparaît
+                // Rien n'a démarré : retour à l'état d'avant (un titre qui joue encore reste affiché, sur l'écran
+                // verrouillé aussi ; une dernière écoute en attente reste reprenable).
+                if current?.id == 0 {
+                    current = before.current
+                    isFlow = before.isFlow
+                    pendingRestore = before.restore
+                    NowPlaying.update(track: current, status: status)
+                }
                 showToast(describe(error), seconds: 4)
             }
         }
@@ -1709,6 +1762,7 @@ final class Player {
 
     func showToast(_ text: String, seconds: Double = 2) {
         toast = text
+        UIAccessibility.post(notification: .announcement, argument: text) // VoiceOver lit aussi le message
         toastGeneration += 1
         let generation = toastGeneration
         Task {
@@ -2049,7 +2103,7 @@ final class Player {
             }
             queueIndex = Int(index)
         case .downloadsChanged:
-            refreshDownloads()
+            scheduleDownloadsRefresh() // hors du fil de l'interface (un contrôle de fichier par titre téléchargé)
         }
         switch event {
         case .track, .started, .state, .stopped, .closed: NowPlaying.update(track: current, status: status)
@@ -2078,6 +2132,11 @@ final class Player {
             let info = n.userInfo ?? [:]
             let type = (info[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap(AVAudioSession.InterruptionType.init)
             let options = AVAudioSession.InterruptionOptions(rawValue: info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0)
+            // App suspendue par iOS pendant une pause : iOS l'annonce comme une coupure, sans fin à venir. Ignorée (rien ne
+            // jouait), sinon elle restait « en cours » et bloquait les reprises automatiques. Valeur 1 = `.appWasSuspended`
+            // (nom déclaré dépassé par Apple, valeur encore envoyée par certaines versions d'iOS).
+            let suspended = (info[AVAudioSessionInterruptionReasonKey] as? UInt) == 1
+            if type == .began && suspended { return }
             Task { @MainActor in
                 guard let self, let core = self.core else { return }
                 switch type {

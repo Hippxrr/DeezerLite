@@ -220,6 +220,10 @@ struct MainTabs: View {
     @AppStorage("tabLabelsHidden") private var tabLabelsHidden = false
     /// Réglages > Apparence : barre de l'app sur toute la largeur, sinon celle d'iOS.
     @AppStorage("tabBarFull") private var tabBarFull = true
+    /// Ancienne valeur gardée tant que les Réglages sont ouverts : changer de barre reconstruit les pages, et la feuille
+    /// des Réglages (ouverte depuis l'une d'elles) se refermait aussitôt. La nouvelle barre arrive à leur fermeture.
+    @State private var barFullHeld: Bool?
+    private var barFullShown: Bool { barFullHeld ?? tabBarFull }
     /// Barre de l'app réduite par le défilement.
     @State private var barCollapsed = false
     /// Onglets déjà ouverts : une page n'est construite qu'à sa première visite.
@@ -364,7 +368,7 @@ struct MainTabs: View {
     private var tabs: some View {
         #if compiler(>=6.2.1)
         if #available(iOS 26.1, *) {
-            if tabBarFull {
+            if barFullShown {
                 ownTabs
             } else {
                 barTabs
@@ -431,6 +435,9 @@ struct MainTabs: View {
             Text(tr("Seulement sur ce téléphone. Laisse vide pour revenir à « %@ ».", tr(Player.defaultLovedTitle)))
         }
         .onChange(of: player.renamingLoved) { _, open in if open { lovedName = player.lovedTitle } }
+        // « Barre d'onglets complète » changée dans les Réglages : la barre change à leur fermeture (voir `barFullShown`).
+        .onChange(of: tabBarFull) { old, _ in if player.settingsOpen, barFullHeld == nil { barFullHeld = old } }
+        .onChange(of: player.settingsOpen) { _, open in if !open { barFullHeld = nil } }
         // Compte Famille : « Qui écoute ? » à la première connexion (fermée sans choisir : le profil ouvert est gardé).
         .sheet(isPresented: Binding(get: { player.choosingProfile && !player.settingsOpen }, set: { player.choosingProfile = $0 }), onDismiss: { player.keepCurrentProfile() }) {
             ProfilePicker().environment(player).presentationDetents([.medium, .large])

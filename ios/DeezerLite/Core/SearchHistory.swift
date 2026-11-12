@@ -56,13 +56,14 @@ struct HistoryEntry: Codable, Hashable {
     static let limit = 12
 
     static func load() -> [HistoryEntry] {
-        guard let data = UserDefaults.standard.data(forKey: "search_history") else { return [] }
+        guard let data = UserDefaults.standard.data(forKey: ProfileData.key("search_history")) else { return [] }
         return (try? JSONDecoder().decode([HistoryEntry].self, from: data)) ?? []
     }
 
     static func save(_ entries: [HistoryEntry]) {
         // Vide : la clé est retirée, rien ne reste sur le téléphone.
-        guard !entries.isEmpty else { UserDefaults.standard.removeObject(forKey: "search_history"); return }
-        if let data = try? JSONEncoder().encode(Array(entries.prefix(limit))) { UserDefaults.standard.set(data, forKey: "search_history") }
+        let key = ProfileData.key("search_history") // propre au profil ouvert (compte Famille)
+        guard !entries.isEmpty else { UserDefaults.standard.removeObject(forKey: key); return }
+        if let data = try? JSONEncoder().encode(Array(entries.prefix(limit))) { UserDefaults.standard.set(data, forKey: key) }
     }
 }

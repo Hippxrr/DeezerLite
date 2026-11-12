@@ -84,6 +84,9 @@ pub enum PlayerCmd {
     Repeat(RepeatMode),
     /// Envoie à Deezer les écoutes gardées faute de réseau (retour du réseau, session ouverte).
     FlushListens,
+    /// Prévient quand toutes les commandes envoyées avant celle-ci ont été traitées, écoute en cours comprise (après un
+    /// `Close`, elle est alors terminée et gardée sur le disque) : voir `logout` dans dz-ffi.
+    Sync(Arc<tokio::sync::Notify>),
 }
 
 /// Événements pour l'UI (émis en une fois par changement de piste, pas à chaque tick).
@@ -438,6 +441,24 @@ async fn flush_listens(api: Arc<DeezerClient>, store: OfflineStore) {
                 }
             }
         }
+    }
+}
+
+/// Déconnexion : les écoutes gardées partent avant que le compte soit effacé du téléphone (sinon elles étaient perdues
+/// avec lui). S'arrête dès que plus rien ne part (pas de réseau, écoutes d'un autre profil) ; l'appelant borne la durée.
+pub async fn send_pending_listens(api: Arc<DeezerClient>, store: OfflineStore) {
+    loop {
+        let before = store.pending_listens().len();
+        if before == 0 {
+            return;
+        }
+        flush_listens(api.clone(), store.clone()).await;
+        let after = store.pending_listens().len();
+        // Rien n'est parti et aucun autre envoi n'est en cours : inutile d'insister.
+        if after == 0 || (after >= before && !FLUSHING.load(Ordering::Acquire)) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await; // un autre envoi tourne : on attend qu'il avance
     }
 }
 
@@ -820,7 +841,7 @@ impl Actor {
                     let pos = self.engine.shared.position_ms.load(Ordering::Relaxed);
                     self.reload_id = self.queue.get(self.index).copied();
                     self.play_current().await;
-                    if pos > 1000 {
+                    if pos > 1000 && self.reload_id.is_some() {
                         self.engine.seek(pos);
                     }
                 }
@@ -864,6 +885,7 @@ impl Actor {
                 self.repeat = mode;
                 self.reset_prefetch();
             }
+            PlayerCmd::Sync(done) => done.notify_one(),
             PlayerCmd::FlushListens => {
                 if let Some(store) = self.offline.clone() {
                     tokio::spawn(flush_listens(self.api.clone(), store));
@@ -1025,6 +1047,13 @@ impl Actor {
     }
 
     fn reset_prefetch(&mut self) {
+        // Toujours le suivant (ajout en fin de file, autre titre déplacé ou retiré…) : gardé. Avant, il était jeté puis
+        // retéléchargé (jusqu'à 30 Mo en FLAC).
+        if let (Some(i), Some(id)) = (self.prefetched_idx, self.prefetched) {
+            if self.next_index() == Some(i) && self.queue.get(i) == Some(&id) {
+                return;
+            }
+        }
         self.prefetched = None;
         self.prefetched_idx = None;
         self.engine.clear_next();
@@ -1219,6 +1248,7 @@ impl Actor {
                 // Nouveau départ du titre (y compris le même, répété) ; un rechargement à la même position n'en est pas un.
                 if self.reload_id.take() != Some(id) {
                     self.restart = true;
+                    self.retries = 0; // vrai nouveau départ (une reprise après coupure garde son compte de tentatives)
                 }
                 if self.prefetched == Some(id) {
                     // Transition gapless : la file avance toute seule, jusqu'à l'index préparé.
@@ -1232,7 +1262,6 @@ impl Actor {
                         self.index = pos;
                     }
                 }
-                self.retries = 0;
                 self.recover_at = None;
                 // Flux d'un titre qui n'est plus ni joué ni préparé : le moteur les a lâchés, on oublie leur poignée.
                 let next = self.prefetched;
@@ -1298,7 +1327,7 @@ impl Actor {
         }).map(|i| self.infos.insert(i.id, i));
         self.reload_id = self.queue.get(self.index).copied();
         self.play_current().await;
-        if pos > 1000 {
+        if pos > 1000 && self.reload_id.is_some() {
             self.engine.seek(pos);
         }
     }

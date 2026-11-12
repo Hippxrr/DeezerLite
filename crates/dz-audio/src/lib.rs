@@ -339,7 +339,7 @@ impl Renderer {
             eq: EqState::new(rate, channels),
             bands: Bands::new(rate),
             channels,
-            gain: (rate as usize / 200).max(1),
+            gain: 0, // le son monte en 5 ms au premier rendu
             ramp: (rate as usize / 200).max(1),
             #[cfg(target_os = "ios")]
             scratch: vec![0.0; 4096 * channels.max(1)],
@@ -358,7 +358,7 @@ impl Renderer {
         // sans attendre un tour de plus (jusqu'à 0,1 s sur iPhone écran verrouillé). Le nouveau son monte depuis zéro.
         if flushing && (*gain == 0 || cons.slots() < (*channels).max(1)) {
             *gain = 0;
-            while cons.pop().is_ok() {}
+            if let Ok(c) = cons.read_chunk(cons.slots()) { c.commit_all(); }
             ctl.flush_ack.store(req, Ordering::Release);
             data.fill(silence);
             return;
@@ -413,6 +413,14 @@ impl Renderer {
                 }
                 None => *s = silence,
             }
+        }
+        // Vidage demandé et son descendu à zéro pendant ce tour : tampon vidé tout de suite, sans attendre le tour suivant
+        // (jusqu'à 0,1 s sur iPhone écran verrouillé).
+        if flushing && *gain == 0 {
+            if let Ok(c) = cons.read_chunk(cons.slots()) {
+                c.commit_all();
+            }
+            ctl.flush_ack.store(req, Ordering::Release);
         }
         ctl.played.fetch_add(n, Ordering::Relaxed);
         if measure {
@@ -1173,6 +1181,15 @@ impl Worker {
         self.written = 0;
         self.segments.clear();
         let Some(o) = self.out.as_mut() else { return };
+        // Son en cours (lecture, sortie en marche) : il descend à zéro en 5 ms avant le remplacement. Avant, il était coupé
+        // net à chaque saut, titre ou arrêt : un clic. Au plus 0,12 s d'attente (un tour de rendu écran verrouillé).
+        if o.running && !self.shared.paused.load(Ordering::Relaxed) {
+            let req = o.ctl.flush_req.fetch_add(1, Ordering::AcqRel) + 1;
+            let start = Instant::now();
+            while o.ctl.flush_ack.load(Ordering::Acquire) != req && start.elapsed() < Duration::from_millis(120) {
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
         let (producer, consumer) = rtrb::RingBuffer::<f32>::new(o.rate as usize * o.channels / 2);
         let ctl = new_ctl(self.shared.clone());
         let r = Box::into_raw(Box::new(Renderer::new(consumer, ctl.clone(), o.rate, o.channels)));
@@ -1288,7 +1305,11 @@ impl Worker {
                 self.next = None;
                 self.flush();
                 self.announced = None;
-                self.shared.position_ms.store(0, Ordering::Relaxed);
+                // Autre titre : la position repart de zéro (un titre en échec était relancé à celle de l'ancien). Même
+                // titre rechargé (reprise après coupure) : sa position est gardée pour y revenir.
+                if id != self.shared.current_id.load(Ordering::Relaxed) {
+                    self.shared.position_ms.store(0, Ordering::Relaxed);
+                }
                 match open_track(Pending { id, src, ext }, rate, ch) {
                     Ok(t) => {
                         self.start_track(t, 0);

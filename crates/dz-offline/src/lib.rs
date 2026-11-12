@@ -237,6 +237,23 @@ where
     }
 }
 
+/// Liste illisible (abîmée, ou d'un format que cette version ne comprend pas) : renommée en `.corrupt`, sans rien
+/// effacer, et remplacée par une liste vide. Avant, l'app ne démarrait plus du tout (même pour écouter en streaming)
+/// jusqu'à sa réinstallation. `damaged` passe à vrai dans ce cas.
+fn read_or_set_aside<T>(path: &Path, damaged: &mut bool) -> io::Result<T>
+where
+    T: for<'de> Deserialize<'de> + Default,
+{
+    match read_manifest(path) {
+        Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+            *damaged = true;
+            std::fs::rename(path, path.with_extension("json.corrupt"))?;
+            Ok(T::default())
+        }
+        other => other,
+    }
+}
+
 /// Fichier temporaire écrit jusqu'au disque, puis renommé : jamais de manifest vide ou à moitié écrit après une coupure.
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     write_replace(path, bytes, true)
@@ -314,7 +331,8 @@ impl OfflineStore {
         std::fs::create_dir_all(root.join("audio"))?;
         std::fs::create_dir_all(root.join("covers"))?;
         std::fs::create_dir_all(root.join("lyrics"))?;
-        let mut entries: BTreeMap<i64, OfflineTrack> = read_manifest(&root.join("downloads.json"))?;
+        let mut damaged = false;
+        let mut entries: BTreeMap<i64, OfflineTrack> = read_or_set_aside(&root.join("downloads.json"), &mut damaged)?;
         let journal = read_journal(&root.join(JOURNAL));
         let mut changed = !journal.is_empty();
         for entry in journal {
@@ -328,7 +346,7 @@ impl OfflineStore {
         let mut pending: BTreeMap<i64, PendingDownload> = read_manifest(&root.join("pending.json")).unwrap_or_default();
         // Titre enregistré mais retiré de la file sans pouvoir la réécrire (disque plein) : il n'est plus attendu.
         pending.retain(|id, _| !entries.contains_key(id));
-        let collections: BTreeMap<String, OfflineCollection> = read_manifest(&root.join("collections.json"))?;
+        let collections: BTreeMap<String, OfflineCollection> = read_or_set_aside(&root.join("collections.json"), &mut damaged)?;
         // Titres hors de toute collection (téléchargés seuls, y compris avant l'existence de `pinned`) : gardés pour eux-mêmes.
         let grouped: BTreeSet<i64> = collections.values().flat_map(|c| c.track_ids.iter().copied()).collect();
         for (id, entry) in entries.iter_mut() {
@@ -344,7 +362,10 @@ impl OfflineStore {
         if let Some(listen) = &reopened {
             listens.queue.push(listen.clone());
         }
-        remove_orphans(&root, &entries, &collections);
+        // Liste illisible mise de côté : rien n'est effacé comme orphelin à ce lancement (fichiers audio intacts).
+        if !damaged {
+            remove_orphans(&root, &entries, &collections);
+        }
         let store = Self {
             root: Arc::new(root),
             entries: Arc::new(RwLock::new(entries)),
@@ -440,14 +461,16 @@ impl OfflineStore {
             .values()
             .flat_map(|collection| collection.track_ids.iter().copied())
             .collect();
-        let pinned: BTreeSet<i64> = {
+        // Un verrou à la fois : `insert_if_pending` prend `pending` puis `entries` ; les tenir ici dans l'autre ordre
+        // pouvait bloquer les deux pour toujours (synchro d'une playlist pendant la fin d'un téléchargement : app figée).
+        let mut pinned: BTreeSet<i64> = {
             let entries = self.entries.read().map_err(|_| io::Error::other("index des téléchargements verrouillé"))?;
-            let pending = self.pending.read().map_err(|_| io::Error::other("file des téléchargements verrouillée"))?;
-            ids.iter()
-                .copied()
-                .filter(|id| entries.get(id).is_some_and(|e| e.pinned) || pending.get(id).is_some_and(|p| p.pinned))
-                .collect()
+            ids.iter().copied().filter(|id| entries.get(id).is_some_and(|e| e.pinned)).collect()
         };
+        {
+            let pending = self.pending.read().map_err(|_| io::Error::other("file des téléchargements verrouillée"))?;
+            pinned.extend(ids.iter().copied().filter(|id| pending.get(id).is_some_and(|p| p.pinned)));
+        }
         let unused: Vec<i64> = ids.iter().copied().filter(|id| !grouped.contains(id) && !pinned.contains(id)).collect();
         self.remove_many(&unused)?;
         Ok(unused)
@@ -672,12 +695,22 @@ impl OfflineStore {
 
     /// Retire une écoute envoyée (ou refusée par Deezer) de la file.
     pub fn remove_listen(&self, listen: &PendingListen) -> io::Result<()> {
-        {
+        let index = {
             let mut listens = self.listens.write().map_err(|_| io::Error::other("écoutes verrouillées"))?;
             let Some(index) = listens.queue.iter().position(|l| l == listen) else { return Ok(()) };
             listens.queue.remove(index);
+            index
+        };
+        // Fichier pas réécrit (disque plein) : l'écoute y est encore ; remise aussi en mémoire, pour que l'envoi s'arrête
+        // (voir `flush_listens`) au lieu de la renvoyer au prochain lancement en la comptant deux fois.
+        let saved = self.persist_listens();
+        if saved.is_err() {
+            if let Ok(mut listens) = self.listens.write() {
+                let at = index.min(listens.queue.len());
+                listens.queue.insert(at, listen.clone());
+            }
         }
-        self.persist_listens()
+        saved
     }
 
     /// Écoute en cours mise de côté (à une pause) ou oubliée (`None`, à la fin de l'écoute). Rien n'est écrit si rien
@@ -694,7 +727,15 @@ impl OfflineStore {
             }
             listens.open = listen;
         }
-        self.persist_listens()
+        // Mise de côté répétée pendant la lecture : écrite sans attendre l'écriture physique sur le disque (moins de
+        // travail pour la puce de stockage et la batterie). Un plantage de l'app ne perd rien ; seule une coupure de
+        // courant pourrait perdre les dernières secondes de durée de cette écoute.
+        let _guard = self.persist_lock.lock().map_err(|_| io::Error::other("écriture des manifests verrouillée"))?;
+        let bytes = {
+            let listens = self.listens.read().map_err(|_| io::Error::other("index verrouillé"))?;
+            serde_json::to_vec(&*listens).map_err(io::Error::other)?
+        };
+        write_replace(&self.root.join("listens.json"), &bytes, false)
     }
 
     /// Fin d'une écoute, en une seule écriture : l'écoute mise de côté est oubliée et, si elle compte (`Some`), elle
@@ -1767,20 +1808,20 @@ mod tests {
     }
 
     #[test]
-    fn rejects_corrupt_manifest_without_rewriting_it() {
+    fn sets_corrupt_manifest_aside_without_deleting_anything() {
         let root = root("corrupt-manifest");
         let store = OfflineStore::open(root.clone()).unwrap();
         insert_file(&store, 42);
         drop(store);
         std::fs::write(root.join("downloads.json"), b"{broken").unwrap();
 
-        let error = match OfflineStore::open(root.clone()) {
-            Err(error) => error,
-            Ok(_) => panic!("un manifest corrompu doit empêcher l'ouverture"),
-        };
-        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert_eq!(std::fs::read(root.join("downloads.json")).unwrap(), b"{broken");
+        // L'app démarre quand même, la liste abîmée est gardée à part, le fichier audio n'est pas effacé, et le titre est
+        // retrouvé grâce au journal des ajouts.
+        let store = OfflineStore::open(root.clone()).expect("une liste abîmée ne doit plus empêcher l'ouverture");
+        assert!(store.contains(42));
+        assert_eq!(std::fs::read(root.join("downloads.json.corrupt")).unwrap(), b"{broken");
         assert!(audio_path(&root, 42, "mp3").exists());
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 

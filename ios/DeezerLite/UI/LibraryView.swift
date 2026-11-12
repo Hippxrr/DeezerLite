@@ -456,7 +456,7 @@ struct SettingsView: View {
     private var quality: some View {
         group(tr("Qualité en Wi-Fi")) { qualityRows(player.quality) { player.setQuality($0) } }
         group(tr("Qualité en données mobiles")) { qualityRows(player.cellularQuality) { player.setCellularQuality($0) } }
-        group("Qualité des téléchargements") { qualityRows(player.downloadQuality) { player.setDownloadQuality($0) } }
+        group(tr("Qualité des téléchargements")) { qualityRows(player.downloadQuality) { player.setDownloadQuality($0) } }
         Text(tr("Pour les nouveaux téléchargements, en Wi-Fi et en 4G/5G.")).font(.caption).foregroundStyle(.secondary).padding(.top, -14).padding(.leading, 4)
         if let playing = player.current?.quality {
             Text(tr("Titre en cours : %@", playing)).font(.caption).foregroundStyle(.secondary).padding(.top, -14).padding(.leading, 4)
@@ -742,7 +742,7 @@ struct RecoSettingsView: View {
                         get: { player.reco.curatedMax },
                         set: { n in player.updateReco { $0.curatedMax = n } }
                     ), in: 0...12) {
-                        LabeledContent("Sélections de la rédaction", value: "\(player.reco.curatedMax)")
+                        LabeledContent(tr("Sélections de la rédaction"), value: "\(player.reco.curatedMax)")
                     }
                 }
             }

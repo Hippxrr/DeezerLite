@@ -44,7 +44,8 @@ struct LastSession: Codable {
         self.positionMs = positionMs
     }
 
-    private static let key = "lastSession"
+    /// Propre au profil ouvert (compte Famille).
+    private static var key: String { ProfileData.key("lastSession") }
 
     static func load() -> LastSession? {
         guard let data = UserDefaults.standard.data(forKey: key) else { return nil }

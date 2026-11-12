@@ -18,7 +18,9 @@ struct CoverCropView: View {
     @State private var scale: CGFloat = 1
     @State private var lastScale: CGFloat = 1
     @State private var offset: CGSize = .zero
-    @State private var lastOffset: CGSize = .zero
+    /// Position au début du glissement en cours (relevée à son premier mouvement) : un doigt levé pendant un pincement
+    /// ne fait plus sauter l'image (le déplacement déjà fait était compté deux fois).
+    @State private var dragStart: CGSize?
 
     private static let maxScale: CGFloat = 5
 
@@ -46,16 +48,15 @@ struct CoverCropView: View {
                                         scale = min(max(lastScale * v.magnification, 1), Self.maxScale)
                                         offset = clamp(offset, side: side, base: base)
                                     }
-                                    .onEnded { _ in
-                                        lastScale = scale
-                                        lastOffset = offset
-                                    },
+                                    .onEnded { _ in lastScale = scale },
                                 DragGesture()
                                     .onChanged { v in
-                                        offset = clamp(CGSize(width: lastOffset.width + v.translation.width,
-                                                              height: lastOffset.height + v.translation.height), side: side, base: base)
+                                        let start = dragStart ?? offset
+                                        if dragStart == nil { dragStart = start }
+                                        offset = clamp(CGSize(width: start.width + v.translation.width,
+                                                              height: start.height + v.translation.height), side: side, base: base)
                                     }
-                                    .onEnded { _ in lastOffset = offset }
+                                    .onEnded { _ in dragStart = nil }
                             )
                         )
                     Text(tr("Pince pour zoomer, glisse pour cadrer."))

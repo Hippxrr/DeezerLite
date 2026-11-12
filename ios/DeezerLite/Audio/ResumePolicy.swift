@@ -52,5 +52,8 @@ struct ResumePolicy {
     mutating func userDecided() {
         playingBeforeInterruption = false
         earPause = nil
+        // iOS n'envoie pas toujours la fin d'une coupure (autre app qui garde le son) : sans ça, `interrupted` restait vrai
+        // pour de bon (plus de reprise au retour des écouteurs, ni après l'appel suivant). Une fin tardive ne relance rien.
+        interrupted = false
     }
 }

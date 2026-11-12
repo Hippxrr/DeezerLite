@@ -241,11 +241,11 @@ impl DeezerClient {
         self.cover_fixes.lock().is_ok_and(|f| f.contains_key(&format!("ok:{md5}")))
     }
 
+    /// Retenue en mémoire seulement : écrite avec la prochaine sauvegarde du fichier. Avant, chaque image vérifiée bonne
+    /// réécrivait tout `covers.json` (jusqu'à ~1 Mo), sur les fils partagés avec le lecteur.
     fn remember_complete(&self, md5: &str) {
         if let Ok(mut fixes) = self.cover_fixes.lock() {
-            if fixes.insert(format!("ok:{md5}"), today()).is_none() {
-                self.save_cover_fixes(&mut fixes);
-            }
+            fixes.insert(format!("ok:{md5}"), today());
         }
     }
 
