@@ -370,7 +370,10 @@ private struct MiniInfo: View {
     var body: some View {
         HStack(spacing: 12) {
             if track != nil || !placeholder.isEmpty {
-                if let track {
+                if let track, track.id == 0 {
+                    // Flow en cours de chargement (titre provisoire, voir `playFlow`) : un indicateur qui tourne.
+                    ProgressView().frame(width: side, height: side)
+                } else if let track {
                     // Identité liée à la pochette : jamais l'image du titre d'avant pendant une image.
                     CoverView(url: track.coverUrl, side: side, radius: 8).id(track.coverUrl ?? "")
                 } else {
