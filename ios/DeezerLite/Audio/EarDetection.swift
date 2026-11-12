@@ -21,7 +21,8 @@ final class EarDetection: NSObject, CMHeadphoneMotionManagerDelegate {
     private var lastLocation: Int?
     private var lastSample: TimeInterval?
     private var samples = 0
-    private let activity = CMHeadphoneActivityManager()
+    /// `CMHeadphoneActivityManager` (iOS 18 et plus seulement).
+    private var activity: AnyObject?
 
     override init() {
         super.init()
@@ -52,7 +53,7 @@ final class EarDetection: NSObject, CMHeadphoneMotionManagerDelegate {
                 self.stopTask = nil
                 self.running = false
                 self.manager.stopDeviceMotionUpdates()
-                self.activity.stopStatusUpdates()
+                if #available(iOS 18, *) { (self.activity as? CMHeadphoneActivityManager)?.stopStatusUpdates() }
                 AirPodsDiag.shared.log("Capteurs arrêtés")
             }
         }
@@ -80,8 +81,11 @@ final class EarDetection: NSObject, CMHeadphoneMotionManagerDelegate {
         AirPodsDiag.shared.log("Capteurs : mouvement fourni par \(location.flatMap { names[$0] } ?? "?")")
     }
 
-    /// Autre service des AirPods (iOS 17) : son état « connecté / déconnecté » change peut-être aussi.
+    /// Autre service des AirPods (iOS 18) : son état « connecté / déconnecté » change peut-être aussi.
     private func startActivity() {
+        guard #available(iOS 18, *) else { return }
+        let activity = (self.activity as? CMHeadphoneActivityManager) ?? CMHeadphoneActivityManager()
+        self.activity = activity
         guard activity.isStatusAvailable else {
             AirPodsDiag.shared.log("Activité des AirPods : indisponible")
             return
