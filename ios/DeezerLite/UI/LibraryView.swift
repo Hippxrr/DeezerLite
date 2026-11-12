@@ -449,32 +449,6 @@ struct SettingsView: View {
         group(tr("Égaliseur")) { EqualizerPanel() }
         Text(tr("Fréquences en Hz. Toucher un curseur crée ton réglage « Personnalisé »."))
             .font(.caption).foregroundStyle(.secondary).padding(.top, -14).padding(.leading, 4)
-        airPodsTest
-    }
-
-    /// TEMPORAIRE (test AirPods, à retirer après) : ce que voient les capteurs des AirPods (voir `EarDetection`).
-    private var airPodsTest: some View {
-        let diag = AirPodsDiag.shared
-        return group("Test AirPods (temporaire)") {
-            HStack {
-                Button("Copier le journal") {
-                    diag.copy()
-                    player.showToast("Journal copié")
-                }
-                Spacer()
-                Button("Effacer", role: .destructive) { diag.clear() }
-            }
-            .padding(14)
-            divider
-            VStack(alignment: .leading, spacing: 6) {
-                if diag.lines.isEmpty { Text("Rien pour l'instant").foregroundStyle(.secondary) }
-                ForEach(Array(diag.lines.enumerated()), id: \.offset) { _, line in
-                    Text(line).font(.caption2.monospaced()).fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(14)
-        }
     }
 
     /// Qualité en Wi-Fi, en données mobiles, des téléchargements.
