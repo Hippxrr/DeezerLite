@@ -55,7 +55,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.hippxrr.deezerlite
         PRODUCT_NAME: DeezerLite
         TARGETED_DEVICE_FAMILY: "1"
-        MARKETING_VERSION: "2.6.0"
+        MARKETING_VERSION: "2.6.1"
         CURRENT_PROJECT_VERSION: "1"
         DEAD_CODE_STRIPPING: YES
         # Icône : Assets.xcassets/AppIcon (le logo de la version bureau).

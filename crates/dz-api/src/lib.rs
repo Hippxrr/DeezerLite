@@ -198,13 +198,16 @@ pub struct DeezerClient {
     cover_fixes: std::sync::Mutex<std::collections::HashMap<String, String>>,
     /// Fichier où les pochettes réparées sont gardées d'un lancement à l'autre (voir `use_cover_fixes_file`).
     cover_fixes_file: std::sync::Mutex<Option<std::path::PathBuf>>,
+    /// Pochettes cassées sans remplacement trouvé (« <md5>:<titre> », « <md5>:album ») et quand : pas recherchées de
+    /// nouveau pendant 30 min (avant : à chaque affichage, plusieurs requêtes par titre).
+    cover_misses: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
 
 impl DeezerClient {
     pub fn new() -> Result<Self> {
         let jar = Arc::new(CookieStoreMutex::default());
         let http = std::sync::RwLock::new(Self::build_http(jar.clone())?);
-        Ok(Self { http, jar, session: RwLock::new(None), refresh_lock: Mutex::new(()), loved_cache: std::sync::Mutex::new(None), date_cache: std::sync::Mutex::new(std::collections::HashMap::new()), home_cache: std::sync::Mutex::new(None), profile: std::sync::Mutex::new(None), family: std::sync::Mutex::new(None), jwt: std::sync::Mutex::new(None), cover_fixes: std::sync::Mutex::new(std::collections::HashMap::new()), cover_fixes_file: std::sync::Mutex::new(None) })
+        Ok(Self { http, jar, session: RwLock::new(None), refresh_lock: Mutex::new(()), loved_cache: std::sync::Mutex::new(None), date_cache: std::sync::Mutex::new(std::collections::HashMap::new()), home_cache: std::sync::Mutex::new(None), profile: std::sync::Mutex::new(None), family: std::sync::Mutex::new(None), jwt: std::sync::Mutex::new(None), cover_fixes: std::sync::Mutex::new(std::collections::HashMap::new()), cover_fixes_file: std::sync::Mutex::new(None), cover_misses: std::sync::Mutex::new(std::collections::HashMap::new()) })
     }
 
     fn build_http(jar: Arc<CookieStoreMutex>) -> Result<Client> {

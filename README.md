@@ -1,6 +1,6 @@
 # 🎧 Deezer Lite · iOS
 
-![Version](https://img.shields.io/badge/version-2.6.0-a238ff)
+![Version](https://img.shields.io/badge/version-2.6.1-a238ff)
 ![iOS](https://img.shields.io/badge/iOS-17%2B-black?logo=apple)
 ![Swift](https://img.shields.io/badge/SwiftUI-native-F05138?logo=swift&logoColor=white)
 ![Rust](https://img.shields.io/badge/engine-Rust-B7410E?logo=rust&logoColor=white)
@@ -26,7 +26,7 @@ networking, the play queue and audio.
 |---|---|
 | Device | iPhone, iOS 17 or later |
 | Display name | Deezer |
-| Version | 2.6.0 |
+| Version | 2.6.1 |
 | Bundle ID | `com.hippxrr.deezerlite` |
 | UI | SwiftUI, Observation, Liquid Glass on iOS 26 |
 | Engine | Rust (2021 edition), bridged to Swift with UniFFI 0.29 |
@@ -65,6 +65,10 @@ networking, the play queue and audio.
 - **Interruptions handled like Apple's music apps**: playback pauses when another app takes the audio (call, voice
   message, video) and resumes only if that app allows it and music was playing. Removing earbuds pauses; putting
   them back within 30 minutes resumes.
+- **Removing a single AirPod pauses** (and putting it back resumes), on AirPods with motion sensors (AirPods Pro,
+  AirPods 3 and later, AirPods Max). iOS doesn't tell sideloaded apps about it, so the app watches whether the AirPods
+  motion sensors are connected: it asks once for the "Motion & Fitness" permission. Depending on which AirPod is
+  sending the sensor data, it may only work for one side at a time.
 - **Resume on launch**: the last session comes back at the same position (can be turned off).
 
 ### 📥 Offline
@@ -148,6 +152,9 @@ keychain, on this device only.
   and when). They are what feeds your Deezer history and your official monthly and yearly stats.
 - **Everything else is either content or your own actions**: requests needed to show the catalog, search and your
   library, plus what you explicitly do (liking a track, adding it to a playlist…).
+- **Motion & Fitness permission** (optional, for the single-AirPod pause): the app only uses the "AirPods connected /
+  disconnected" signal. It never reads your movements, and nothing is stored or sent. The sensors only run while
+  music plays on earbuds. Declining it only turns that feature off.
 - **Stays on the phone**: search history, pinned items, custom covers, the liked tracks name, settings, the cached
   home and library, and downloads. The Deezer session is kept in the iOS keychain.
 
@@ -211,6 +218,7 @@ network ─▶ dz-stream ─▶ decoding (Symphonia) ─▶ resampling ─▶ cr
 - **Output**: an `AVAudioSourceNode` calls the C function `dz_render` on iOS's real-time thread. This path never
   allocates memory, never takes a lock and never waits: if audio is missing, it outputs silence.
 - **Rendering**: volume, equalizer (biquad filters) and a soft limiter that only kicks in when gain exceeds 1.
+- **No clicks**: 5 ms fades on pause and resume, and before the buffer is cleared on a seek or a track change.
 - **Power saving**: iOS's audio engine is stopped while paused. During playback, the decoding thread wakes up every
   100 ms when the buffer is full. Requested hardware buffer: 46 ms.
 
@@ -333,7 +341,7 @@ profile also includes the CarPlay entitlement.
 
 ### Versioning
 
-The app version is fixed in the code: `MARKETING_VERSION` in `ios/project.yml`, currently **2.6.0**. A build made
+The app version is fixed in the code: `MARKETING_VERSION` in `ios/project.yml`, currently **2.6.1**. A build made
 on the Mac always carries that version, there is nothing to choose.
 
 ### If something goes wrong

@@ -350,14 +350,19 @@ impl Renderer {
     #[inline]
     fn render<T: Copy>(&mut self, data: &mut [T], silence: T, conv: impl Fn(f32) -> T) {
         let Self { cons, ctl, eq, bands, channels, gain, ramp, .. } = self;
+        // Vidage demandé (saut, autre titre, arrêt) : le son en cours descend d'abord à zéro en 5 ms, puis le tampon est
+        // vidé. Le nouveau son remonte ensuite en 5 ms. Avant, la coupure nette faisait un petit clic.
         let req = ctl.flush_req.load(Ordering::Acquire);
-        if req != ctl.flush_ack.load(Ordering::Relaxed) {
+        let flushing = req != ctl.flush_ack.load(Ordering::Relaxed);
+        if flushing && *gain == 0 {
             while cons.pop().is_ok() {}
             ctl.flush_ack.store(req, Ordering::Release);
             data.fill(silence);
             return;
         }
         let paused = ctl.shared.paused.load(Ordering::Relaxed);
+        // Pause ou vidage : le son descend vers zéro.
+        let fading = paused || flushing;
         if paused && *gain == 0 {
             data.fill(silence);
             bands.publish_silence(&ctl.shared);
@@ -379,13 +384,16 @@ impl Renderer {
         let mut starved = false;
         for (i, s) in data.iter_mut().enumerate() {
             if i % ch == 0 {
-                if paused {
+                if fading {
                     *gain = gain.saturating_sub(1);
-                } else if *gain < ramp {
-                    *gain += 1;
                 }
                 if !starved {
-                    starved = (paused && *gain == 0) || cons.slots() < ch;
+                    starved = (fading && *gain == 0) || cons.slots() < ch;
+                }
+                // Remontée seulement sur du vrai son : sinon, après une reprise ou un saut, elle s'écoulait pendant
+                // l'attente du premier son, qui arrivait alors d'un coup (clic).
+                if !fading && !starved && *gain < ramp {
+                    *gain += 1;
                 }
             }
             match if starved { None } else { cons.pop().ok() } {
@@ -1261,6 +1269,14 @@ impl Worker {
         match cmd {
             Cmd::Load { id, src, ext } => {
                 if !self.ensure_output() {
+                    // Aucune sortie (seul casque débranché…) : le titre demandé ne joue pas, l'ancien n'est pas gardé (une
+                    // reprise le relançait alors que l'écran montrait le nouveau), et plus d'« en lecture » sans son.
+                    self.cur = None;
+                    self.incoming = None;
+                    self.next = None;
+                    self.shared.idle.store(true, Ordering::Relaxed);
+                    self.shared.playing.store(false, Ordering::Relaxed);
+                    let _ = self.events.send(EngineEvent::StateChanged);
                     return;
                 }
                 let (rate, ch) = self.out.as_ref().map(|o| (o.rate, o.channels)).unwrap_or((44_100, 2));
@@ -1269,6 +1285,7 @@ impl Worker {
                 self.next = None;
                 self.flush();
                 self.announced = None;
+                self.shared.position_ms.store(0, Ordering::Relaxed);
                 match open_track(Pending { id, src, ext }, rate, ch) {
                     Ok(t) => {
                         self.start_track(t, 0);
@@ -1314,6 +1331,7 @@ impl Worker {
                 if self.out.is_none() && self.cur.is_some() {
                     let pos = self.lost_pos.take().or(Some(self.shared.position_ms.load(Ordering::Relaxed)));
                     if !self.rebuild_output(pos) {
+                        self.set_paused(true);
                         return;
                     }
                 }

@@ -1226,8 +1226,11 @@ impl Actor {
                         self.index = i;
                     }
                     self.prefetched = None;
-                } else if let Some(pos) = self.queue.iter().position(|&q| q == id) {
-                    self.index = pos;
+                } else if self.queue.get(self.index) != Some(&id) {
+                    // Titre en double dans la file : la copie en cours est gardée (on sautait à la première).
+                    if let Some(pos) = self.queue.iter().position(|&q| q == id) {
+                        self.index = pos;
+                    }
                 }
                 self.retries = 0;
                 self.recover_at = None;
@@ -1250,7 +1253,7 @@ impl Actor {
                 // Préchargement raté (ou fin de file) : on tente quand même d'enchaîner.
                 if let Some(i) = self.next_index() {
                     self.index = i;
-                    self.play_current().await;
+                    self.play_prefetched_or_current().await;
                 } else {
                     let _ = self.events.send(CoreEvent::Stopped);
                 }

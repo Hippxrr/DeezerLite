@@ -120,6 +120,12 @@ impl DeezerClient {
     }
 }
 
+/// Jour actuel (jours depuis 1970), gardé avec chaque image vérifiée bonne : les plus anciennes partent en premier.
+fn today() -> String {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    (secs / 86_400).to_string()
+}
+
 /// Image vide du serveur d'images de Deezer (md5 d'un texte vide) : celle vers laquelle il redirige quand il n'a pas
 /// l'image demandée.
 const EMPTY_PICTURE: &str = "d41d8cd98f00b204e9800998ecf8427e";
@@ -141,23 +147,42 @@ impl DeezerClient {
             self.remember_complete(&old);
             return None;
         }
+        self.repair_incomplete(url, &old, album_id, track_id).await
+    }
+
+    /// Recherche d'un remplacement pour l'image `old`, déjà connue incomplète.
+    async fn repair_incomplete(&self, url: &str, old: &str, album_id: u64, track_id: i64) -> Option<String> {
+        const RETRY: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+        let missed = |key: &str| self.cover_misses.lock().is_ok_and(|m| m.get(key).is_some_and(|at| at.elapsed() < RETRY));
+        let (track_key, album_key) = (format!("{old}:{track_id}"), format!("{old}:album"));
+        if missed(&track_key) {
+            return None;
+        }
+        let old = old.to_owned();
         let timeout = std::time::Duration::from_secs(10);
         // (md5, propre à ce titre) : la pochette actuelle de l'album vaut pour tous ses titres ; celle de l'édition qui
         // remplace le titre ne vaut que pour lui (deux titres d'un même album retiré peuvent être partis vers deux
         // sorties différentes, par exemple un single et une nouvelle édition de l'album).
         let mut candidates: Vec<(String, bool)> = Vec::new();
-        if album_id != 0 {
+        // Réponse incomplète (réseau, limite de requêtes) : rien n'est retenu comme « sans remplacement ».
+        let mut sure = true;
+        let ask_album = album_id != 0 && !missed(&album_key);
+        if ask_album {
             let album: Option<Value> = match self.http().get(format!("https://api.deezer.com/album/{album_id}")).timeout(timeout).send().await {
                 Ok(r) => r.json().await.ok(),
                 Err(_) => None,
             };
+            sure &= album.is_some();
             candidates.extend(album.as_ref().and_then(|a| a.get("md5_image")).and_then(Value::as_str).map(|m| (m.to_owned(), false)));
         }
         if track_id > 0 {
             // Album retiré : l'édition qui remplace le titre (« FALLBACK ») a sa propre pochette.
-            if let Ok(v) = self.gw::<Value>("song.getListData", &serde_json::json!({ "sng_ids": [track_id] })).await {
-                let song = v.pointer("/data/0").or_else(|| v.get(0));
-                candidates.extend(song.and_then(|s| s.pointer("/FALLBACK/ALB_PICTURE")).and_then(Value::as_str).map(|m| (m.to_owned(), true)));
+            match self.gw::<Value>("song.getListData", &serde_json::json!({ "sng_ids": [track_id] })).await {
+                Ok(v) => {
+                    let song = v.pointer("/data/0").or_else(|| v.get(0));
+                    candidates.extend(song.and_then(|s| s.pointer("/FALLBACK/ALB_PICTURE")).and_then(Value::as_str).map(|m| (m.to_owned(), true)));
+                }
+                Err(_) => sure = false,
             }
         }
         let mut found = None;
@@ -167,19 +192,41 @@ impl DeezerClient {
                 break;
             }
         }
-        let (md5, own) = found?;
+        let Some((md5, own)) = found else {
+            if sure {
+                if let Ok(mut m) = self.cover_misses.lock() {
+                    m.insert(track_key, std::time::Instant::now());
+                    if ask_album {
+                        m.insert(album_key, std::time::Instant::now());
+                    }
+                }
+            }
+            return None;
+        };
         let md5 = md5.as_str();
         if let Ok(mut fixes) = self.cover_fixes.lock() {
             // Clé : « t:<titre> » pour une pochette propre à ce titre, sinon l'ancienne image (tous ses titres).
             let key = if own { format!("t:{track_id}") } else { old.clone() };
             fixes.insert(key, md5.to_owned());
             // Gardée sur le disque : au prochain lancement, listes et lecteur ont la bonne pochette tout de suite.
-            self.save_cover_fixes(&fixes);
+            self.save_cover_fixes(&mut fixes);
         }
         Some(url.replacen(&old, md5, 1))
     }
 
-    fn save_cover_fixes(&self, fixes: &std::collections::HashMap<String, String>) {
+    fn save_cover_fixes(&self, fixes: &mut std::collections::HashMap<String, String>) {
+        // Images vérifiées bonnes : une entrée par pochette vue, le fichier grossissait sans fin. Au-delà de 20 000, on
+        // garde les 15 000 plus récentes (les autres seront simplement revérifiées si elles réapparaissent).
+        const MAX_OK: usize = 20_000;
+        if fixes.keys().filter(|k| k.starts_with("ok:")).count() > MAX_OK {
+            let mut ok: Vec<(u64, String)> =
+                fixes.iter().filter(|(k, _)| k.starts_with("ok:")).map(|(k, v)| (v.parse().unwrap_or(0), k.clone())).collect();
+            ok.sort_unstable();
+            let drop = ok.len() - 15_000;
+            for (_, k) in ok.into_iter().take(drop) {
+                fixes.remove(&k);
+            }
+        }
         let Some(path) = self.cover_fixes_file.lock().ok().and_then(|p| p.clone()) else { return };
         if let Ok(bytes) = serde_json::to_vec(fixes) {
             let tmp = path.with_extension("tmp");
@@ -196,8 +243,8 @@ impl DeezerClient {
 
     fn remember_complete(&self, md5: &str) {
         if let Ok(mut fixes) = self.cover_fixes.lock() {
-            if fixes.insert(format!("ok:{md5}"), String::new()).is_none() {
-                self.save_cover_fixes(&fixes);
+            if fixes.insert(format!("ok:{md5}"), today()).is_none() {
+                self.save_cover_fixes(&mut fixes);
             }
         }
     }
@@ -244,7 +291,7 @@ impl DeezerClient {
         for (md5, list, complete) in checked {
             if complete {
                 if let Ok(mut fixes) = self.cover_fixes.lock() {
-                    fixes.insert(format!("ok:{md5}"), String::new());
+                    fixes.insert(format!("ok:{md5}"), today());
                     learned = true;
                 }
                 continue;
@@ -252,14 +299,14 @@ impl DeezerClient {
             for (id, url, album) in list {
                 let fixed = match self.known_cover_fix(id, &url, &md5) {
                     Some(f) => Some(f),
-                    None => self.repaired_track_cover(&url, album, id).await,
+                    None => self.repair_incomplete(&url, &md5, album, id).await,
                 };
                 out.extend(fixed.filter(|f| *f != url).map(|f| (id, f)));
             }
         }
         if learned {
-            if let Ok(fixes) = self.cover_fixes.lock() {
-                self.save_cover_fixes(&fixes);
+            if let Ok(mut fixes) = self.cover_fixes.lock() {
+                self.save_cover_fixes(&mut fixes);
             }
         }
         out
@@ -408,6 +455,22 @@ fn multipart_body(boundary: &str, field: &str, filename: &str, mime: &str, data:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// covers.json : au-delà de 20 000 images vérifiées bonnes, seules les 15 000 plus récentes restent ; les vraies
+    /// réparations ne sont jamais retirées.
+    #[test]
+    fn verified_covers_are_capped_oldest_first() {
+        let c = DeezerClient::new().unwrap();
+        let mut fixes = std::collections::HashMap::new();
+        for i in 0..20_001u64 {
+            fixes.insert(format!("ok:{i}"), i.to_string());
+        }
+        fixes.insert("abc".into(), "def".into());
+        c.save_cover_fixes(&mut fixes);
+        assert_eq!(fixes.keys().filter(|k| k.starts_with("ok:")).count(), 15_000);
+        assert!(!fixes.contains_key("ok:0") && fixes.contains_key("ok:20000"));
+        assert_eq!(fixes.get("abc").map(String::as_str), Some("def"));
+    }
 
     #[test]
     fn multipart_body_is_well_formed() {
