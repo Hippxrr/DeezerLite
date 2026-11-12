@@ -5,7 +5,10 @@ enum AudioSession {
     static func configure() {
         let session = AVAudioSession.sharedInstance()
         do {
-            try session.setCategory(.playback, mode: .default, policy: .longFormAudio)
+            // TEMPORAIRE (test AirPods) : mode « audio long » désactivable dans Réglages › Son.
+            let plain = AirPodsDiag.plainPolicy
+            try session.setCategory(.playback, mode: .default, policy: plain ? .default : .longFormAudio)
+            AirPodsDiag.note("Session : mode audio long \(plain ? "DÉSACTIVÉ" : "activé") · sortie : \(AirPodsDiag.describe(session.currentRoute.outputs))")
             // Tampon plus long = moins de réveils du CPU. Écran verrouillé, iOS passe de lui-même à 4096 trames.
             try session.setPreferredIOBufferDuration(0.046)
         } catch {

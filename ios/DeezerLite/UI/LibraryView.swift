@@ -212,6 +212,8 @@ struct SettingsView: View {
     @AppStorage("tabLabelsHidden") private var tabLabelsHidden = false
     @AppStorage("tabBarFull") private var tabBarFull = true
     @AppStorage("miniProgress") private var miniProgress = true
+    /// TEMPORAIRE (test AirPods) : session sans le mode « audio long », appliqué au prochain lancement.
+    @AppStorage(AirPodsDiag.plainPolicyKey) private var diagPlainPolicy = false
 
     enum SettingsTab: String, CaseIterable {
         case general, look, sound, quality
@@ -449,6 +451,41 @@ struct SettingsView: View {
         group(tr("Égaliseur")) { EqualizerPanel() }
         Text(tr("Fréquences en Hz. Toucher un curseur crée ton réglage « Personnalisé »."))
             .font(.caption).foregroundStyle(.secondary).padding(.top, -14).padding(.leading, 4)
+        airPodsTest
+    }
+
+    /// TEMPORAIRE (test AirPods, à retirer après) : ce qu'iOS envoie à l'app, et le mode « audio long » désactivable.
+    private var airPodsTest: some View {
+        let diag = AirPodsDiag.shared
+        return group("Test AirPods (temporaire)") {
+            Toggle(isOn: $diagPlainPolicy) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Désactiver le mode audio long")
+                    Text("Ferme l'app puis relance-la pour l'appliquer").font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .tint(Theme.accent)
+            .padding(14)
+            divider
+            HStack {
+                Button("Copier le journal") {
+                    diag.copy()
+                    player.showToast("Journal copié")
+                }
+                Spacer()
+                Button("Effacer", role: .destructive) { diag.clear() }
+            }
+            .padding(14)
+            divider
+            VStack(alignment: .leading, spacing: 6) {
+                if diag.lines.isEmpty { Text("Rien pour l'instant").foregroundStyle(.secondary) }
+                ForEach(Array(diag.lines.enumerated()), id: \.offset) { _, line in
+                    Text(line).font(.caption2.monospaced()).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+        }
     }
 
     /// Qualité en Wi-Fi, en données mobiles, des téléchargements.

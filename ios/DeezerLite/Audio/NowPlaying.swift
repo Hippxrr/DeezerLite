@@ -14,15 +14,23 @@ enum NowPlaying {
     /// iOS appelle ces commandes sur le thread principal.
     static func setup(_ player: Player) {
         let cc = MPRemoteCommandCenter.shared()
-        func on(_ command: MPRemoteCommand, _ action: @escaping @MainActor (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus) {
-            command.addTarget { event in MainActor.assumeIsolated { action(event) } }
+        // TEMPORAIRE (test AirPods) : `name` sert au journal des commandes reçues.
+        func on(_ command: MPRemoteCommand, _ name: String, _ action: @escaping @MainActor (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus) {
+            command.addTarget { event in
+                MainActor.assumeIsolated { () -> MPRemoteCommandHandlerStatus in
+                    AirPodsDiag.shared.log("Commande reçue : \(name)")
+                    return action(event)
+                }
+            }
         }
-        on(cc.playCommand) { _ in player.resume(); return .success }
-        on(cc.pauseCommand) { _ in player.pause(); return .success }
-        on(cc.togglePlayPauseCommand) { _ in player.toggle(); return .success }
-        on(cc.nextTrackCommand) { _ in player.next(); return .success }
-        on(cc.previousTrackCommand) { _ in player.previous(); return .success }
-        on(cc.changePlaybackPositionCommand) { e in
+        on(cc.playCommand, "lecture") { _ in player.resume(); return .success }
+        on(cc.pauseCommand, "pause") { _ in player.pause(); return .success }
+        on(cc.togglePlayPauseCommand, "lecture/pause") { _ in player.toggle(); return .success }
+        // TEMPORAIRE (test AirPods) : pour voir si iOS envoie « stop » au retrait d'un AirPod.
+        on(cc.stopCommand, "stop") { _ in player.pause(); return .success }
+        on(cc.nextTrackCommand, "suivant") { _ in player.next(); return .success }
+        on(cc.previousTrackCommand, "précédent") { _ in player.previous(); return .success }
+        on(cc.changePlaybackPositionCommand, "position") { e in
             guard let e = e as? MPChangePlaybackPositionCommandEvent else { return .commandFailed }
             player.seek(seconds: e.positionTime)
             return .success
@@ -81,6 +89,8 @@ enum NowPlaying {
             MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
         ]
         if let artwork { info[MPMediaItemPropertyArtwork] = artwork }
+        // TEMPORAIRE (test AirPods) : état annoncé à iOS (lecture ou pause), à chaque changement.
+        if (status.playing ? 1.0 : 0.0) != sent.rate { AirPodsDiag.shared.log("Annoncé à iOS : \(status.playing ? "lecture" : "pause")") }
         center.nowPlayingInfo = info
         sent = (Double(status.positionMs) / 1000, status.playing ? 1 : 0, Date())
     }

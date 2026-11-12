@@ -1646,6 +1646,56 @@ mod tests {
         assert!(t.src_ch >= 1);
     }
 
+    /// Petit fichier WAV (silence) ouvert comme un vrai titre.
+    fn wav_track(id: i64) -> Track {
+        let data_len = 4u32 * 100;
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&(36 + data_len).to_le_bytes());
+        v.extend_from_slice(b"WAVEfmt ");
+        v.extend_from_slice(&16u32.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v.extend_from_slice(&2u16.to_le_bytes());
+        v.extend_from_slice(&48_000u32.to_le_bytes());
+        v.extend_from_slice(&(48_000u32 * 4).to_le_bytes());
+        v.extend_from_slice(&4u16.to_le_bytes());
+        v.extend_from_slice(&16u16.to_le_bytes());
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&data_len.to_le_bytes());
+        v.resize(v.len() + data_len as usize, 0);
+        open_track(Pending { id, src: Box::new(Cursor::new(v)), ext: Some("wav".into()) }, 48_000, 2)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Changement de sortie : on reprend le titre réellement entendu, pas celui que le décodeur prépare.
+    #[test]
+    fn output_change_resumes_the_track_heard() {
+        let (_tx, rx) = mpsc::channel();
+        let (events, _rx_events) = tokio::sync::mpsc::unbounded_channel();
+        let mut w = Worker::new(rx, events, Arc::new(Shared::default()));
+        let seg = |id| Segment { seq: 0, id, start_sample: 0, start_ms: 0, duration_ms: 0 };
+        // Fondu enchaîné : on entend déjà le titre entrant, il devient le titre en cours, à la même position.
+        w.cur = Some(wav_track(1));
+        w.incoming = Some(wav_track(2));
+        w.segments.push_back(seg(2));
+        assert_eq!(w.audible_resume(1234), Some(1234));
+        assert_eq!(w.cur.as_ref().map(|t| t.id), Some(2));
+        assert!(w.incoming.is_none());
+        // Fin d'un enchaînement : on entend encore la fin du titre 1 alors que le 2 est prêt ; le 2 repart du début.
+        w.segments.clear();
+        w.segments.push_back(seg(1));
+        w.announced = Some(7);
+        assert_eq!(w.audible_resume(500), Some(0));
+        assert_eq!(w.announced, None);
+        // Cas simple : le titre entendu est le titre en cours.
+        w.segments.clear();
+        w.segments.push_back(seg(2));
+        assert_eq!(w.audible_resume(800), Some(800));
+        // Plus rien en cours : rien à reprendre.
+        w.cur = None;
+        assert_eq!(w.audible_resume(800), None);
+    }
+
     #[test]
     fn equal_power_fade_keeps_energy_and_hits_the_ends() {
         let n = 1000;

@@ -23,6 +23,7 @@ enum AudioOutput {
         // Sortie changée (AirPods, enceinte, CarPlay) : iOS arrête le moteur ; il repart s'il jouait. Petit délai : des
         // écouteurs débranchés déclenchent aussi une pause, qui doit arriver avant (pas de redémarrage pour rien).
         NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: nil) { _ in
+            AirPodsDiag.note("Moteur audio reconfiguré par iOS") // TEMPORAIRE (test AirPods)
             queue.asyncAfter(deadline: .now() + 0.3) {
                 guard wanted else { return }
                 startID += 1

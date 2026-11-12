@@ -2068,7 +2068,9 @@ final class Player {
             let info = n.userInfo ?? [:]
             let type = (info[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap(AVAudioSession.InterruptionType.init)
             let options = AVAudioSession.InterruptionOptions(rawValue: info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0)
+            let why = info[AVAudioSessionInterruptionReasonKey] as? UInt // TEMPORAIRE (test AirPods)
             Task { @MainActor in
+                AirPodsDiag.shared.log("Coupure : \(type == .began ? "début" : type == .ended ? "fin" : "?") · raison \(why.map { "\($0)" } ?? "-") · reprise permise : \(options.contains(.shouldResume) ? "oui" : "non")")
                 guard let self, let core = self.core else { return }
                 switch type {
                 case .began:
@@ -2096,7 +2098,13 @@ final class Player {
             let previous = (n.userInfo?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription)?
                 .outputs.first { Self.earPorts.contains($0.portType) }?.uid
             let current = AVAudioSession.sharedInstance().currentRoute.outputs.map(\.uid)
+            // TEMPORAIRE (test AirPods) : chaque changement de sortie, avec sa raison, avant et après.
+            let reasons: [UInt: String] = [1: "nouvelle sortie", 2: "sortie disparue", 3: "catégorie changée", 4: "forçage", 6: "réveil",
+                                           7: "aucune sortie possible", 8: "configuration de la sortie"]
+            let before = AirPodsDiag.describe((n.userInfo?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription)?.outputs ?? [])
+            let after = AirPodsDiag.describe(AVAudioSession.sharedInstance().currentRoute.outputs)
             MainActor.assumeIsolated {
+                AirPodsDiag.shared.log("Sortie changée : \(reason.flatMap { reasons[$0.rawValue] } ?? "inconnue") · avant : \(before) · après : \(after)")
                 guard let self else { return }
                 if reason == .oldDeviceUnavailable {
                     // Écouteurs débranchés, AirPods retirés des oreilles : pause (jamais de bascule sur le haut-parleur),
@@ -2110,8 +2118,14 @@ final class Player {
                 }
             }
         }
+        // TEMPORAIRE (test AirPods) : une autre app demande le silence (ou le rend).
+        center.addObserver(forName: AVAudioSession.silenceSecondaryAudioHintNotification, object: session, queue: .main) { n in
+            let begin = (n.userInfo?[AVAudioSessionSilenceSecondaryAudioHintTypeKey] as? UInt) == AVAudioSession.SilenceSecondaryAudioHintType.begin.rawValue
+            AirPodsDiag.note("Autre app : \(begin ? "demande le silence" : "rend le son")")
+        }
         center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: session, queue: .main) { [weak self] _ in
             Task { @MainActor in
+                AirPodsDiag.shared.log("Service audio d'iOS redémarré") // TEMPORAIRE (test AirPods)
                 AudioSession.invalidate()
                 AudioSession.configure()
                 self?.needsReopen = true
