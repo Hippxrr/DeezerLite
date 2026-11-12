@@ -55,20 +55,20 @@ struct DownloadsView: View {
             if hasActivity {
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("tr("Téléchargements en cours")).font(.title3.bold())
+                        Text(tr("Téléchargements en cours")).font(.title3.bold())
                         if queuedCount > 0 {
                             Text("\(queuedCount) en attente").font(.subheadline).foregroundStyle(.secondary)
                         }
                     }
                     Spacer()
                     Button(role: .destructive) { player.cancelAllDownloads() } label: {
-                        Label("tr("Tout arrêter"), systemImage: "stop.fill")
+                        Label(tr("Tout arrêter"), systemImage: "stop.fill")
                             .font(.subheadline.weight(.semibold))
                     }
                     .buttonStyle(.bordered)
                 }
             } else if failedCount > 0 {
-                Text("tr("Téléchargements en échec")).font(.title3.bold())
+                Text(tr("Téléchargements en échec")).font(.title3.bold())
             }
 
             if !active.isEmpty {
@@ -84,9 +84,9 @@ struct DownloadsView: View {
                     Text(failedCount == 1 ? "1 échec" : "\(failedCount) échecs")
                         .font(.subheadline).foregroundStyle(.secondary)
                     Spacer()
-                    Button("tr("Tout réessayer")) { retryFailed() }
+                    Button(tr("Tout réessayer")) { retryFailed() }
                         .font(.subheadline.weight(.semibold))
-                    Button("tr("Effacer"), role: .destructive) { player.clearFailedDownloads() }
+                    Button(tr("Effacer"), role: .destructive) { player.clearFailedDownloads() }
                         .font(.subheadline.weight(.semibold))
                 }
             }
@@ -108,7 +108,7 @@ struct DownloadsView: View {
             } else {
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
-                        Text("tr("Sur ce téléphone")).font(.title3.bold())
+                        Text(tr("Sur ce téléphone")).font(.title3.bold())
                         Text(storage).font(.subheadline).foregroundStyle(.secondary)
                     }
                     Spacer()
@@ -120,12 +120,12 @@ struct DownloadsView: View {
                             .surface(Circle())
                     }
                     .buttonStyle(.pressable)
-                    .accessibilityLabel("tr("Effacer tous les téléchargements"))
+                    .accessibilityLabel(tr("Effacer tous les téléchargements"))
                 }
 
                 if !player.downloadCollections.isEmpty {
                     LazyVStack(alignment: .leading, spacing: 10) {
-                        Text("tr("Playlists et albums")).font(.headline)
+                        Text(tr("Playlists et albums")).font(.headline)
                         ForEach(player.downloadCollections, id: \.key) { collection in
                             Button { openRoute(route(collection)) } label: {
                                 ItemRow(title: title(collection),
@@ -136,7 +136,7 @@ struct DownloadsView: View {
                             .buttonStyle(.pressable)
                             .contextMenu {
                                 Button(role: .destructive) { player.removeDownloadCollection(collection) } label: {
-                                    Label("tr("Supprimer le téléchargement"), systemImage: "trash")
+                                    Label(tr("Supprimer le téléchargement"), systemImage: "trash")
                                 }
                             }
                         }
@@ -144,10 +144,10 @@ struct DownloadsView: View {
                 }
 
                 if !player.downloads.isEmpty {
-                    Text("tr("Titres individuels")).font(.headline)
+                    Text(tr("Titres individuels")).font(.headline)
                     HStack(spacing: 12) {
                         Button { player.play(player.downloads, at: 0) } label: {
-                            Label("tr("Lecture"), systemImage: "play.fill")
+                            Label(tr("Lecture"), systemImage: "play.fill")
                                 .font(.headline)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 13)
@@ -158,7 +158,7 @@ struct DownloadsView: View {
                             if !player.shuffle { player.toggleShuffle() }
                             player.play(player.downloads, at: Int.random(in: player.downloads.indices))
                         } label: {
-                            Label("tr("Aléatoire"), systemImage: "shuffle")
+                            Label(tr("Aléatoire"), systemImage: "shuffle")
                                 .font(.headline)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 13)
@@ -177,7 +177,7 @@ struct DownloadsView: View {
             }
         }
         .confirmationDialog(tr("Effacer tous les téléchargements ?"), isPresented: $confirmClear, titleVisibility: .visible) {
-            Button("tr("Tout effacer"), role: .destructive) { player.clearDownloads() }
+            Button(tr("Tout effacer"), role: .destructive) { player.clearDownloads() }
         } message: {
             Text(tr("Les fichiers audio et leurs pochettes seront supprimés de ce téléphone."))
         }
@@ -227,10 +227,10 @@ struct DownloadsView: View {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("tr("Annuler le téléchargement"))
+                    .accessibilityLabel(tr("Annuler le téléchargement"))
                 } else if update.state == .failed {
                     if let track {
-                        Button("tr("Réessayer")) { player.download([track]) }
+                        Button(tr("Réessayer")) { player.download([track]) }
                             .font(.caption.weight(.semibold))
                     }
                     Button { player.cancelDownload(update.id) } label: {
@@ -240,7 +240,7 @@ struct DownloadsView: View {
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("tr("Retirer de la liste"))
+                    .accessibilityLabel(tr("Retirer de la liste"))
                 }
             }
             if update.state == .downloading {
