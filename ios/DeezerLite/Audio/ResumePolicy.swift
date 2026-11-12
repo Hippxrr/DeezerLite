@@ -45,25 +45,6 @@ struct ResumePolicy {
         return Date().timeIntervalSince(lost.at) < Self.earResumeWindow
     }
 
-    /// Pause due au retrait d'un seul AirPod (vu par ses capteurs, voir `EarDetection`) : l'heure.
-    private var budPause: Date?
-
-    mutating func earbudRemoved() {
-        budPause = Date()
-    }
-
-    /// L'AirPod est revenu : la musique reprend-elle ?
-    mutating func earbudReturned() -> Bool {
-        guard let at = budPause else { return false }
-        budPause = nil
-        return Date().timeIntervalSince(at) < Self.earResumeWindow
-    }
-
-    /// Reprise attendue au retour de l'AirPod : les capteurs restent allumés pendant la pause pour la voir.
-    var awaitingEarbud: Bool {
-        budPause.map { Date().timeIntervalSince($0) < Self.earResumeWindow } ?? false
-    }
-
     // MARK: Utilisateur
 
     /// Appui sur lecture, pause ou un autre titre : sa décision remplace toute reprise automatique en attente.
@@ -71,6 +52,5 @@ struct ResumePolicy {
     mutating func userDecided() {
         playingBeforeInterruption = false
         earPause = nil
-        budPause = nil
     }
 }

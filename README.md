@@ -65,10 +65,6 @@ networking, the play queue and audio.
 - **Interruptions handled like Apple's music apps**: playback pauses when another app takes the audio (call, voice
   message, video) and resumes only if that app allows it and music was playing. Removing earbuds pauses; putting
   them back within 30 minutes resumes.
-- **Removing a single AirPod pauses** (and putting it back resumes), on AirPods with motion sensors (AirPods Pro,
-  AirPods 3 and later, AirPods Max). iOS doesn't tell sideloaded apps about it, so the app watches whether the AirPods
-  motion sensors are connected: it asks once for the "Motion & Fitness" permission. Depending on which AirPod is
-  sending the sensor data, it may only work for one side at a time.
 - **Resume on launch**: the last session comes back at the same position (can be turned off).
 
 ### 📥 Offline
@@ -152,9 +148,6 @@ keychain, on this device only.
   and when). They are what feeds your Deezer history and your official monthly and yearly stats.
 - **Everything else is either content or your own actions**: requests needed to show the catalog, search and your
   library, plus what you explicitly do (liking a track, adding it to a playlist…).
-- **Motion & Fitness permission** (optional, for the single-AirPod pause): the app only uses the "AirPods connected /
-  disconnected" signal. It never reads your movements, and nothing is stored or sent. The sensors only run while
-  music plays on earbuds. Declining it only turns that feature off.
 - **Stays on the phone**: search history, pinned items, custom covers, the liked tracks name, settings, the cached
   home and library, and downloads. The Deezer session is kept in the iOS keychain.
 

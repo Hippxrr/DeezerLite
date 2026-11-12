@@ -354,7 +354,10 @@ impl Renderer {
         // vidé. Le nouveau son remonte ensuite en 5 ms. Avant, la coupure nette faisait un petit clic.
         let req = ctl.flush_req.load(Ordering::Acquire);
         let flushing = req != ctl.flush_ack.load(Ordering::Relaxed);
-        if flushing && *gain == 0 {
+        // Rien à faire descendre (tampon vide : départ d'un titre après une pause ou la fin de la file) : vidé tout de suite,
+        // sans attendre un tour de plus (jusqu'à 0,1 s sur iPhone écran verrouillé). Le nouveau son monte depuis zéro.
+        if flushing && (*gain == 0 || cons.slots() < (*channels).max(1)) {
+            *gain = 0;
             while cons.pop().is_ok() {}
             ctl.flush_ack.store(req, Ordering::Release);
             data.fill(silence);

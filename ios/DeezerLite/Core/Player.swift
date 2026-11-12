@@ -751,8 +751,6 @@ final class Player {
 
     /// Quand relancer la musique toute seule (coupures, écouteurs) : voir `ResumePolicy`.
     @ObservationIgnored private var resumePolicy = ResumePolicy()
-    /// Retrait d'un seul AirPod (iOS ne l'envoie pas à l'app) : vu par les capteurs des AirPods.
-    @ObservationIgnored private let ears = EarDetection()
 
     /// Réglage : reprendre la dernière écoute au relancement de l'app (activé par défaut).
     private(set) var resumeOnLaunch = UserDefaults.standard.object(forKey: "resumeOnLaunch") as? Bool ?? true
@@ -819,7 +817,6 @@ final class Player {
         watchNetwork()
         NowPlaying.setup(self)
         observeAudioSession()
-        observeEarbuds()
         // Mémoire sous pression ou passage en arrière-plan : on oublie les pages et paroles gardées en mémoire
         // (redemandées au besoin) ; en arrière-plan, l'app ne garde que le strict nécessaire pour jouer.
         for name in [UIApplication.didReceiveMemoryWarningNotification, UIApplication.didEnterBackgroundNotification] {
@@ -1515,9 +1512,19 @@ final class Player {
         pendingRestore = nil
         activateOutput()
         isFlow = true
+        // Le Flow met un moment à arriver (recommandations, puis premier titre) : le mini-lecteur s'affiche aussitôt,
+        // en chargement, au lieu de rien (on ne savait pas si l'appui avait été pris en compte).
+        current = Track(id: 0, title: "Flow", artist: tr("Chargement…"), album: "", durationS: 0, coverUrl: nil,
+                        quality: nil, artistId: 0, albumId: 0, addedAt: nil, releaseDate: nil, artists: [])
         startLoading()
         Task {
-            do { try await core.playFlow() } catch { loading = false; showToast(describe(error), seconds: 4) }
+            do {
+                try await core.playFlow()
+            } catch {
+                loading = false
+                if current?.id == 0 { current = nil } // rien n'a démarré : l'attente disparaît
+                showToast(describe(error), seconds: 4)
+            }
         }
     }
 
@@ -1932,13 +1939,11 @@ final class Player {
         status = truth
         statusAt = Date()
         NowPlaying.update(track: current, status: status)
-        updateEars()
     }
 
     private func refreshStatus() {
         syncStatus()
         NowPlaying.update(track: current, status: status)
-        updateEars()
     }
 
     /// Lit l'état du moteur pour un affichage immédiat, et demande au cœur de renvoyer l'état réel juste après :
@@ -2047,9 +2052,7 @@ final class Player {
             refreshDownloads()
         }
         switch event {
-        case .track, .started, .state, .stopped, .closed:
-            NowPlaying.update(track: current, status: status)
-            updateEars()
+        case .track, .started, .state, .stopped, .closed: NowPlaying.update(track: current, status: status)
         default: break
         }
         switch event {
@@ -2127,31 +2130,6 @@ final class Player {
         }
     }
 
-    /// Sortie actuelle : des écouteurs (ceux qui peuvent avoir des capteurs).
-    private var onEarbuds: Bool {
-        AVAudioSession.sharedInstance().currentRoute.outputs.contains { Self.earPorts.contains($0.portType) }
-    }
-
-    /// Retrait d'un seul AirPod (voir `EarDetection`) : pause, et reprise à son retour, comme les autres apps de musique.
-    /// Les deux retirés : la sortie change aussi ; la première des deux pauses compte, l'autre ne fait rien.
-    private func observeEarbuds() {
-        ears.onRemoved = { [weak self] in
-            // Son passé sur une autre sortie (haut-parleur, AirPlay) : ce n'est pas un retrait.
-            guard let self, self.onEarbuds, self.core?.status().playing == true else { return }
-            self.pause() // efface les reprises en attente (comme un appui de l'utilisateur)…
-            self.resumePolicy.earbudRemoved() // …puis retient celle-ci
-            self.updateEars()
-        }
-        ears.onReturned = { [weak self] in
-            guard let self, !self.resumePolicy.interrupted, self.resumePolicy.earbudReturned() else { return }
-            self.resume()
-        }
-    }
-
-    /// Capteurs allumés pendant la lecture sur des écouteurs, ou tant qu'une reprise au retour de l'AirPod est attendue.
-    private func updateEars() {
-        ears.update(active: (status.playing && onEarbuds) || resumePolicy.awaitingEarbud)
-    }
 }
 
 /// Élément du haut de l'accueil, déplaçable par appui long.

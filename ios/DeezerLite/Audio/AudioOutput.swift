@@ -47,7 +47,17 @@ enum AudioOutput {
             // `pause` : après une coupure (vocal, appel), iOS a détaché le matériel ; un moteur seulement en pause
             // pouvait rester muet à la reprise, un moteur arrêté repart proprement.
             startID += 1
-            if run { start(id: startID) } else { engine?.stop() }
+            if run {
+                start(id: startID)
+            } else {
+                // Arrêt 0,15 s plus tard : le cœur fait descendre le son en 5 ms, mais iOS joue encore le tampon déjà
+                // rendu (jusqu'à 0,1 s écran verrouillé). Arrêté tout de suite, ce tampon était coupé net : un petit clic
+                // à la pause, sur certains titres. Une reprise entre-temps annule l'arrêt.
+                let id = startID
+                queue.asyncAfter(deadline: .now() + 0.15) {
+                    if id == startID, !wanted { engine?.stop() }
+                }
+            }
         }
     }
 

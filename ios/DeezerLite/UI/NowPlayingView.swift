@@ -107,7 +107,7 @@ struct MiniPlayer: View {
                 .frame(height: inBar ? 40 : 46)
                 .clipped()
             PlayButton(size: inBar ? 16 : 19)
-            if let t = player.current, !compact {
+            if let t = player.current, t.id != 0, !compact {
                 // S'efface tout de suite : il ne suit pas le mini-lecteur qui rétrécit.
                 LikeButton(track: t, size: inBar ? 16 : 18).frame(width: 36, height: 40)
                     .transition(.opacity.animation(.easeOut(duration: 0.1)))
