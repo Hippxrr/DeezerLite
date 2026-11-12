@@ -38,8 +38,8 @@ targets:
         CADisableMinimumFrameDurationOnPhone: true
         # Partage du récap du mois : « Enregistrer l'image » ajoute la photo (sans ce texte, iOS fermait l'app).
         NSPhotoLibraryAddUsageDescription: "Enregistrer l'image de ton mois dans Photos."
-        # TEMPORAIRE (test AirPods) : capteurs de mouvement des AirPods, pour voir si le retrait d'un écouteur s'y voit.
-        NSMotionUsageDescription: "Test : savoir quand un AirPod est retiré de l'oreille."
+        # Retrait d'un seul AirPod : vu par les capteurs des AirPods (voir `EarDetection`), seul signal disponible.
+        NSMotionUsageDescription: "Mettre la musique en pause quand tu retires un AirPod. Seul le retrait est détecté, tes mouvements ne sont ni lus ni enregistrés."
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         ITSAppUsesNonExemptEncryption: false
         # CarPlay : l'écran de la voiture est une scène à part ; celle du téléphone reste gérée par SwiftUI.

@@ -449,45 +449,6 @@ struct SettingsView: View {
         group(tr("Égaliseur")) { EqualizerPanel() }
         Text(tr("Fréquences en Hz. Toucher un curseur crée ton réglage « Personnalisé »."))
             .font(.caption).foregroundStyle(.secondary).padding(.top, -14).padding(.leading, 4)
-        airPodsTest
-    }
-
-    /// TEMPORAIRE (test AirPods, à retirer après) : ce qu'iOS envoie à l'app, et les essais (voir `AirPodsDiag`).
-    private var airPodsTest: some View {
-        let diag = AirPodsDiag.shared
-        return group("Test AirPods (temporaire)") {
-            Text("Essais appliqués au lancement : ferme l'app (glisser vers le haut) puis relance-la après un changement.")
-                .font(.caption).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding(14)
-            divider
-            DiagToggle(key: AirPodsDiag.stateKey, initial: true, title: "État de lecture déclaré à iOS")
-            divider
-            DiagToggle(key: AirPodsDiag.legacyKey, initial: true, title: "Ancienne inscription aux commandes")
-            divider
-            DiagToggle(key: AirPodsDiag.silentKey, initial: true, title: "Lecteur Apple muet pendant la musique")
-            divider
-            DiagToggle(key: AirPodsDiag.motionKey, initial: true, title: "Capteurs de mouvement des AirPods")
-            divider
-            DiagToggle(key: AirPodsDiag.plainPolicyKey, initial: false, title: "Désactiver le mode audio long")
-            divider
-            HStack {
-                Button("Copier le journal") {
-                    diag.copy()
-                    player.showToast("Journal copié")
-                }
-                Spacer()
-                Button("Effacer", role: .destructive) { diag.clear() }
-            }
-            .padding(14)
-            divider
-            VStack(alignment: .leading, spacing: 6) {
-                if diag.lines.isEmpty { Text("Rien pour l'instant").foregroundStyle(.secondary) }
-                ForEach(Array(diag.lines.enumerated()), id: \.offset) { _, line in
-                    Text(line).font(.caption2.monospaced()).fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(14)
-        }
     }
 
     /// Qualité en Wi-Fi, en données mobiles, des téléchargements.
@@ -838,20 +799,5 @@ private struct AppIconPicker: View {
             }
         }
         .sensoryFeedback(.selection, trigger: selected)
-    }
-}
-
-/// TEMPORAIRE (test AirPods) : un essai à activer ou non (gardé dans les réglages, appliqué au lancement).
-private struct DiagToggle: View {
-    @AppStorage private var on: Bool
-    let title: String
-
-    init(key: String, initial: Bool, title: String) {
-        _on = AppStorage(wrappedValue: initial, key)
-        self.title = title
-    }
-
-    var body: some View {
-        Toggle(title, isOn: $on).tint(Theme.accent).padding(14)
     }
 }

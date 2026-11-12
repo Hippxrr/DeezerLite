@@ -751,6 +751,8 @@ final class Player {
 
     /// Quand relancer la musique toute seule (coupures, écouteurs) : voir `ResumePolicy`.
     @ObservationIgnored private var resumePolicy = ResumePolicy()
+    /// Retrait d'un seul AirPod (iOS ne l'envoie pas à l'app) : vu par les capteurs des AirPods.
+    @ObservationIgnored private let ears = EarDetection()
 
     /// Réglage : reprendre la dernière écoute au relancement de l'app (activé par défaut).
     private(set) var resumeOnLaunch = UserDefaults.standard.object(forKey: "resumeOnLaunch") as? Bool ?? true
@@ -815,9 +817,9 @@ final class Player {
         // Qualité choisie lors d'une session précédente (le cœur démarre en FLAC).
         applyQuality()
         watchNetwork()
-        AirPodsDiag.shared.start() // TEMPORAIRE (test AirPods)
         NowPlaying.setup(self)
         observeAudioSession()
+        observeEarbuds()
         // Mémoire sous pression ou passage en arrière-plan : on oublie les pages et paroles gardées en mémoire
         // (redemandées au besoin) ; en arrière-plan, l'app ne garde que le strict nécessaire pour jouer.
         for name in [UIApplication.didReceiveMemoryWarningNotification, UIApplication.didEnterBackgroundNotification] {
@@ -1930,11 +1932,13 @@ final class Player {
         status = truth
         statusAt = Date()
         NowPlaying.update(track: current, status: status)
+        updateEars()
     }
 
     private func refreshStatus() {
         syncStatus()
         NowPlaying.update(track: current, status: status)
+        updateEars()
     }
 
     /// Lit l'état du moteur pour un affichage immédiat, et demande au cœur de renvoyer l'état réel juste après :
@@ -2043,7 +2047,9 @@ final class Player {
             refreshDownloads()
         }
         switch event {
-        case .track, .started, .state, .stopped, .closed: NowPlaying.update(track: current, status: status)
+        case .track, .started, .state, .stopped, .closed:
+            NowPlaying.update(track: current, status: status)
+            updateEars()
         default: break
         }
         switch event {
@@ -2069,9 +2075,7 @@ final class Player {
             let info = n.userInfo ?? [:]
             let type = (info[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap(AVAudioSession.InterruptionType.init)
             let options = AVAudioSession.InterruptionOptions(rawValue: info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0)
-            let why = info[AVAudioSessionInterruptionReasonKey] as? UInt // TEMPORAIRE (test AirPods)
             Task { @MainActor in
-                AirPodsDiag.shared.log("Coupure : \(type == .began ? "début" : type == .ended ? "fin" : "?") · raison \(why.map { "\($0)" } ?? "-") · reprise permise : \(options.contains(.shouldResume) ? "oui" : "non")")
                 guard let self, let core = self.core else { return }
                 switch type {
                 case .began:
@@ -2099,13 +2103,7 @@ final class Player {
             let previous = (n.userInfo?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription)?
                 .outputs.first { Self.earPorts.contains($0.portType) }?.uid
             let current = AVAudioSession.sharedInstance().currentRoute.outputs.map(\.uid)
-            // TEMPORAIRE (test AirPods) : chaque changement de sortie, avec sa raison, avant et après.
-            let reasons: [UInt: String] = [1: "nouvelle sortie", 2: "sortie disparue", 3: "catégorie changée", 4: "forçage", 6: "réveil",
-                                           7: "aucune sortie possible", 8: "configuration de la sortie"]
-            let before = AirPodsDiag.describe((n.userInfo?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription)?.outputs ?? [])
-            let after = AirPodsDiag.describe(AVAudioSession.sharedInstance().currentRoute.outputs)
             MainActor.assumeIsolated {
-                AirPodsDiag.shared.log("Sortie changée : \(reason.flatMap { reasons[$0.rawValue] } ?? "inconnue") · avant : \(before) · après : \(after)")
                 guard let self else { return }
                 if reason == .oldDeviceUnavailable {
                     // Écouteurs débranchés, AirPods retirés des oreilles : pause (jamais de bascule sur le haut-parleur),
@@ -2119,20 +2117,40 @@ final class Player {
                 }
             }
         }
-        // TEMPORAIRE (test AirPods) : une autre app demande le silence (ou le rend).
-        center.addObserver(forName: AVAudioSession.silenceSecondaryAudioHintNotification, object: session, queue: .main) { n in
-            let begin = (n.userInfo?[AVAudioSessionSilenceSecondaryAudioHintTypeKey] as? UInt) == AVAudioSession.SilenceSecondaryAudioHintType.begin.rawValue
-            AirPodsDiag.note("Autre app : \(begin ? "demande le silence" : "rend le son")")
-        }
         center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: session, queue: .main) { [weak self] _ in
             Task { @MainActor in
-                AirPodsDiag.shared.log("Service audio d'iOS redémarré") // TEMPORAIRE (test AirPods)
                 AudioSession.invalidate()
                 AudioSession.configure()
                 self?.needsReopen = true
                 self?.pause()
             }
         }
+    }
+
+    /// Sortie actuelle : des écouteurs (ceux qui peuvent avoir des capteurs).
+    private var onEarbuds: Bool {
+        AVAudioSession.sharedInstance().currentRoute.outputs.contains { Self.earPorts.contains($0.portType) }
+    }
+
+    /// Retrait d'un seul AirPod (voir `EarDetection`) : pause, et reprise à son retour, comme les autres apps de musique.
+    /// Les deux retirés : la sortie change aussi ; la première des deux pauses compte, l'autre ne fait rien.
+    private func observeEarbuds() {
+        ears.onRemoved = { [weak self] in
+            // Son passé sur une autre sortie (haut-parleur, AirPlay) : ce n'est pas un retrait.
+            guard let self, self.onEarbuds, self.core?.status().playing == true else { return }
+            self.pause() // efface les reprises en attente (comme un appui de l'utilisateur)…
+            self.resumePolicy.earbudRemoved() // …puis retient celle-ci
+            self.updateEars()
+        }
+        ears.onReturned = { [weak self] in
+            guard let self, !self.resumePolicy.interrupted, self.resumePolicy.earbudReturned() else { return }
+            self.resume()
+        }
+    }
+
+    /// Capteurs allumés pendant la lecture sur des écouteurs, ou tant qu'une reprise au retour de l'AirPod est attendue.
+    private func updateEars() {
+        ears.update(active: (status.playing && onEarbuds) || resumePolicy.awaitingEarbud)
     }
 }
 
