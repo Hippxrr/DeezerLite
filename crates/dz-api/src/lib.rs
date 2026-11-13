@@ -35,6 +35,39 @@ impl From<reqwest::Error> for DeezerError {
     }
 }
 
+/// Date de sortie parmi celles de Deezer (origine, numérique, physique ; « 0000-00-00 » = inconnue) : la première
+/// valide, sauf une date d'origine qui tombe la veille de la sortie numérique. Une sortie à minuit (heure de Paris) est
+/// parfois enregistrée à la veille (23 h en UTC) : l'app affichait « Hier » pour un titre sorti le jour même.
+pub(crate) fn pick_release_date(dates: [Option<&str>; 3]) -> Option<String> {
+    fn valid(d: Option<&str>) -> Option<&str> {
+        d.map(str::trim).filter(|d| d.len() >= 4 && !d.starts_with("0000"))
+    }
+    if let (Some(original), Some(digital)) = (valid(dates[0]), valid(dates[1])) {
+        if let (Some(a), Some(b)) = (day_number(original), day_number(digital)) {
+            if b - a == 1 {
+                return Some(digital.to_owned());
+            }
+        }
+    }
+    dates.into_iter().find_map(valid).map(str::to_owned)
+}
+
+/// Numéro du jour d'une date « AAAA-MM-JJ » (jours depuis le 1er mars de l'an 0), pour compter les jours entre deux dates.
+fn day_number(d: &str) -> Option<i64> {
+    let mut parts = d.get(..10)?.split('-');
+    let y: i64 = parts.next()?.parse().ok()?;
+    let m: i64 = parts.next()?.parse().ok()?;
+    let day: i64 = parts.next()?.parse().ok()?;
+    if !(1..=12).contains(&m) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let doy = (153 * ((m + 9) % 12) + 2) / 5 + day - 1;
+    Some(era * 146_097 + yoe * 365 + yoe / 4 - yoe / 100 + doy)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DeezerError {
     #[error("http: {0}")]
@@ -1011,13 +1044,7 @@ impl From<RawTrack> for TrackInfo {
             .and_then(|f| f.get("SNG_ID"))
             .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.trim().parse().ok())))
             .filter(|fid| *fid != r.id && *fid != 0);
-        // Première date valide parmi celles que Deezer peut fournir (« 0000-00-00 » = inconnue).
-        let release_date = [&r.original_date, &r.digital_date, &r.physical_date]
-            .into_iter()
-            .flatten()
-            .map(|d| d.trim())
-            .find(|d| d.len() >= 4 && !d.starts_with("0000"))
-            .map(str::to_owned);
+        let release_date = pick_release_date([r.original_date.as_deref(), r.digital_date.as_deref(), r.physical_date.as_deref()]);
         TrackInfo {
             id: r.id, title, artist, album: r.album,
             duration_s: r.duration, cover_url, track_token: r.token, quality: None, added_at, release_date, fallback_id, restricted,
@@ -1354,6 +1381,18 @@ mod tests {
         let up: RawTrack = serde_json::from_value(json!({ "SNG_ID": "-3173759643", "DURATION": "10" })).unwrap();
         assert_eq!(up.id, -3173759643);
         assert!(t.cover_url.unwrap().contains("/abc/"));
+    }
+
+    #[test]
+    fn midnight_release_saved_the_day_before_keeps_its_real_day() {
+        // Sortie numérique le 13, date d'origine enregistrée la veille (minuit à Paris = 23 h la veille en UTC).
+        assert_eq!(pick_release_date([Some("2026-11-12"), Some("2026-11-13"), None]).as_deref(), Some("2026-11-13"));
+        assert_eq!(pick_release_date([Some("2026-10-31"), Some("2026-11-01"), None]).as_deref(), Some("2026-11-01"));
+        assert_eq!(pick_release_date([Some("2025-12-31"), Some("2026-01-01"), None]).as_deref(), Some("2026-01-01"));
+        // Vraie réédition (des années d'écart) : la date d'origine reste.
+        assert_eq!(pick_release_date([Some("1997-05-20"), Some("2015-03-02"), None]).as_deref(), Some("1997-05-20"));
+        assert_eq!(pick_release_date([Some("2026-11-13"), Some("2026-11-13"), None]).as_deref(), Some("2026-11-13"));
+        assert_eq!(pick_release_date([None, None, Some("2020")]).as_deref(), Some("2020"));
     }
 
     #[test]

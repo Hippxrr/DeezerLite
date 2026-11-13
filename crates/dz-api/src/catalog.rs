@@ -387,10 +387,7 @@ fn release_card(a: &Value) -> Option<Card> {
     if id == 0 {
         return None;
     }
-    let date = {
-        let d = vs(a, "ORIGINAL_RELEASE_DATE");
-        if d.is_empty() { vs(a, "DIGITAL_RELEASE_DATE") } else { d }
-    };
+    let date = crate::pick_release_date([Some(&vs(a, "ORIGINAL_RELEASE_DATE")), Some(&vs(a, "DIGITAL_RELEASE_DATE")), None]).unwrap_or_default();
     let compilation = a.pointer("/SUBTYPES/isCompilation").and_then(Value::as_bool).unwrap_or(false);
     let (group, label) = match vs(a, "TYPE").as_str() {
         _ if compilation => ("compilation", "Compilation"),
