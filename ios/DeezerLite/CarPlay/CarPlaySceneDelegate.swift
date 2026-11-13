@@ -316,7 +316,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             let upcoming = player.queue.enumerated().dropFirst(current).prefix(maxItems)
             let items = upcoming.map { index, track in
                 let item = CPListItem(text: track.title, detailText: track.artist, image: self.placeholder)
-                self.setCover(item, player.coverFixes[track.id] ?? track.coverUrl)
+                self.setCover(item, self.player.coverFixes[track.id] ?? track.coverUrl)
                 item.isPlaying = index == current
                 item.handler = { [weak self] _, done in
                     MainActor.assumeIsolated {
