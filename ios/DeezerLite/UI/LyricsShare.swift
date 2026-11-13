@@ -22,7 +22,7 @@ struct LyricsShareSheet: View {
     @State private var refused = 0
 
     private static let maxLines = 6
-    private static let previewScale: CGFloat = 0.62
+    private static let previewScale: CGFloat = 0.5
 
     init(request: LyricsShareRequest) {
         self.request = request
@@ -82,10 +82,7 @@ struct LyricsShareSheet: View {
                 ToolbarItem(placement: .cancellationAction) { Button(tr("Annuler")) { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
                     if let image, !picked.isEmpty {
-                        let shown = Image(uiImage: image)
-                        ShareLink(item: shown, preview: SharePreview(request.track.title, image: shown)) {
-                            Text(tr("Partager")).bold()
-                        }
+                        Button { share(image) } label: { Text(tr("Partager")).bold() }
                     } else {
                         ProgressView()
                     }
@@ -116,7 +113,24 @@ struct LyricsShareSheet: View {
         }
     }
 
-    /// Image de 1080 × 1350 (format portrait des réseaux sociaux).
+    /// Feuille de partage d'iOS. Une fois l'action faite (enregistrée dans Photos, envoyée…), la page se ferme et on
+    /// revient au lecteur ; annulée, on reste ici pour changer les lignes.
+    private func share(_ image: UIImage) {
+        let sheet = UIActivityViewController(activityItems: [image], applicationActivities: nil)
+        sheet.completionWithItemsHandler = { _, completed, _, _ in
+            guard completed else { return }
+            Task { @MainActor in dismiss() }
+        }
+        let root = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first?.rootViewController
+        guard var top = root else { return }
+        while let shown = top.presentedViewController { top = shown }
+        // iPad : la feuille s'affiche en bulle, accrochée au milieu de l'écran.
+        sheet.popoverPresentationController?.sourceView = top.view
+        sheet.popoverPresentationController?.sourceRect = CGRect(x: top.view.bounds.midX, y: top.view.bounds.midY, width: 0, height: 0)
+        top.present(sheet, animated: true)
+    }
+
+    /// Image de 1080 × 1920 (format story d'Instagram).
     private func render() {
         let renderer = ImageRenderer(content: LyricsCard(track: request.track, lines: chosen, cover: cover, backdrop: backdrop))
         renderer.scale = 3
@@ -124,9 +138,10 @@ struct LyricsShareSheet: View {
     }
 }
 
-/// Carte partagée : pochette floutée en fond, pochette, titre et artiste en haut, les lignes en grand au milieu.
+/// Carte partagée (format story) : pochette floutée en fond, pochette, titre et artiste en haut, les lignes en grand,
+/// entre guillemets, au milieu.
 struct LyricsCard: View {
-    static let size = CGSize(width: 360, height: 450)
+    static let size = CGSize(width: 360, height: 640) // 9:16, format story
     let track: Track
     let lines: [String]
     let cover: UIImage?
@@ -159,24 +174,21 @@ struct LyricsCard: View {
                     }
                 }
                 Spacer(minLength: 16)
+                // Entre guillemets : ouvrant sur la première ligne, fermant sur la dernière.
                 VStack(alignment: .leading, spacing: 10) {
                     ForEach(lines.indices, id: \.self) { i in
-                        Text(lines[i])
+                        Text((i == 0 ? "“" : "") + lines[i] + (i == lines.count - 1 ? "”" : ""))
                     }
                 }
                 .font(.system(size: fontSize, weight: .heavy))
                 .minimumScaleFactor(0.5)
                 .shadow(color: .black.opacity(0.25), radius: 6, y: 2)
                 Spacer(minLength: 16)
-                HStack(spacing: 6) {
-                    Image(systemName: "waveform")
-                    Text("Deezer Lite")
-                }
-                .font(.system(size: 12, weight: .semibold))
-                .opacity(0.6)
             }
             .foregroundStyle(.white)
-            .padding(26)
+            // Marges hautes et basses de story : la barre du profil et le champ de réponse d'Instagram ne cachent rien.
+            .padding(.horizontal, 26)
+            .padding(.vertical, 80)
             .frame(width: Self.size.width, height: Self.size.height, alignment: .topLeading)
         }
         .frame(width: Self.size.width, height: Self.size.height)
@@ -186,10 +198,10 @@ struct LyricsCard: View {
     /// Plus il y a de texte, plus il est petit : la carte reste lisible et rien ne déborde.
     private var fontSize: CGFloat {
         switch lines.joined().count {
-        case ..<60: 28
-        case ..<120: 24
-        case ..<200: 20
-        default: 17
+        case ..<60: 32
+        case ..<120: 27
+        case ..<200: 23
+        default: 19
         }
     }
 }
