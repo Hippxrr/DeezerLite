@@ -1372,7 +1372,26 @@ impl Worker {
             Cmd::SkipNext => match self.next.take() {
                 Some(p) => self.handle(Cmd::Load { id: p.id, src: p.src, ext: p.ext }),
                 None => {
-                    let _ = self.events.send(EngineEvent::SkipFailed);
+                    // Suivant déjà passé dans `cur` (décodage du titre d'avant fini, sa fin encore dans le tampon, jusqu'à
+                    // 0,5 s) mais pas encore audible : on y passe tout de suite, depuis son début. Avant : « échec », le
+                    // cœur le rechargeait (téléchargé une 2e fois) et il démarrait puis redémarrait à 0:00.
+                    let audible = self.segments.front().map(|s| s.id);
+                    let waiting = self.incoming.is_none() && audible.is_some() && self.cur.as_ref().is_some_and(|t| Some(t.id) != audible);
+                    let restarted = waiting && self.cur.as_mut().is_some_and(|t| t.seek(0).is_ok());
+                    match self.cur.as_ref().filter(|_| restarted).map(|t| (t.id, t.duration_ms)) {
+                        Some((id, duration_ms)) => {
+                            self.flush();
+                            let seq = self.next_seq;
+                            self.next_seq += 1;
+                            // Nouveau segment : annoncé au premier son (`TrackStarted`), comme un enchaînement normal.
+                            self.segments.push_back(Segment { seq, id, start_sample: 0, start_ms: 0, duration_ms });
+                            self.shared.position_ms.store(0, Ordering::Relaxed);
+                            self.set_paused(false);
+                        }
+                        None => {
+                            let _ = self.events.send(EngineEvent::SkipFailed);
+                        }
+                    }
                 }
             },
             Cmd::Pause => self.set_paused(true),
