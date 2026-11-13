@@ -349,7 +349,10 @@ fn not_delivered(e: &DeezerError) -> bool {
         DeezerError::Http(h) => {
             // Réponse illisible : en pratique une page de portail Wi-Fi (la requête n'est jamais arrivée chez Deezer).
             // Avant, l'écoute était tenue pour envoyée et effacée.
-            h.is_connect() || h.is_decode() || h.status().is_some_and(|s| matches!(s.as_u16(), 429 | 502 | 503 | 504))
+            // Seulement une réponse complète qui n'est pas du JSON (page de portail) : une coupure en pleine réponse est
+            // aussi classée « décodage » par reqwest, et Deezer avait alors peut-être déjà compté l'écoute.
+            let portal_page = h.is_decode() && std::error::Error::source(h).is_some_and(|s| s.is::<serde_json::Error>());
+            h.is_connect() || portal_page || h.status().is_some_and(|s| matches!(s.as_u16(), 429 | 502 | 503 | 504))
         }
         DeezerError::Gateway(g) => g.to_ascii_uppercase().contains("QUOTA"),
         DeezerError::InvalidArl | DeezerError::SessionExpired => true,
@@ -1145,6 +1148,9 @@ impl Actor {
 
     async fn play_current(&mut self) {
         let Some(&id) = self.queue.get(self.index) else { return };
+        // Relance après coupure encore prévue (précédent, lecture, suivant pendant l'attente) : ce chargement la remplace.
+        // Avant, elle rechargeait le titre une 2e fois, à la position d'avant la coupure (précédent → retour à 2:05).
+        self.recover_at = None;
         self.prefetched = None;
         match self.resolve(id).await {
             Ok(r) => {
