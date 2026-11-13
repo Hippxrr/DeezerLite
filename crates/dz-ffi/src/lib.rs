@@ -1176,21 +1176,35 @@ impl Core {
 
     /// Paroles du titre selon Deezer ; `None` si Deezer n'en a pas. Titre téléchargé : lues sur le téléphone (aussi
     /// hors ligne, et sans attendre le réseau) ; Deezer n'est interrogé que si elles n'y sont pas encore.
+    /// Titre téléchargé avec des paroles synchronisées : lues sur le téléphone. Sinon (pas de paroles gardées, ou
+    /// seulement le texte) : redemandées à Deezer, qui a pu en ajouter depuis, et gardées si elles ont changé ; sans
+    /// réseau, ce qui est gardé.
     pub async fn lyrics(&self, id: i64) -> Result<Option<Lyrics>, CoreError> {
-        if let Some(stored) = self.offline.lyrics(id) {
-            return Ok(stored.map(|l| Lyrics {
-                synced: l.synced,
-                lines: l.lines.into_iter().map(|x| LyricLine { ms: x.ms, text: x.text }).collect(),
-                copyright: l.copyright,
-            }));
-        }
-        let api = self.api.clone();
-        let found = self.run(async move { api.lyrics(id).await }).await??;
-        Ok(found.map(|l| Lyrics {
+        let to_ffi = |l: dz_offline::StoredLyrics| Lyrics {
             synced: l.synced,
             lines: l.lines.into_iter().map(|x| LyricLine { ms: x.ms, text: x.text }).collect(),
             copyright: l.copyright,
-        }))
+        };
+        let stored = self.offline.lyrics(id);
+        if let Some(Some(l)) = &stored {
+            if l.synced {
+                return Ok(Some(to_ffi(l.clone())));
+            }
+        }
+        let api = self.api.clone();
+        match self.run(async move { api.lyrics(id).await }).await? {
+            Ok(found) => {
+                let found = found.map(dz_offline::stored_lyrics);
+                if self.offline.contains(id) && stored.as_ref() != Some(&found) {
+                    let _ = self.offline.save_lyrics(id, found.clone());
+                }
+                Ok(found.map(to_ffi))
+            }
+            Err(e) => match stored {
+                Some(kept) => Ok(kept.map(to_ffi)),
+                None => Err(e.into()),
+            },
+        }
     }
 
     pub async fn set_liked(&self, id: i64, liked: bool) -> Result<(), CoreError> {

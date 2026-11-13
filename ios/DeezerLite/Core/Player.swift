@@ -623,15 +623,17 @@ final class Player {
 
     /// Paroles déjà demandées (30 titres au plus) et titres sans paroles sur Deezer.
     @ObservationIgnored private var lyricsCache: [Int64: Lyrics] = [:]
-    @ObservationIgnored private var noLyrics: Set<Int64> = []
+    /// Titres sans paroles et l'heure de la réponse : redemandés après 30 min (Deezer en ajoute ; l'app peut rester
+    /// ouverte des jours). Avant : plus jamais redemandés tant que l'app restait ouverte.
+    @ObservationIgnored private var noLyrics: [Int64: Date] = [:]
 
     /// Paroles Deezer du titre ; `nil` s'il n'en a pas (ou si Deezer ne répond pas).
     func lyrics(_ id: Int64) async -> Lyrics? {
         if let hit = lyricsCache[id] { return hit }
-        guard let core, !noLyrics.contains(id) else { return nil }
+        guard let core, noLyrics[id].map({ Date().timeIntervalSince($0) > 30 * 60 }) ?? true else { return nil }
         do {
             guard let found = try await core.lyrics(id: id) else {
-                noLyrics.insert(id)
+                noLyrics[id] = Date()
                 return nil
             }
             if lyricsCache.count >= 30 { lyricsCache.removeAll() }
@@ -1138,7 +1140,7 @@ final class Player {
         lovedIds = []
         lovedCard = nil
         lyricsCache = [:]
-        noLyrics = []
+        noLyrics = [:]
     }
 
     // MARK: Compte
@@ -1306,7 +1308,7 @@ final class Player {
         detailOrder = []
         refreshed = []
         lyricsCache = [:]
-        noLyrics = []
+        noLyrics = [:]
         likeTasks = [:]
         likeGeneration = [:]
         creditsTrack = nil

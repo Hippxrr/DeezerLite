@@ -128,10 +128,23 @@ pub struct StoredLyrics {
     pub copyright: String,
 }
 
-/// Fichier `lyrics/{id}.json` : `lyrics` vide = Deezer n'a pas de paroles pour ce titre (inutile de redemander).
+/// Fichier `lyrics/{id}.json` : `lyrics` vide = Deezer n'avait pas de paroles pour ce titre. `checked` : jour de la
+/// dernière demande (absent dans les fichiers d'avant : 0). Sans paroles synchronisées, on redemande chaque semaine :
+/// Deezer en ajoute régulièrement (avant, une absence gardée l'était pour toujours).
 #[derive(Debug, Serialize, Deserialize)]
 struct LyricsFile {
     lyrics: Option<StoredLyrics>,
+    #[serde(default)]
+    checked: u64,
+}
+
+/// Jours entre deux demandes pour un titre téléchargé sans paroles synchronisées.
+const LYRICS_RECHECK_DAYS: u64 = 7;
+/// Titres revérifiés au plus à chaque ouverture de session (le reste à la suivante) : pas de rafale de requêtes.
+const LYRICS_RECHECK_MAX: usize = 300;
+
+fn today() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() / 86_400)
 }
 
 /// Résultat d'une demande de paroles pour un titre téléchargé.
@@ -483,6 +496,23 @@ impl OfflineStore {
 
     /// Paroles gardées d'un titre téléchargé : `None` = rien de gardé (demander à Deezer), `Some(None)` = Deezer n'a
     /// pas de paroles pour ce titre, `Some(Some(_))` = les paroles, lisibles sans réseau.
+    /// Paroles à (re)demander : jamais gardées (ou fichier abîmé), ou sans paroles synchronisées et vérifiées il y a
+    /// plus d'une semaine.
+    fn lyrics_due(&self, id: i64) -> bool {
+        let Ok(bytes) = std::fs::read(lyrics_path(&self.root, id)) else { return true };
+        let Ok(file) = serde_json::from_slice::<LyricsFile>(&bytes) else { return true };
+        !file.lyrics.is_some_and(|l| l.synced) && file.checked + LYRICS_RECHECK_DAYS <= today()
+    }
+
+    /// Garde les paroles reçues pour un titre téléchargé (rien s'il ne l'est pas, ou plus).
+    pub fn save_lyrics(&self, id: i64, found: Option<StoredLyrics>) -> io::Result<()> {
+        if !self.entries.read().map(|e| e.contains_key(&id)).unwrap_or(false) {
+            return Ok(());
+        }
+        let bytes = serde_json::to_vec(&LyricsFile { lyrics: found, checked: today() }).map_err(io::Error::other)?;
+        write_atomic(&lyrics_path(&self.root, id), &bytes)
+    }
+
     pub fn lyrics(&self, id: i64) -> Option<Option<StoredLyrics>> {
         if !self.entries.read().ok()?.contains_key(&id) {
             return None;
@@ -1429,21 +1459,18 @@ async fn fetch_lyrics(api: &DeezerClient, store: &OfflineStore, id: i64) -> Lyri
         Err(dz_api::DeezerError::Gateway(g)) if g.to_ascii_uppercase().contains("QUOTA") => return LyricsFetch::Offline,
         Err(_) => return LyricsFetch::Failed,
     };
-    // Titre supprimé pendant la demande : rien à garder.
-    if !store.entries.read().map(|e| e.contains_key(&id)).unwrap_or(false) {
-        return LyricsFetch::Failed;
-    }
-    let file = LyricsFile {
-        lyrics: found.map(|l| StoredLyrics {
-            synced: l.synced,
-            lines: l.lines.into_iter().map(|x| StoredLyricLine { ms: x.ms, text: x.text }).collect(),
-            copyright: l.copyright,
-        }),
-    };
-    let Ok(bytes) = serde_json::to_vec(&file) else { return LyricsFetch::Failed };
-    match write_atomic(&lyrics_path(&store.root, id), &bytes) {
+    // Titre supprimé pendant la demande : rien n'est gardé (voir `save_lyrics`).
+    match store.save_lyrics(id, found.map(stored_lyrics)) {
         Ok(()) => LyricsFetch::Stored,
         Err(_) => LyricsFetch::Failed,
+    }
+}
+
+pub fn stored_lyrics(l: dz_api::Lyrics) -> StoredLyrics {
+    StoredLyrics {
+        synced: l.synced,
+        lines: l.lines.into_iter().map(|x| StoredLyricLine { ms: x.ms, text: x.text }).collect(),
+        copyright: l.copyright,
     }
 }
 
@@ -1460,9 +1487,9 @@ pub async fn repair_lyrics(api: Arc<DeezerClient>, store: OfflineStore) {
         }
     }
     let _release = Release;
-    // Absentes ou illisibles (fichier abîmé) : redemandées.
+    // Absentes, illisibles (fichier abîmé), ou sans paroles synchronisées depuis plus d'une semaine : redemandées.
     let ids: Vec<i64> = store.entries.read().map(|e| e.keys().copied().collect()).unwrap_or_default();
-    let missing: Vec<i64> = ids.into_iter().filter(|id| store.lyrics(*id).is_none()).collect();
+    let missing: Vec<i64> = ids.into_iter().filter(|id| store.lyrics_due(*id)).take(LYRICS_RECHECK_MAX).collect();
     // Par petits paquets : quelques requêtes à la fois, et arrêt dès que le réseau manque.
     for chunk in missing.chunks(3) {
         let results = futures_util::future::join_all(chunk.iter().map(|id| fetch_lyrics(&api, &store, *id))).await;
@@ -2655,7 +2682,27 @@ mod tests {
     }
 
     fn write_lyrics(root: &Path, id: i64, lyrics: Option<StoredLyrics>) {
-        std::fs::write(lyrics_path(root, id), serde_json::to_vec(&LyricsFile { lyrics }).unwrap()).unwrap();
+        std::fs::write(lyrics_path(root, id), serde_json::to_vec(&LyricsFile { lyrics, checked: today() }).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn missing_or_unsynced_lyrics_are_asked_again_after_a_week() {
+        let root = root("lyrics-due");
+        let store = OfflineStore::open(root.clone()).unwrap();
+        for id in [1, 2, 3, 4] {
+            insert_file(&store, id);
+        }
+        write_lyrics(&root, 1, Some(sample_lyrics())); // synchronisées : jamais redemandées
+        write_lyrics(&root, 2, None); // absence vérifiée aujourd'hui : pas encore
+        // Fichier d'avant cette version (sans date) : absence redemandée.
+        std::fs::write(lyrics_path(&root, 3), br#"{"lyrics":null}"#).unwrap();
+        assert!(!store.lyrics_due(1) && !store.lyrics_due(2) && store.lyrics_due(3) && store.lyrics_due(4));
+        assert_eq!(store.lyrics(3), Some(None), "l'ancien fichier se lit toujours");
+        // Paroles arrivées : gardées, et lues sans réseau.
+        store.save_lyrics(3, Some(sample_lyrics())).unwrap();
+        assert_eq!(store.lyrics(3), Some(Some(sample_lyrics())));
+        assert!(!store.lyrics_due(3));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn sample_lyrics() -> StoredLyrics {

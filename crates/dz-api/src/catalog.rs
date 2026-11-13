@@ -17,6 +17,29 @@ pub struct LyricLine {
     pub text: String,
 }
 
+/// Paroles d'un titre sur le service récent de Deezer : lignes synchronisées, sinon le texte seul.
+const PIPE_LYRICS: &str = "query TrackLyrics($trackId: String!) { track(trackId: $trackId) { id lyrics { id text copyright synchronizedLines { line milliseconds } } } }";
+
+/// Réponse du service récent : `None` s'il n'a pas de paroles pour ce titre.
+fn lyrics_from_pipe(data: &Value) -> Option<Lyrics> {
+    let l = data.pointer("/track/lyrics").filter(|v| !v.is_null())?;
+    let copyright = vs(l, "copyright");
+    let synced: Vec<LyricLine> = l
+        .get("synchronizedLines")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter(|x| x.get("milliseconds").is_some_and(|m| !m.is_null())).map(|x| LyricLine { ms: vn(x, "milliseconds"), text: vs(x, "line") }).collect())
+        .unwrap_or_default();
+    if synced.iter().any(|x| !x.text.trim().is_empty()) {
+        return Some(Lyrics { synced: true, lines: synced, copyright, source: "deezer" });
+    }
+    let text = vs(l, "text");
+    if text.trim().is_empty() {
+        return None;
+    }
+    let lines = text.lines().map(|t| LyricLine { ms: 0, text: t.to_owned() }).collect();
+    Some(Lyrics { synced: false, lines, copyright, source: "deezer" })
+}
+
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct Lyrics {
     /// Vrai si les lignes portent un horodatage exploitable.
@@ -951,7 +974,19 @@ impl DeezerClient {
     }
 
     /// Paroles d'un titre. `None` : pas de paroles pour ce titre (cas courant, ce n'est pas une erreur).
+    /// Paroles d'un titre. Service récent de Deezer (pipe) d'abord : les paroles ajoutées ces dernières années ne sont
+    /// que là (l'ancienne méthode répondait « pas de paroles », par exemple pour « Cinéma » de No Limit, Leto et Timar).
+    /// L'ancienne méthode reste en secours : service récent injoignable, ou rien chez lui.
     pub async fn lyrics(&self, id: i64) -> Result<Option<Lyrics>> {
+        if let Ok(data) = self.pipe("TrackLyrics", PIPE_LYRICS, json!({ "trackId": id.to_string() })).await {
+            if let Some(found) = lyrics_from_pipe(&data) {
+                return Ok(Some(found));
+            }
+        }
+        self.lyrics_gw(id).await
+    }
+
+    async fn lyrics_gw(&self, id: i64) -> Result<Option<Lyrics>> {
         let r: Value = match self.gw("song.getLyrics", &json!({ "sng_id": id.to_string() })).await {
             Ok(r) => r,
             Err(DeezerError::Gateway(m)) if m.contains("No lyrics") || m.contains("DATA_ERROR") => return Ok(None),
@@ -1037,6 +1072,22 @@ impl DeezerClient {
 
 #[cfg(test)]
 mod tests {
+    use super::lyrics_from_pipe;
+    use serde_json::json;
+
+    #[test]
+    fn lyrics_from_the_recent_service() {
+        let synced = json!({ "track": { "lyrics": { "text": "a\r\nb", "copyright": "C", "synchronizedLines": [
+            { "line": "un", "milliseconds": 1370 }, { "line": "", "milliseconds": 4000 }, { "line": "deux", "milliseconds": 5200 }
+        ] } } });
+        let l = lyrics_from_pipe(&synced).unwrap();
+        assert!(l.synced && l.lines.len() == 3 && l.lines[2].ms == 5200 && l.copyright == "C");
+        let plain = json!({ "track": { "lyrics": { "text": "a\r\nb", "copyright": null, "synchronizedLines": [] } } });
+        let l = lyrics_from_pipe(&plain).unwrap();
+        assert!(!l.synced && l.lines.iter().map(|x| x.text.as_str()).eq(["a", "b"]));
+        assert!(lyrics_from_pipe(&json!({ "track": { "lyrics": null } })).is_none());
+        assert!(lyrics_from_pipe(&json!({ "track": null })).is_none());
+    }
 
     #[test]
     fn search_artists_most_followed_first() {
