@@ -276,6 +276,7 @@ enum Translations {
         "Modifier": ("Edit", "Editar"),
         "Rien d'autre dans la file.": ("Nothing else in the queue.", "No hay nada más en la cola."),
         "Pas de paroles pour ce titre sur Deezer.": ("No lyrics for this track on Deezer.", "No hay letra de esta canción en Deezer."),
+        "Impossible de charger les paroles. Vérifie ta connexion.": ("Couldn't load the lyrics. Check your connection.", "No se pudo cargar la letra. Comprueba tu conexión."),
         "Sortie": ("Release", "Lanzamiento"),
         "Date": ("Date", "Fecha"),
         "Deezer ne donne pas de crédits pour ce titre.": ("Deezer doesn't provide credits for this track.", "Deezer no ofrece créditos para esta canción."),

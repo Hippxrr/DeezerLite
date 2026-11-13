@@ -627,21 +627,18 @@ final class Player {
     /// ouverte des jours). Avant : plus jamais redemandés tant que l'app restait ouverte.
     @ObservationIgnored private var noLyrics: [Int64: Date] = [:]
 
-    /// Paroles Deezer du titre ; `nil` s'il n'en a pas (ou si Deezer ne répond pas).
-    func lyrics(_ id: Int64) async -> Lyrics? {
+    /// Paroles Deezer du titre ; `nil` s'il n'en a pas. Erreur si Deezer ne répond pas (réseau) : avant, elle passait
+    /// pour « pas de paroles ».
+    func lyrics(_ id: Int64) async throws -> Lyrics? {
         if let hit = lyricsCache[id] { return hit }
         guard let core, noLyrics[id].map({ Date().timeIntervalSince($0) > 30 * 60 }) ?? true else { return nil }
-        do {
-            guard let found = try await core.lyrics(id: id) else {
-                noLyrics[id] = Date()
-                return nil
-            }
-            if lyricsCache.count >= 30 { lyricsCache.removeAll() }
-            lyricsCache[id] = found
-            return found
-        } catch {
+        guard let found = try await core.lyrics(id: id) else {
+            noLyrics[id] = Date()
             return nil
         }
+        if lyricsCache.count >= 30 { lyricsCache.removeAll() }
+        lyricsCache[id] = found
+        return found
     }
 
     /// Un titre plus loin ou plus tôt dans la file, sans la règle « précédent = retour au début »

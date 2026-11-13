@@ -516,6 +516,9 @@ impl Actor {
                     // Commandes internes (artistes complétés, pochette réparée, suite du Flow) : gardées
                     // pour après, sans abandonner la préparation (sur réseau lent, elle pouvait ne jamais aboutir).
                     let mut later = Vec::new();
+                    // Événement du moteur (coupure réseau, sortie perdue, fin de titre) : la préparation est abandonnée pour le
+                    // traiter tout de suite. Avant, il attendait la fin de la préparation (jusqu'à une minute sur réseau mort).
+                    let mut engine_ev = None;
                     let interrupted = {
                         let prefetch = self.maybe_prefetch();
                         tokio::pin!(prefetch);
@@ -526,11 +529,22 @@ impl Actor {
                                     Some(c @ (PlayerCmd::Enrich { .. } | PlayerCmd::CoverFixed { .. } | PlayerCmd::FlowMore { .. })) => later.push(c),
                                     other => break Some(other),
                                 },
+                                Some(ev) = erx.recv() => {
+                                    engine_ev = Some(ev);
+                                    break None;
+                                }
                             }
                         }
                     };
+                    if engine_ev.is_some() {
+                        self.prefetched = None;
+                        self.prefetched_idx = None;
+                    }
                     for c in later {
                         self.on_cmd(c).await;
+                    }
+                    if let Some(ev) = engine_ev {
+                        self.on_engine(ev).await;
                     }
                     if let Some(cmd) = interrupted {
                         self.prefetched = None;
@@ -1303,6 +1317,18 @@ impl Actor {
             }
             EngineEvent::StateChanged => {} // la boucle notifie `changed` après chaque événement
             // Le titre préparé n'était plus disponible dans le moteur : chargement normal du titre demandé.
+            // Saut dans un titre déjà entièrement décodé (sa dernière demi-seconde, ou suivant déjà enchaîné) : le moteur l'a
+            // arrêté, il est rechargé à la position voulue (même écoute). Avant, le saut était ignoré.
+            EngineEvent::SeekFailed { ms } => {
+                if self.queue.get(self.index).is_some() {
+                    self.reload_id = self.queue.get(self.index).copied();
+                    self.retries = 0;
+                    self.prefetched = None;
+                    self.prefetched_idx = None;
+                    self.play_current().await;
+                    self.engine.seek(ms);
+                }
+            }
             EngineEvent::SkipFailed => {
                 self.prefetched = None;
                 self.prefetched_idx = None;

@@ -1319,6 +1319,9 @@ private struct LyricsPanel: View {
     @Environment(Player.self) private var player
     @State private var lyrics: Lyrics?
     @State private var loaded = false
+    /// Paroles pas chargées (réseau) ; `attempt` relance le chargement (bouton « Réessayer »).
+    @State private var failed = false
+    @State private var attempt = 0
     /// Ligne en cours (-1 : avant la première).
     @State private var active = -1
     /// Jusqu'à quand le texte ne suit plus la ligne en cours (l'utilisateur le fait défiler).
@@ -1370,6 +1373,17 @@ private struct LyricsPanel: View {
                 .background {
                     if lyrics.synced { LyricsClock(lines: lyrics.lines) { active = $0 } }
                 }
+            } else if failed {
+                VStack(spacing: 12) {
+                    Text(tr("Impossible de charger les paroles. Vérifie ta connexion."))
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.6))
+                        .multilineTextAlignment(.center)
+                    Button(tr("Réessayer")) { attempt += 1 }
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.white)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 Text(tr("Pas de paroles pour ce titre sur Deezer."))
                     .font(.subheadline)
@@ -1381,11 +1395,14 @@ private struct LyricsPanel: View {
             LyricsShareSheet(request: request).environment(player)
         }
         .sensoryFeedback(.impact(weight: .medium), trigger: share?.id)
-        .task(id: player.showFullPlayer ? player.current?.id : nil) {
+        .task(id: "\(player.showFullPlayer ? player.current?.id ?? 0 : -1)-\(attempt)") {
             loaded = false
+            failed = false
             active = -1
             lyrics = nil
-            if player.showFullPlayer, let id = player.current?.id, id != 0 { lyrics = await player.lyrics(id) }
+            if player.showFullPlayer, let id = player.current?.id, id != 0 {
+                do { lyrics = try await player.lyrics(id) } catch { failed = !Task.isCancelled }
+            }
             loaded = true
         }
     }
@@ -1527,9 +1544,11 @@ private struct CreditCard<Content: View>: View {
 /// mis à l'échelle.
 private struct ShuffleIcon: View {
     let on: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        KeyframeAnimator(initialValue: 1.0, trigger: on) { cross in
+        // « Réduire les animations » : l'icône reste croisée, sans animation.
+        KeyframeAnimator(initialValue: 1.0, trigger: on && !reduceMotion) { cross in
             Canvas { ctx, size in
                 let s = size.width / 24
                 // Trait de gauche à droite, en S, de la hauteur `from` à `to` ; il s'arrête dans la pointe.

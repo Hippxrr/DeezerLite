@@ -56,6 +56,9 @@ pub enum EngineEvent {
     DeviceLost,
     /// `skip_next` demandé alors qu'aucune piste suivante n'était prête (déjà commencée en fondu…).
     SkipFailed,
+    /// Saut impossible pendant la lecture : le titre entendu est déjà entièrement décodé (sa dernière demi-seconde, ou le
+    /// suivant déjà enchaîné). Le moteur s'est arrêté ; le lecteur recharge le titre à `ms`.
+    SeekFailed { ms: u64 },
 }
 
 /// État partagé avec le reste de l'application. `paused` et `volume` sont lus directement par le
@@ -1268,6 +1271,21 @@ impl Worker {
         let _ = self.events.send(EngineEvent::StateChanged);
     }
 
+    /// Saut impossible (titre entendu déjà entièrement décodé) : tout s'arrête là, position gardée. En lecture, le lecteur
+    /// recharge le titre à cette position (`SeekFailed`) ; en pause, la reprise le fera (voir `Resume` dans dz-core).
+    /// Avant, le saut était ignoré et l'affichage revenait en arrière.
+    fn seek_failed(&mut self, ms: u64) {
+        self.cur = None;
+        self.incoming = None;
+        self.next = None;
+        self.flush();
+        self.announced = None;
+        self.shared.idle.store(true, Ordering::Relaxed);
+        self.shared.position_ms.store(ms, Ordering::Relaxed);
+        let ev = if self.shared.paused.load(Ordering::Relaxed) { EngineEvent::StateChanged } else { EngineEvent::SeekFailed { ms } };
+        let _ = self.events.send(ev);
+    }
+
     /// Met en marche ou arrête le flux de sortie (sans le fermer : la reprise est immédiate, le tampon est gardé).
     fn run_stream(&mut self, run: bool) {
         let Some(o) = self.out.as_mut() else { return };
@@ -1465,6 +1483,7 @@ impl Worker {
                 // le titre affiché est encore le sortant, dont le décodeur est déjà arrivé à la fin : le saut est ignoré.
                 if let Some(inc_id) = self.incoming.as_ref().map(|t| t.id) {
                     if self.segments.front().map(|s| s.id) != Some(inc_id) {
+                        self.seek_failed(ms);
                         return;
                     }
                     self.cur = self.incoming.take();
@@ -1476,10 +1495,15 @@ impl Worker {
                     // commandes : un saut envoyé juste après un chargement vise bien le titre chargé.
                     if self.shared.idle.load(Ordering::Relaxed) {
                         self.shared.position_ms.store(ms, Ordering::Relaxed);
+                    } else {
+                        self.seek_failed(ms); // fin du dernier titre encore en train de jouer
                     }
                     return;
                 };
                 if Some(track.id) != audible {
+                    if audible.is_some() {
+                        self.seek_failed(ms); // décodeur déjà passé au titre suivant
+                    }
                     return;
                 }
                 let ms = if track.duration_ms > 0 { ms.min(track.duration_ms.saturating_sub(1)) } else { ms };
