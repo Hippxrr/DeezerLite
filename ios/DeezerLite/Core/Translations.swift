@@ -12,6 +12,17 @@ enum Translations {
         "Lecture complète indisponible : aperçu de 30 s (flux Deezer chiffré).": ("Full track unavailable: 30-second preview (encrypted Deezer stream).", "Canción completa no disponible: vista previa de 30 s (flujo de Deezer cifrado)."),
         "titre déjà téléchargé": ("track already downloaded", "canción ya descargada"),
         "téléchargement annulé": ("download cancelled", "descarga cancelada"),
+        // Minuterie de sommeil, partage des paroles
+        "Minuterie": ("Sleep timer", "Temporizador"),
+        "Désactivée": ("Off", "Desactivado"),
+        "%@ min": ("%@ min", "%@ min"),
+        "Fin du titre": ("End of track", "Final de la canción"),
+        "Minuterie active": ("Sleep timer on", "Temporizador activo"),
+        "La musique s'arrêtera dans %@ min": ("Music will stop in %@ min", "La música se detendrá en %@ min"),
+        "La musique s'arrêtera à la fin du titre": ("Music will stop at the end of the track", "La música se detendrá al final de la canción"),
+        "Partager en image": ("Share as image", "Compartir como imagen"),
+        "Partager les paroles": ("Share lyrics", "Compartir la letra"),
+        "Jusqu'à %@ lignes": ("Up to %@ lines", "Hasta %@ líneas"),
         // Téléchargements
         "%@ en attente": ("%@ queued", "%@ en espera"),
         "1 échec": ("1 failed", "1 fallida"),

@@ -1082,9 +1082,20 @@ private struct SoundMenuButton: View {
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(player.eqPreset == .off ? Color.white.opacity(0.75) : Theme.accent)
                 .frame(width: 44, height: 44)
+                .overlay(alignment: .topTrailing) {
+                    if player.sleepTimer != nil {
+                        Image(systemName: "moon.fill")
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(Theme.accent)
+                            .offset(x: -5, y: 7)
+                            .transition(.scale.combined(with: .opacity))
+                    }
+                }
+                .animation(.easeOut(duration: 0.2), value: player.sleepTimer)
         }
         .buttonStyle(.pressable)
         .accessibilityLabel(tr("Son"))
+        .accessibilityValue(player.sleepTimer != nil ? tr("Minuterie active") : "")
         .popover(isPresented: $open, arrowEdge: .bottom) {
             SoundMenu()
                 .environment(player)
@@ -1140,9 +1151,47 @@ private struct SoundMenu: View {
                 .animation(.easeOut(duration: 0.15), value: player.eqPreset)
                 .transition(.opacity)
             }
+            Divider()
+            // Minuterie de sommeil : seulement ici, et un petit croissant sur le bouton « Son » quand elle est réglée.
+            Menu {
+                Picker(tr("Minuterie"), selection: Binding(get: { player.sleepTimer }, set: { player.setSleepTimer($0) })) {
+                    Text(tr("Désactivée")).tag(Player.SleepTimer?.none)
+                    ForEach([15, 30, 45, 60], id: \.self) { m in
+                        Text(tr("%@ min", "\(m)")).tag(Player.SleepTimer?.some(.minutes(m)))
+                    }
+                    Text(tr("Fin du titre")).tag(Player.SleepTimer?.some(.trackEnd))
+                }
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "moon.zzz").foregroundStyle(Theme.accent).frame(width: 24)
+                    Text(tr("Minuterie")).foregroundStyle(Color.primary)
+                    Spacer()
+                    sleepValue.font(.subheadline).foregroundStyle(.secondary)
+                    Image(systemName: "chevron.up.chevron.down").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .contentShape(Rectangle())
+            }
         }
         .frame(width: 280)
         .sensoryFeedback(.selection, trigger: player.eqPreset)
+        .sensoryFeedback(.selection, trigger: player.sleepTimer)
+    }
+
+    /// Décompte affiché par le système (aucune minuterie de l'app pour le faire avancer).
+    @ViewBuilder private var sleepValue: some View {
+        switch player.sleepTimer {
+        case nil:
+            Text(tr("Désactivée"))
+        case .trackEnd?:
+            Text(tr("Fin du titre"))
+        case .minutes?:
+            if let at = player.sleepAt {
+                let now = Date()
+                Text(timerInterval: now...max(at, now), countsDown: true).monospacedDigit()
+            }
+        }
     }
 }
 
@@ -1274,6 +1323,8 @@ private struct LyricsPanel: View {
     @State private var active = -1
     /// Jusqu'à quand le texte ne suit plus la ligne en cours (l'utilisateur le fait défiler).
     @State private var readingUntil = Date.distantPast
+    /// Lignes à partager en image (appui long sur une ligne).
+    @State private var share: LyricsShareRequest?
 
     var body: some View {
         Group {
@@ -1295,6 +1346,9 @@ private struct LyricsPanel: View {
                                         player.seek(seconds: Double(line.ms) / 1000)
                                         active = i
                                     }
+                                    // Appui long : partager cette ligne (et d'autres) en image avec la pochette.
+                                    .onLongPressGesture(minimumDuration: 0.4) { shareLine(i, lyrics) }
+                                    .accessibilityAction(named: tr("Partager en image")) { shareLine(i, lyrics) }
                                     .id(i)
                             }
                             if !lyrics.copyright.isEmpty {
@@ -1323,6 +1377,10 @@ private struct LyricsPanel: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .sheet(item: $share) { request in
+            LyricsShareSheet(request: request).environment(player)
+        }
+        .sensoryFeedback(.impact(weight: .medium), trigger: share?.id)
         .task(id: player.showFullPlayer ? player.current?.id : nil) {
             loaded = false
             active = -1
@@ -1330,6 +1388,12 @@ private struct LyricsPanel: View {
             if player.showFullPlayer, let id = player.current?.id, id != 0 { lyrics = await player.lyrics(id) }
             loaded = true
         }
+    }
+
+    private func shareLine(_ i: Int, _ lyrics: Lyrics) {
+        guard let track = player.current, track.id != 0,
+              !lyrics.lines[i].text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        share = LyricsShareRequest(track: track, lines: lyrics.lines, first: i)
     }
 }
 

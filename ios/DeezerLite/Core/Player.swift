@@ -1332,8 +1332,9 @@ final class Player {
         CustomCovers.removeAll()
         CoverLoader.shared.clear()
         NowPlaying.update(track: nil, status: status)
-        // Plus aucune reprise automatique en attente.
+        // Plus aucune reprise automatique en attente, ni de minuterie.
         resumePolicy = ResumePolicy()
+        setSleepTimer(nil)
         AudioSession.deactivate()
         AudioSession.configure()
         sessionReady = false
@@ -1799,6 +1800,95 @@ final class Player {
         // Le curseur reste là où on l'a lâché, sans attendre le moteur.
         status = Status(playing: status.playing, positionMs: ms, durationMs: status.durationMs)
         statusAt = Date()
+        if sleepTimer == .trackEnd { scheduleSleep() }
+    }
+
+    // MARK: Minuterie de sommeil
+
+    /// Arrêt de la musique après un délai, ou à la fin du titre en cours. Désactivée par défaut, jamais gardée d'un
+    /// lancement à l'autre ; réglée dans la bulle « Son » du lecteur.
+    enum SleepTimer: Hashable {
+        case minutes(Int)
+        case trackEnd
+    }
+    private(set) var sleepTimer: SleepTimer?
+    /// Échéance d'une minuterie en minutes (décompte affiché dans la bulle « Son »).
+    private(set) var sleepAt: Date?
+    @ObservationIgnored private var sleepTask: Task<Void, Never>?
+    /// Volume pendant le fondu de fin (1 : normal).
+    @ObservationIgnored private var sleepVolume: Float = 1
+    /// Le son baisse doucement pendant ces secondes avant la pause (pas d'arrêt net).
+    private static let sleepFade: Double = 8
+
+    func setSleepTimer(_ timer: SleepTimer?) {
+        sleepTimer = timer
+        sleepAt = nil
+        restoreSleepVolume()
+        switch timer {
+        case .minutes(let m)?:
+            sleepAt = Date().addingTimeInterval(Double(m) * 60)
+            showToast(tr("La musique s'arrêtera dans %@ min", "\(m)"))
+        case .trackEnd?:
+            showToast(tr("La musique s'arrêtera à la fin du titre"))
+        case nil:
+            break
+        }
+        scheduleSleep()
+    }
+
+    /// Une seule tâche qui dort jusqu'à l'échéance (aucun réveil régulier), puis 8 s de fondu. Fin du titre : refaite à
+    /// chaque changement (autre titre, saut, pause, reprise) ; rien ne tourne en pause.
+    private func scheduleSleep() {
+        sleepTask?.cancel()
+        sleepTask = nil
+        let delay: Double
+        switch sleepTimer {
+        case .minutes?:
+            guard let at = sleepAt else { return }
+            delay = at.timeIntervalSinceNow
+        case .trackEnd?:
+            // En pause : le son est déjà coupé, le volume revient à la normale pour la reprise.
+            guard status.playing, status.durationMs > 0 else { restoreSleepVolume(); return }
+            // Avec le fondu enchaîné, le titre suivant commence avant la fin : arrêt juste avant lui.
+            delay = Double(status.durationMs) / 1000 - position(at: Date()) - Double(crossfade) - 0.3
+        case nil:
+            restoreSleepVolume()
+            return
+        }
+        sleepTask = Task { [weak self] in
+            let fade = min(Self.sleepFade, max(delay, 0))
+            try? await Task.sleep(for: .seconds(max(delay - fade, 0)))
+            // Le son baisse par petits pas (5 par seconde), en courbe : la fin s'entend comme un vrai fondu.
+            let steps = max(Int(fade * 5), 1)
+            let from = self?.sleepVolume ?? 1
+            for i in 0..<steps {
+                guard !Task.isCancelled, let self else { return }
+                let left = 1 - Double(i + 1) / Double(steps)
+                self.sleepVolume = from * Float(left * left)
+                self.core?.setVolume(volume: self.sleepVolume)
+                try? await Task.sleep(for: .milliseconds(200))
+            }
+            guard !Task.isCancelled, let self else { return }
+            self.finishSleep()
+        }
+    }
+
+    private func finishSleep() {
+        sleepTask = nil
+        sleepTimer = nil
+        sleepAt = nil
+        pause()
+        // Volume normal une fois le son coupé (la pause le fait descendre à zéro) : la reprise se fait normalement.
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(300))
+            self?.restoreSleepVolume()
+        }
+    }
+
+    private func restoreSleepVolume() {
+        guard sleepVolume < 1 else { return }
+        sleepVolume = 1
+        core?.setVolume(volume: 1)
     }
 
     func queueAdd(_ tracks: [Track], next: Bool) {
@@ -2223,7 +2313,10 @@ final class Player {
             scheduleDownloadsRefresh() // hors du fil de l'interface (un contrôle de fichier par titre téléchargé)
         }
         switch event {
-        case .track, .started, .state, .stopped, .closed: NowPlaying.update(track: current, status: status)
+        case .track, .started, .state, .stopped, .closed:
+            NowPlaying.update(track: current, status: status)
+            // Minuterie « fin du titre » : échéance recalculée (autre titre, pause, reprise).
+            if sleepTimer == .trackEnd { scheduleSleep() }
         default: break
         }
         switch event {
