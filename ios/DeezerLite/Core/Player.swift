@@ -1815,12 +1815,15 @@ final class Player {
     /// Échéance d'une minuterie en minutes (décompte affiché dans la bulle « Son »).
     private(set) var sleepAt: Date?
     @ObservationIgnored private var sleepTask: Task<Void, Never>?
+    /// « Fin du titre » : titre et heure d'arrêt de la tâche en cours (voir `scheduleSleep`).
+    @ObservationIgnored private var sleepPlan: (id: Int64, end: Date)?
     /// Volume pendant le fondu de fin (1 : normal).
     @ObservationIgnored private var sleepVolume: Float = 1
     /// Le son baisse doucement pendant ces secondes avant la pause (pas d'arrêt net).
     private static let sleepFade: Double = 8
 
     func setSleepTimer(_ timer: SleepTimer?) {
+        cancelSleepTask()
         sleepTimer = timer
         sleepAt = nil
         restoreSleepVolume()
@@ -1839,8 +1842,6 @@ final class Player {
     /// Une seule tâche qui dort jusqu'à l'échéance (aucun réveil régulier), puis 8 s de fondu. Fin du titre : refaite à
     /// chaque changement (autre titre, saut, pause, reprise) ; rien ne tourne en pause.
     private func scheduleSleep() {
-        sleepTask?.cancel()
-        sleepTask = nil
         let delay: Double
         switch sleepTimer {
         case .minutes?:
@@ -1848,13 +1849,25 @@ final class Player {
             delay = at.timeIntervalSinceNow
         case .trackEnd?:
             // En pause : le son est déjà coupé, le volume revient à la normale pour la reprise.
-            guard status.playing, status.durationMs > 0 else { restoreSleepVolume(); return }
+            guard status.playing, status.durationMs > 0, let id = current?.id else {
+                cancelSleepTask()
+                restoreSleepVolume()
+                return
+            }
             // Avec le fondu enchaîné, le titre suivant commence avant la fin : arrêt juste avant lui.
             delay = Double(status.durationMs) / 1000 - position(at: Date()) - Double(crossfade) - 0.3
+            let end = Date().addingTimeInterval(delay)
+            // Même titre, même échéance (à 1 s près) : la tâche en cours continue. Avant, chaque état envoyé pendant la
+            // lecture la relançait : le fondu recommençait sans fin, la pause n'arrivait jamais, et les titres suivants
+            // continuaient à jouer sans le son.
+            if sleepTask != nil, let plan = sleepPlan, plan.id == id, abs(plan.end.timeIntervalSince(end)) < 1 { return }
+            sleepPlan = (id, end)
         case nil:
+            cancelSleepTask()
             restoreSleepVolume()
             return
         }
+        sleepTask?.cancel()
         sleepTask = Task { [weak self] in
             let fade = min(Self.sleepFade, max(delay, 0))
             try? await Task.sleep(for: .seconds(max(delay - fade, 0)))
@@ -1873,8 +1886,15 @@ final class Player {
         }
     }
 
+    private func cancelSleepTask() {
+        sleepTask?.cancel()
+        sleepTask = nil
+        sleepPlan = nil
+    }
+
     private func finishSleep() {
         sleepTask = nil
+        sleepPlan = nil
         sleepTimer = nil
         sleepAt = nil
         pause()
