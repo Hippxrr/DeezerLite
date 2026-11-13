@@ -5,7 +5,7 @@ struct RecoPrefs: Codable, Equatable {
     static let kinds: [(id: String, label: String)] = [
         ("recent", "Écouté récemment"), ("followed", "Playlists suivies"), ("new-releases", "Nouveautés pour toi"),
         ("playlists-for-you", "Playlists pour toi"), ("mixes", "Mixes pour toi"), ("track-mixes", "Mixes inspirés par"), ("on-repeat", "En boucle chez toi"),
-        ("similar-artists", "Parce que tu aimes…"), ("genres", "Tes genres favoris"), ("curated", "Sélections de la rédaction"),
+        ("similar-artists", "Parce que tu aimes…"), ("curated", "Sélections de la rédaction"),
     ]
 
     static func label(_ kind: String) -> String { tr(kinds.first { $0.id == kind }?.label ?? kind) }

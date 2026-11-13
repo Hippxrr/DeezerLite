@@ -347,7 +347,9 @@ fn not_delivered(e: &DeezerError) -> bool {
         // Réponse « trop de requêtes » (429) ou serveur indisponible (502, 503, 504) : Deezer n'a pas traité l'écoute,
         // on peut la renvoyer sans doublon. Pas 500 : la requête a pu être traitée en partie.
         DeezerError::Http(h) => {
-            h.is_connect() || h.status().is_some_and(|s| matches!(s.as_u16(), 429 | 502 | 503 | 504))
+            // Réponse illisible : en pratique une page de portail Wi-Fi (la requête n'est jamais arrivée chez Deezer).
+            // Avant, l'écoute était tenue pour envoyée et effacée.
+            h.is_connect() || h.is_decode() || h.status().is_some_and(|s| matches!(s.as_u16(), 429 | 502 | 503 | 504))
         }
         DeezerError::Gateway(g) => g.to_ascii_uppercase().contains("QUOTA"),
         DeezerError::InvalidArl | DeezerError::SessionExpired => true,
@@ -492,7 +494,7 @@ impl Actor {
         // ou à l'arrêt, rien à préparer : plus de réveil du tout (une commande ou un événement du moteur relance la boucle).
         let mut next_tick = tokio::time::Instant::now() + Duration::from_secs(1);
         loop {
-            let busy = self.recover_at.is_some() || self.engine.shared.playing.load(Ordering::Relaxed);
+            let busy = self.busy();
             let soonest = tokio::time::Instant::now() + Duration::from_secs(if busy { 1 } else { IDLE_TICK_S });
             if next_tick > soonest {
                 next_tick = soonest;
@@ -535,7 +537,7 @@ impl Actor {
                             None => return,
                         }
                     }
-                    let busy = self.recover_at.is_some() || self.engine.shared.playing.load(Ordering::Relaxed);
+                    let busy = self.busy();
                     next_tick = tokio::time::Instant::now() + Duration::from_secs(if busy { 1 } else { IDLE_TICK_S });
                 }
             }
@@ -908,8 +910,14 @@ impl Actor {
             PlayerCmd::Prev => {
                 // Comme la plupart des lecteurs : > 3 s => retour au début, sinon piste précédente.
                 if self.engine.shared.position_ms.load(Ordering::Relaxed) > 3000 || self.index == 0 {
-                    self.engine.seek(0);
-                    self.restart = true;
+                    if self.engine.shared.idle.load(Ordering::Relaxed) && self.queue.get(self.index).is_some() {
+                        // Plus rien dans le moteur (fin de file) : un retour à 0 ne faisait rien, le titre est relancé.
+                        self.retries = 0;
+                        self.play_current().await;
+                    } else {
+                        self.engine.seek(0);
+                        self.restart = true;
+                    }
                 } else {
                     self.index -= 1;
                     self.play_current().await;
@@ -1313,10 +1321,22 @@ impl Actor {
         }
     }
 
+    /// Réveil chaque seconde : lecture en cours, ou relance après coupure en attente (sauf en pause : elle attend la
+    /// reprise, plus de réveil pour rien).
+    fn busy(&self) -> bool {
+        let sh = &self.engine.shared;
+        (self.recover_at.is_some() && !sh.paused.load(Ordering::Relaxed)) || sh.playing.load(Ordering::Relaxed)
+    }
+
     /// Relance le titre en cours (nouvelle adresse de flux, jeton frais) à la position où il s'est arrêté.
     async fn maybe_recover(&mut self) {
         let Some(at) = self.recover_at else { return };
         if Instant::now() < at {
+            return;
+        }
+        // En pause (appui de l'utilisateur, appel) : la relance attend la reprise. Avant, elle relançait la musique
+        // malgré la pause, ou échouait pendant l'appel (« Le son n'a pas pu reprendre »).
+        if self.engine.shared.paused.load(Ordering::Relaxed) {
             return;
         }
         self.recover_at = None;

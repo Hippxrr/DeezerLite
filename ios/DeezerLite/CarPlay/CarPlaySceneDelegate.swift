@@ -250,7 +250,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             let currentId = player.current?.id
             let rows = tracks.enumerated().map { index, track in
                 let item = CPListItem(text: track.title, detailText: track.artist, image: placeholder)
-                setCover(item, track.coverUrl)
+                setCover(item, player.coverFixes[track.id] ?? track.coverUrl) // pochette réparée, comme sur le téléphone
                 item.isPlaying = track.id == currentId
                 item.handler = { [weak self] _, done in
                     MainActor.assumeIsolated {
@@ -316,7 +316,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
             let upcoming = player.queue.enumerated().dropFirst(current).prefix(maxItems)
             let items = upcoming.map { index, track in
                 let item = CPListItem(text: track.title, detailText: track.artist, image: self.placeholder)
-                self.setCover(item, track.coverUrl)
+                self.setCover(item, player.coverFixes[track.id] ?? track.coverUrl)
                 item.isPlaying = index == current
                 item.handler = { [weak self] _, done in
                     MainActor.assumeIsolated {

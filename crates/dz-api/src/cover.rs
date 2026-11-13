@@ -142,12 +142,15 @@ impl DeezerClient {
         if old == EMPTY_PICTURE || self.known_complete(&old) {
             return None;
         }
-        if self.cover_complete(&old).await {
-            // Retenue : les autres titres du même album ne revérifient pas la même image (3 requêtes chacun).
-            self.remember_complete(&old);
-            return None;
+        match self.cover_complete(&old).await {
+            Some(true) => {
+                // Retenue : les autres titres du même album ne revérifient pas la même image (3 requêtes chacun).
+                self.remember_complete(&old);
+                None
+            }
+            Some(false) => self.repair_incomplete(url, &old, album_id, track_id).await,
+            None => None, // réseau : on ne sait pas, rien n'est tenté
         }
-        self.repair_incomplete(url, &old, album_id, track_id).await
     }
 
     /// Recherche d'un remplacement pour l'image `old`, déjà connue incomplète.
@@ -187,9 +190,19 @@ impl DeezerClient {
         }
         let mut found = None;
         for (c, own) in candidates {
-            if !c.is_empty() && c != old && c != EMPTY_PICTURE && self.cover_complete(&c).await {
-                found = Some((c, own));
-                break;
+            if c.is_empty() || c == old || c == EMPTY_PICTURE {
+                continue;
+            }
+            match self.cover_complete(&c).await {
+                Some(true) => {
+                    found = Some((c, own));
+                    break;
+                }
+                Some(false) => {}
+                None => {
+                    sure = false;
+                    break;
+                }
             }
         }
         let Some((md5, own)) = found else {
@@ -228,11 +241,25 @@ impl DeezerClient {
             }
         }
         let Some(path) = self.cover_fixes_file.lock().ok().and_then(|p| p.clone()) else { return };
-        if let Ok(bytes) = serde_json::to_vec(fixes) {
+        let Ok(bytes) = serde_json::to_vec(fixes) else { return };
+        // Écrit hors du verrou et hors des deux fils du cœur (partagés avec le lecteur) : jusqu'à ~1 Mo. Une écriture
+        // dépassée par une plus récente avant son tour est sautée.
+        static LATEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        static WRITING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let seq = LATEST.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
+        let write = move || {
+            let _guard = WRITING.lock();
+            if LATEST.load(std::sync::atomic::Ordering::Acquire) != seq {
+                return;
+            }
             let tmp = path.with_extension("tmp");
             if std::fs::write(&tmp, bytes).is_ok() {
                 let _ = std::fs::rename(&tmp, &path);
             }
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => drop(rt.spawn_blocking(write)),
+            Err(_) => write(),
         }
     }
 
@@ -279,7 +306,7 @@ impl DeezerClient {
                 todo.entry(md5).or_default().push((id, url, album));
             }
         }
-        let checked: Vec<(String, Vec<(i64, String, u64)>, bool)> = stream::iter(todo)
+        let checked: Vec<(String, Vec<(i64, String, u64)>, Option<bool>)> = stream::iter(todo)
             .map(|(md5, list)| async move {
                 let complete = self.cover_complete(&md5).await;
                 (md5, list, complete)
@@ -287,13 +314,20 @@ impl DeezerClient {
             .buffer_unordered(6)
             .collect()
             .await;
+        // Une vérification sans réponse (réseau faible, portail Wi-Fi) : aucune réparation cette fois. Avant, chaque
+        // erreur réseau passait pour une pochette cassée et lançait des réparations en série (minutes de radio), à chaque
+        // visite de la page.
+        let unsure = checked.iter().any(|(_, _, complete)| complete.is_none());
         let mut learned = false;
         for (md5, list, complete) in checked {
-            if complete {
+            if complete == Some(true) {
                 if let Ok(mut fixes) = self.cover_fixes.lock() {
                     fixes.insert(format!("ok:{md5}"), today());
                     learned = true;
                 }
+                continue;
+            }
+            if complete.is_none() || unsure {
                 continue;
             }
             for (id, url, album) in list {
@@ -318,17 +352,21 @@ impl DeezerClient {
     }
 
     /// La pochette existe aux tailles qu'affichent les apps (petite, moyenne, grande) : le serveur d'images ne
-    /// redirige vers son image vide pour aucune.
-    async fn cover_complete(&self, md5: &str) -> bool {
+    /// redirige vers son image vide pour aucune. `None` : pas de réponse fiable (réseau, portail Wi-Fi, serveur).
+    async fn cover_complete(&self, md5: &str) -> Option<bool> {
         let timeout = std::time::Duration::from_secs(10);
         for size in [120, 250, 1000] {
             let url = format!("https://cdn-images.dzcdn.net/images/cover/{md5}/{size}x{size}-000000-80-0-0.jpg");
-            match self.http().head(&url).timeout(timeout).send().await {
-                Ok(r) if !r.url().as_str().contains(EMPTY_PICTURE) => {}
-                _ => return false,
+            let r = self.http().head(&url).timeout(timeout).send().await.ok()?;
+            if r.url().as_str().contains(EMPTY_PICTURE) {
+                return Some(false);
+            }
+            // Portail Wi-Fi (redirigé ailleurs) ou erreur du serveur : on ne sait pas.
+            if !r.status().is_success() || !r.url().host_str().is_some_and(|h| h.ends_with("dzcdn.net")) {
+                return None;
             }
         }
-        true
+        Some(true)
     }
 
     /// Fichier des pochettes réparées (dans les données de l'app) : relu tout de suite, puis complété à chaque

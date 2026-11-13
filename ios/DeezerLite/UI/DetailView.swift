@@ -213,8 +213,21 @@ struct DetailView: View {
         }
     }
 
+    /// Collection téléchargée dont des titres manquent sans être en cours (« Tout arrêter », annulés) : avant, seule
+    /// la corbeille restait, qui supprimait aussi les titres déjà là.
+    private func hasRest(_ d: Detail) -> Bool {
+        player.downloadedCollection(kind: d.kind, id: d.id) != nil
+            && d.tracks.contains { !$0.unavailable && !player.downloadedIds.contains($0.id) && player.downloadStates[$0.id] == nil }
+    }
+
     @ToolbarContentBuilder
     private var pageToolbar: some ToolbarContent {
+        if let d = detail, !d.offline, hasRest(d) {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { player.download(d) } label: { Image(systemName: "arrow.down.circle") }
+                    .accessibilityLabel(tr("Télécharger le reste"))
+            }
+        }
         if let d = detail, ["album", "playlist", "loved"].contains(d.kind), !d.tracks.isEmpty {
             ToolbarItem(placement: .topBarTrailing) {
                 let downloaded = player.downloadedCollection(kind: d.kind, id: d.id) != nil
@@ -240,6 +253,8 @@ struct DetailView: View {
                 Button { withAnimation { player.togglePin(card) } } label: {
                     Image(systemName: pinned ? "pin.fill" : "pin")
                 }
+                .accessibilityLabel(pinned ? tr("Épinglé sur l'accueil") : tr("Épingler sur l'accueil"))
+                .accessibilityAddTraits(pinned ? .isSelected : [])
             }
         }
         if let d = detail, d.kind != "artist", d.tracks.count > 1 {
@@ -247,6 +262,7 @@ struct DetailView: View {
                 Button {
                     withAnimation { searching = true }
                 } label: { Image(systemName: "magnifyingglass") }
+                .accessibilityLabel(tr("Rechercher dans la liste"))
             }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
@@ -261,6 +277,7 @@ struct DetailView: View {
                 } label: {
                     Image(systemName: sort == .standard && !sortReversed ? "arrow.up.arrow.down" : "arrow.up.arrow.down.circle.fill")
                 }
+                .accessibilityLabel(tr("Trier par"))
             }
         }
     }

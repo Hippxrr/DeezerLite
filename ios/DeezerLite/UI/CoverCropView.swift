@@ -20,7 +20,9 @@ struct CoverCropView: View {
     @State private var offset: CGSize = .zero
     /// Position au début du glissement en cours (relevée à son premier mouvement) : un doigt levé pendant un pincement
     /// ne fait plus sauter l'image (le déplacement déjà fait était compté deux fois).
-    @State private var dragStart: CGSize?
+    /// Repris à chaque nouveau geste (autre point de départ) : un geste interrompu par iOS (appel), sans fin signalée,
+    /// laissait son point de départ au suivant, et l'image sautait.
+    @State private var dragStart: (from: CGPoint, offset: CGSize)?
 
     private static let maxScale: CGFloat = 5
 
@@ -51,8 +53,8 @@ struct CoverCropView: View {
                                     .onEnded { _ in lastScale = scale },
                                 DragGesture()
                                     .onChanged { v in
-                                        let start = dragStart ?? offset
-                                        if dragStart == nil { dragStart = start }
+                                        if dragStart?.from != v.startLocation { dragStart = (v.startLocation, offset) }
+                                        let start = dragStart?.offset ?? offset
                                         offset = clamp(CGSize(width: start.width + v.translation.width,
                                                               height: start.height + v.translation.height), side: side, base: base)
                                     }

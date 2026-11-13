@@ -55,6 +55,10 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
     private var networkUp = true
     /// Titres arrêtés par une coupure : gardés en file (pas en échec), ils repartent quand le réseau revient.
     private var waitingNetwork: Set<Int64> = []
+    /// Plus de place sur l'iPhone : la file est arrêtée (chaque titre suivant échouait pareil, après avoir été
+    /// téléchargé pour rien), les titres restent en attente. Reprise au retour dans l'app, à une nouvelle demande, ou
+    /// au lancement suivant.
+    private var storageFull = false
     /// Nouvel essai des titres arrêtés quand le réseau semble là mais que Deezer ne répond pas (portail Wi-Fi…).
     private var networkRetry: Task<Void, Never>?
     private static let networkRetryDelay: Duration = .seconds(30)
@@ -134,11 +138,50 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         pump()
     }
 
+    func resumeAfterStorageFull() {
+        guard storageFull else { return }
+        storageFull = false
+        pump()
+    }
+
+    /// Plus de place sur l'iPhone (écriture du fichier reçu, ou copie dans les téléchargements par le cœur).
+    private func isOutOfSpace(_ error: Error) -> Bool {
+        if let coreError = error as? CoreError, case .Api(let message) = coreError { return message.contains("os error 28") }
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain, ns.code == NSURLErrorCannotWriteToFile || ns.code == NSURLErrorCannotCreateFile { return true }
+        if ns.domain == NSCocoaErrorDomain, ns.code == NSFileWriteOutOfSpaceError { return true }
+        if ns.domain == NSPOSIXErrorDomain, ns.code == Int(ENOSPC) { return true }
+        if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? Error { return isOutOfSpace(underlying) }
+        return false
+    }
+
+    /// Titre arrêté faute de place : remis en file, et toute la file s'arrête (un seul message).
+    private func waitForSpace(_ id: Int64) {
+        if !storageFull { player?.showToast(tr("Plus assez de place sur l'iPhone : téléchargements en pause."), seconds: 6) }
+        storageFull = true
+        requeue(id)
+        finishBackgroundEventsIfPossible()
+    }
+
+    /// Remis « En attente », sans passer en échec : adresse et fichier reçu oubliés, il repartira de zéro.
+    private func requeue(_ id: Int64) {
+        tasks.removeValue(forKey: id)?.cancel()
+        core?.cancelDownload(id: id)
+        if var job = jobs[id] {
+            if let path = job.incomingPath { try? FileManager.default.removeItem(atPath: path) }
+            job.preparedURL = nil
+            job.incomingPath = nil
+            jobs[id] = job
+        }
+        save()
+        player?.downloadUpdated(DownloadUpdate(id: id, state: .queued, progress: 0, error: nil))
+    }
+
     /// Erreur due au réseau (absent, coupé, trop lent) plutôt qu'au titre lui-même.
     private func isNetworkError(_ error: Error) -> Bool {
         if !networkUp { return true }
         // Message du cœur pour toutes les erreurs de connexion (voir `friendly_error`).
-        if let coreError = error as? CoreError, case .Api(let message) = coreError, message.hasPrefix("Connexion trop faible") { return true }
+        if let coreError = error as? CoreError, case .Api(let message) = coreError, message.hasPrefix("Connexion trop faible") || message.hasPrefix("Deezer ne répond pas") { return true }
         let ns = error as NSError
         let codes = [NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost, NSURLErrorTimedOut,
                      NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost, NSURLErrorDNSLookupFailed,
@@ -148,17 +191,8 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
 
     /// Titre arrêté par le réseau : remis en file (« En attente »), sans passer en échec.
     private func waitForNetwork(_ id: Int64) {
-        tasks.removeValue(forKey: id)?.cancel()
-        core?.cancelDownload(id: id)
-        if var job = jobs[id] {
-            if let path = job.incomingPath { try? FileManager.default.removeItem(atPath: path) }
-            job.preparedURL = nil
-            job.incomingPath = nil
-            jobs[id] = job
-        }
         waitingNetwork.insert(id)
-        save()
-        player?.downloadUpdated(DownloadUpdate(id: id, state: .queued, progress: 0, error: nil))
+        requeue(id)
         // Réseau présent mais Deezer injoignable : nouvel essai plus tard (pas en boucle).
         if networkRetry == nil {
             networkRetry = Task { [weak self] in
@@ -179,6 +213,7 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
     }
 
     func enqueue(_ tracks: [Track]) -> [Track] {
+        storageFull = false // nouvelle demande : on réessaie (de la place a pu être libérée)
         var accepted: [Track] = []
         for track in tracks {
             if var existing = jobs[track.id] {
@@ -285,7 +320,7 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
     }
 
     private func pump() {
-        guard !restoring, core != nil else { return }
+        guard !restoring, !storageFull, core != nil else { return }
         for id in order {
             if !finishing.contains(id), player?.downloadedIds.contains(id) == true {
                 removeRecoveredJob(id)
@@ -457,6 +492,10 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
     }
 
     private func fail(_ id: Int64, error: Error) {
+        if isOutOfSpace(error) {
+            waitForSpace(id)
+            return
+        }
         // Message du cœur tel quel (« Connexion trop faible… ») plutôt que la description générique de Swift.
         fail(id, message: player?.describe(error) ?? error.localizedDescription)
     }

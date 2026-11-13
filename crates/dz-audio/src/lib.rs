@@ -414,6 +414,10 @@ impl Renderer {
                 None => *s = silence,
             }
         }
+        // Trou de lecture (réseau lent, tampon vide) : le son revient en fondu, pas d'un coup à plein volume (clic).
+        if starved && !fading {
+            *gain = 0;
+        }
         // Vidage demandé et son descendu à zéro pendant ce tour : tampon vidé tout de suite, sans attendre le tour suivant
         // (jusqu'à 0,1 s sur iPhone écran verrouillé).
         if flushing && *gain == 0 {
@@ -487,7 +491,7 @@ const IDLE_STOP: Duration = Duration::from_secs(30);
 mod ios_out {
     use super::Renderer;
     use std::ptr;
-    use std::sync::atomic::{AtomicPtr, AtomicU32, Ordering::SeqCst};
+    use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering::SeqCst};
     use std::sync::OnceLock;
     use std::thread;
     use std::time::{Duration, Instant};
@@ -498,6 +502,13 @@ mod ios_out {
 
     static SLOT: AtomicPtr<Renderer> = AtomicPtr::new(ptr::null_mut());
     static ACTIVE: AtomicU32 = AtomicU32::new(0);
+    /// AVAudioEngine relancé (appel, Siri, AirPods ou CarPlay branchés) : iOS l'avait arrêté sans laisser le son
+    /// descendre, le premier son repartait à plein volume (clic). Le prochain rendu repart donc en fondu.
+    static RESTARTING: AtomicBool = AtomicBool::new(false);
+
+    pub fn restarting() {
+        RESTARTING.store(true, SeqCst);
+    }
     /// Démarrer / arrêter AVAudioEngine : fonctions C données par Swift au lancement.
     static HOOKS: OnceLock<(extern "C" fn(), extern "C" fn())> = OnceLock::new();
 
@@ -545,7 +556,12 @@ mod ios_out {
         let (l, rt) = (std::slice::from_raw_parts_mut(left, frames), std::slice::from_raw_parts_mut(right, frames));
         match r.as_mut() {
             // SAFETY: le rendu installé n'est libéré qu'une fois ACTIVE revenu à 0 ; un seul thread de rendu.
-            Some(renderer) => renderer.render_planar(l, rt),
+            Some(renderer) => {
+                if RESTARTING.swap(false, SeqCst) {
+                    renderer.gain = 0;
+                }
+                renderer.render_planar(l, rt)
+            }
             None => {
                 l.fill(0.0);
                 rt.fill(0.0);
@@ -567,6 +583,12 @@ pub unsafe fn ios_render(left: *mut f32, right: *mut f32, frames: u32) {
     }
     // SAFETY: tampons non nuls de `frames` échantillons (contrat de la fonction).
     unsafe { ios_out::render(left, right, frames as usize) }
+}
+
+/// iPhone : AVAudioEngine va (re)démarrer ; le son repartira en fondu.
+#[cfg(target_os = "ios")]
+pub fn ios_output_restarting() {
+    ios_out::restarting();
 }
 
 /// iPhone : fonctions Swift qui démarrent et arrêtent AVAudioEngine (appelées depuis le thread du moteur).
@@ -1272,7 +1294,11 @@ impl Worker {
 
     fn start_track(&mut self, track: Track, start_ms: u64) {
         self.shared.idle.store(false, Ordering::Relaxed);
-        self.shared.duration_ms.store(track.duration_ms, Ordering::Relaxed);
+        // Enchaînement : le titre d'avant s'entend encore (jusqu'à 0,5 s) ; sa durée change quand le nouveau commence
+        // vraiment (voir `update_position`). Avant, l'écran verrouillé montrait l'ancien titre avec la nouvelle durée.
+        if self.segments.is_empty() {
+            self.shared.duration_ms.store(track.duration_ms, Ordering::Relaxed);
+        }
         let seq = self.next_seq;
         self.next_seq += 1;
         self.segments.push_back(Segment {
@@ -1425,7 +1451,15 @@ impl Worker {
                     self.cur = self.incoming.take();
                 }
                 let audible = self.segments.front().map(|s| s.id);
-                let Some(track) = self.cur.as_mut() else { return };
+                let Some(track) = self.cur.as_mut() else {
+                    // Plus rien à jouer (fin de file, titre en échec) : le saut était perdu et la reprise repartait de 0:00.
+                    // La position est gardée pour la reprise (voir `Resume` dans dz-core). Traité ici, dans l'ordre des
+                    // commandes : un saut envoyé juste après un chargement vise bien le titre chargé.
+                    if self.shared.idle.load(Ordering::Relaxed) {
+                        self.shared.position_ms.store(ms, Ordering::Relaxed);
+                    }
+                    return;
+                };
                 if Some(track.id) != audible {
                     return;
                 }

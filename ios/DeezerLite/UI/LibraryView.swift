@@ -49,6 +49,8 @@ struct LibraryView: View {
                             .foregroundStyle(.primary)
                             .frame(width: 36, height: 36)
                             .surface(Circle())
+                            .frame(width: 44, height: 44) // zone d'appui de 44 pt, cercle inchangé
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.pressable)
                     .accessibilityLabel(tr("Nouvelle playlist"))
@@ -111,7 +113,7 @@ struct LibraryView: View {
             }
             if !player.lovedOnHome {
                 Button { openRoute(.loved) } label: {
-                    ItemRow(title: player.lovedTitle, subtitle: tr("%@ titres", "\(player.lovedIds.count)")) {
+                    ItemRow(title: player.lovedTitle, subtitle: player.lovedIds.count == 1 ? tr("1 titre") : tr("%@ titres", "\(player.lovedIds.count)")) {
                         if let url = player.lovedCover {
                             CoverView(url: url, side: 64, radius: 10)
                         } else {

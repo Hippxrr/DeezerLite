@@ -449,10 +449,13 @@ struct PlayButton: View {
                         .contentTransition(.symbolEffect(.replace))
                 }
             }
-            .frame(width: size * 2, height: size * 2)
+            // Au moins 44 pt de large (mini-lecteur : 32) : un appui un peu à côté ouvrait le lecteur.
+            .frame(width: max(size * 2, 44), height: size * 2)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.pressable)
         .sensoryFeedback(.impact(weight: .light), trigger: taps)
+        .accessibilityLabel(player.status.playing ? tr("Pause") : tr("Lecture"))
     }
 }
 
@@ -463,14 +466,15 @@ struct LikeButton: View {
     let size: CGFloat
     /// Ajouts faits par un appui : seul cela déclenche le rebond et la vibration (pas l'arrivée sur un titre aimé).
     @State private var likes = 0
-    /// Retirer des titres aimés se confirme (ajouter, non).
-    @State private var confirmUnlike = false
+    /// Retirer des titres aimés se confirme (ajouter, non). Titre gardé à l'appui : si le titre change pendant que la
+    /// question est affichée, c'est bien celui-là qui est retiré (avant : le suivant).
+    @State private var unlike: Track?
 
     var body: some View {
         let liked = player.lovedIds.contains(track.id)
         Button {
             if liked {
-                confirmUnlike = true
+                unlike = track
             } else {
                 likes += 1
                 player.setLiked(track, true)
@@ -484,9 +488,13 @@ struct LikeButton: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .buttonStyle(.pressable)
+        .accessibilityLabel(liked ? tr("Retirer des titres aimés") : tr("J'aime"))
+        .accessibilityAddTraits(liked ? .isSelected : [])
         .sensoryFeedback(.success, trigger: likes)
-        .confirmationDialog(tr("Retirer « %@ » de « %@ » ?", track.title, player.lovedTitle), isPresented: $confirmUnlike, titleVisibility: .visible) {
-            Button(tr("Retirer"), role: .destructive) { player.setLiked(track, false) }
+        .confirmationDialog(tr("Retirer « %@ » de « %@ » ?", unlike?.title ?? track.title, player.lovedTitle),
+                            isPresented: Binding(get: { unlike != nil }, set: { if !$0 { unlike = nil } }),
+                            titleVisibility: .visible, presenting: unlike) { t in
+            Button(tr("Retirer"), role: .destructive) { player.setLiked(t, false) }
         }
     }
 }
@@ -568,7 +576,8 @@ struct NowPlayingView: View {
     /// Grande pochette, ou à sa place la file d'attente ou les paroles (comme dans Apple Music).
     enum Panel { case cover, queue, lyrics }
     @State private var panel: Panel = .cover
-    @State private var showPlaylists = false
+    /// Titre à ajouter à une playlist, gardé à l'appui sur « + » (le titre peut changer pendant le choix).
+    @State private var addToPlaylist: Track?
     /// Mode épuré (appui long sur la pochette) : seuls la pochette, le titre, l'artiste et la barre restent.
     @State private var clean = false
     /// Doigt posé sur le lecteur : revient à `false` même si le système annule le geste, sans `onEnded`.
@@ -661,7 +670,10 @@ struct NowPlayingView: View {
             VStack(alignment: .leading, spacing: 3) {
                 // Titre trop long : réduit pour tenir sur la ligne, plutôt que coupé par « … ».
                 Text(player.current?.title ?? "").font(.title3.weight(.bold)).lineLimit(1).minimumScaleFactor(0.5)
-                if let t = player.current {
+                if let t = player.current, t.id == 0 {
+                    // Flow en chargement (« Chargement… ») : pas de menu, il n'y a ni artiste ni crédits à ouvrir.
+                    Text(t.artist).font(.title3).foregroundStyle(.white.opacity(0.65)).lineLimit(1)
+                } else if let t = player.current {
                     // Appui sur l'artiste : choisir lequel ouvrir (tous ceux d'un feat), ou l'album.
                     Menu {
                         ForEach(t.artistLinks, id: \.id) { a in
@@ -716,15 +728,16 @@ struct NowPlayingView: View {
     @ViewBuilder
     private func trackButtons(size: CGFloat, plus: Bool, heart: Bool) -> some View {
         if let t = player.current, t.id != 0 {
-            Button { showPlaylists = true } label: {
+            Button { addToPlaylist = t } label: {
                 Image(systemName: "plus.circle.fill")
                     .font(.system(size: size + 4))
                     .symbolRenderingMode(.hierarchical)
                     .frame(width: 40, height: 44)
             }
             .buttonStyle(.pressable)
-            .popover(isPresented: $showPlaylists, arrowEdge: .bottom) {
-                PlaylistPicker(track: t) { showPlaylists = false }
+            .accessibilityLabel(tr("Ajouter à une playlist"))
+            .popover(item: $addToPlaylist, arrowEdge: .bottom) { picked in
+                PlaylistPicker(track: picked) { addToPlaylist = nil }
                     .environment(player)
                     .presentationCompactAdaptation(.popover)
                     .preferredColorScheme(.dark)
@@ -762,6 +775,7 @@ struct NowPlayingView: View {
             Button { player.previous() } label: {
                 Image(systemName: "backward.fill").font(.system(size: 32)).frame(width: 64, height: 64)
             }
+            .accessibilityLabel(tr("Titre précédent"))
             .skipEnabled(player.hasPrevious)
             Spacer()
             PlayButton(size: 40)
@@ -769,6 +783,7 @@ struct NowPlayingView: View {
             Button { player.next() } label: {
                 Image(systemName: "forward.fill").font(.system(size: 32)).frame(width: 64, height: 64)
             }
+            .accessibilityLabel(tr("Titre suivant"))
             .skipEnabled(player.hasNext)
             Spacer()
             if player.isFlow {
@@ -812,6 +827,8 @@ struct NowPlayingView: View {
                 }
         }
         .buttonStyle(.pressable)
+        .accessibilityLabel(target == .lyrics ? tr("Paroles") : tr("File d'attente"))
+        .accessibilityAddTraits(on ? .isSelected : [])
     }
 }
 
@@ -929,7 +946,16 @@ private struct CoverCarousel: View {
             if let previous { CoverView(url: previous.coverUrl, side: side, radius: 14, load: open).id(previous.coverUrl ?? "").offset(x: -step) }
             if let next { CoverView(url: next.coverUrl, side: side, radius: 14, load: open).id(next.coverUrl ?? "").offset(x: step) }
             // Lecteur fermé : pas de téléchargement de la grande pochette à chaque titre.
-            CoverView(url: current?.coverUrl, side: side, radius: 14, load: open)
+            Group {
+                if current?.id == 0 {
+                    // Flow en chargement : indicateur, pas la pochette de secours des MP3 importés.
+                    RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.white.opacity(0.08))
+                        .frame(width: side, height: side)
+                        .overlay { ProgressView().controlSize(.large).tint(.white) }
+                } else {
+                    CoverView(url: current?.coverUrl, side: side, radius: 14, load: open)
+                }
+            }
                 .id(current?.coverUrl ?? "")
                 .shadow(color: .black.opacity(0.4), radius: active ? 24 : 12, y: active ? 14 : 6)
                 // Pochette réduite en pause, pleine taille en lecture (comme Apple Music).
@@ -981,7 +1007,9 @@ private struct CoverCarousel: View {
 /// pas (elle est refaite à l'ouverture, directement à la bonne position).
 struct ScrubBar: View {
     @Environment(Player.self) private var player
-    @State private var dragging: Double?
+    /// Position tenue sous le doigt. `@GestureState` : remise à zéro aussi quand iOS interrompt le geste (appel), sinon
+    /// la barre restait épaisse et figée jusqu'au titre suivant.
+    @GestureState private var dragging: Double?
 
     var body: some View {
         TimelineView(.animation(minimumInterval: 0.5, paused: dragging != nil || !player.status.playing || !player.showFullPlayer)) { ctx in
@@ -1002,11 +1030,8 @@ struct ScrubBar: View {
                     .contentShape(Rectangle())
                     .gesture(
                         DragGesture(minimumDistance: 0)
-                            .onChanged { v in dragging = min(max(v.location.x / geo.size.width, 0), 1) * total }
-                            .onEnded { _ in
-                                if let d = dragging { player.seek(seconds: d) }
-                                dragging = nil
-                            }
+                            .updating($dragging) { v, state, _ in state = min(max(v.location.x / geo.size.width, 0), 1) * total }
+                            .onEnded { v in player.seek(seconds: min(max(v.location.x / geo.size.width, 0), 1) * total) }
                     )
                     .animation(.spring(response: 0.25, dampingFraction: 0.8), value: dragging == nil)
                 }
@@ -1015,20 +1040,21 @@ struct ScrubBar: View {
                     Text(formatTime(shown))
                     Spacer()
                     Text("-" + formatTime(total - shown))
+                        .opacity(player.status.durationMs == 0 ? 0 : 1) // durée pas encore connue : pas de « -0:01 »
                 }
                 .font(.caption2.monospacedDigit().weight(.semibold))
                 .foregroundStyle(.white.opacity(dragging == nil ? 0.55 : 0.9))
             }
+            // Ici, recalculé avec l'affichage : avant, VoiceOver lisait la position du dernier événement (« 0:00 »).
+            .accessibilityElement()
+            .accessibilityLabel(tr("Position"))
+            .accessibilityValue(tr("%@ sur %@", formatTime(shown), formatTime(total)))
+            .accessibilityAdjustableAction { dir in
+                let target = player.position(at: .now) + (dir == .increment ? 15 : -15)
+                player.seek(seconds: min(max(target, 0), max(total - 1, 0)))
+            }
         }
         .sensoryFeedback(.selection, trigger: dragging == nil)
-        .accessibilityElement()
-        .accessibilityLabel(tr("Position"))
-        .accessibilityValue(tr("%@ sur %@", formatTime(player.position(at: .now)), formatTime(Double(player.status.durationMs) / 1000)))
-        .accessibilityAdjustableAction { dir in
-            let total = Double(player.status.durationMs) / 1000
-            let target = player.position(at: .now) + (dir == .increment ? 15 : -15)
-            player.seek(seconds: min(max(target, 0), max(total - 1, 0)))
-        }
     }
 }
 
@@ -1058,6 +1084,7 @@ private struct SoundMenuButton: View {
                 .frame(width: 44, height: 44)
         }
         .buttonStyle(.pressable)
+        .accessibilityLabel(tr("Son"))
         .popover(isPresented: $open, arrowEdge: .bottom) {
             SoundMenu()
                 .environment(player)
@@ -1368,7 +1395,7 @@ struct CreditsView: View {
                         }
                         if credits.label != nil || credits.releaseDate != nil {
                             CreditCard(title: tr("Sortie")) {
-                                if let label = credits.label { LabeledContent("Label", value: label) }
+                                if let label = credits.label { LabeledContent(tr("Label"), value: label) }
                                 if let date = credits.releaseDate { LabeledContent(tr("Date"), value: formatDay(date)) }
                             }
                         }

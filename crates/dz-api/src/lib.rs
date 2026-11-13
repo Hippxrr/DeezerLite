@@ -27,10 +27,18 @@ const MEDIA_URL: &str = "https://media.deezer.com/v1/get_url";
 const UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
                   (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
+/// Adresse retirée : reqwest l'ajoute au message (« … for url (…) »), avec le jeton de la session ou l'adresse signée du
+/// fichier ; elle finissait dans les bulles d'erreur.
+impl From<reqwest::Error> for DeezerError {
+    fn from(e: reqwest::Error) -> Self {
+        Self::Http(e.without_url())
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum DeezerError {
     #[error("http: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(reqwest::Error),
     #[error("url: {0}")]
     Url(#[from] url::ParseError),
     #[error("json: {0}")]
@@ -521,10 +529,17 @@ impl DeezerClient {
         if let Some(e) = gw_error(&env.error) {
             return Err(DeezerError::Gateway(e));
         }
-        let data: UserData =
-            serde_json::from_value(env.results.ok_or(DeezerError::EmptyResults)?)?;
-
-        // USER_ID == 0 => cookie arl absent/invalide (session anonyme).
+        let results = env.results.ok_or(DeezerError::EmptyResults)?;
+        // USER_ID == 0 => cookie arl absent/invalide (session anonyme). Vérifié avant le reste : la réponse d'une session
+        // anonyme peut ne pas avoir les autres champs, et l'ARL expiré passait alors pour une absence de réseau (l'écran
+        // de connexion ne revenait pas).
+        if let Some(user) = results.get("USER") {
+            let id = user.get("USER_ID").and_then(|v| v.as_u64().or_else(|| v.as_str()?.parse().ok())).unwrap_or(0);
+            if id == 0 {
+                return Err(DeezerError::InvalidArl);
+            }
+        }
+        let data: UserData = serde_json::from_value(results)?;
         if data.user.id == 0 {
             return Err(DeezerError::InvalidArl);
         }

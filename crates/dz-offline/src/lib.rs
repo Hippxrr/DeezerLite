@@ -211,8 +211,11 @@ pub struct OfflineStore {
     /// Une seule écriture de manifest à la fois : deux écritures parallèles se disputaient le même fichier temporaire,
     /// et un instantané plus ancien pouvait être écrit en dernier (titre perdu, puis son audio effacé comme orphelin).
     persist_lock: Arc<Mutex<()>>,
-    /// Incrémenté par `clear()` : un téléchargement commencé avant l'effacement n'est pas enregistré après.
+    /// Incrémenté par `clear()` (déconnexion) : écoutes et compte (voir `generation()`).
     generation: Arc<AtomicU64>,
+    /// Incrémenté par chaque effacement des téléchargements (déconnexion ou « Tout effacer ») : un téléchargement
+    /// commencé avant n'est pas enregistré après.
+    wipes: Arc<AtomicU64>,
     /// Lignes du journal depuis la dernière réécriture de `downloads.json` (voir `JOURNAL`), sous `persist_lock`.
     journal_len: Arc<AtomicU64>,
 }
@@ -355,8 +358,9 @@ impl OfflineStore {
                 changed = true;
             }
         }
-        // Fichier des écoutes illisible : on repart de zéro plutôt que d'empêcher l'app de démarrer.
-        let mut listens: ListensFile = read_manifest(&root.join("listens.json")).unwrap_or_default();
+        // Fichier des écoutes illisible : mis de côté (`listens.json.corrupt`, avant : écrasé à la première écriture) ;
+        // on repart de zéro plutôt que d'empêcher l'app de démarrer. Sans effet sur les fichiers audio (`damaged`).
+        let mut listens: ListensFile = read_or_set_aside(&root.join("listens.json"), &mut false).unwrap_or_default();
         // Écoute mise de côté à une pause, puis app fermée avant la fin du titre : elle compte maintenant.
         let reopened = listens.open.take();
         if let Some(listen) = &reopened {
@@ -374,6 +378,7 @@ impl OfflineStore {
             listens: Arc::new(RwLock::new(listens)),
             persist_lock: Arc::new(Mutex::new(())),
             generation: Arc::new(AtomicU64::new(0)),
+            wipes: Arc::new(AtomicU64::new(0)),
             journal_len: Arc::new(AtomicU64::new(0)),
         };
         // Réécrit seulement si quelque chose a changé (avant : à chaque lancement). Un échec n'empêche pas de démarrer :
@@ -566,25 +571,26 @@ impl OfflineStore {
         first.map_or(Ok(()), Err)
     }
 
-    pub fn remove_collection_track(&self, kind: &str, id: u64, track_id: i64) -> io::Result<bool> {
+    /// `None` : titre absent de la collection. Sinon, les titres retirés du téléphone (vide s'il reste ailleurs).
+    pub fn remove_collection_track(&self, kind: &str, id: u64, track_id: i64) -> io::Result<Option<Vec<i64>>> {
         let mut collections = self
             .collections
             .write()
             .map_err(|_| io::Error::other("index des playlists verrouillé"))?;
         let Some(collection) = collections.get_mut(&collection_key(kind, id)) else {
-            return Ok(false);
+            return Ok(None);
         };
         let previous = collection.track_ids.len();
         collection.track_ids.retain(|candidate| *candidate != track_id);
         if collection.track_ids.len() == previous {
-            return Ok(false);
+            return Ok(None);
         }
         drop(collections);
         let saved = self.persist_collections();
         // Retiré de la playlist (ou des Titres aimés) : plus téléchargé, sauf s'il l'a été pour lui-même ou reste ailleurs.
-        self.remove_unused(&[track_id])?;
+        let removed = self.remove_unused(&[track_id])?;
         saved?;
-        Ok(true)
+        Ok(Some(removed))
     }
 
     /// Ajoute un titre en tête d'une collection téléchargée (titre aimé : du plus récent au plus ancien).
@@ -695,22 +701,15 @@ impl OfflineStore {
 
     /// Retire une écoute envoyée (ou refusée par Deezer) de la file.
     pub fn remove_listen(&self, listen: &PendingListen) -> io::Result<()> {
-        let index = {
+        {
             let mut listens = self.listens.write().map_err(|_| io::Error::other("écoutes verrouillées"))?;
             let Some(index) = listens.queue.iter().position(|l| l == listen) else { return Ok(()) };
             listens.queue.remove(index);
-            index
-        };
-        // Fichier pas réécrit (disque plein) : l'écoute y est encore ; remise aussi en mémoire, pour que l'envoi s'arrête
-        // (voir `flush_listens`) au lieu de la renvoyer au prochain lancement en la comptant deux fois.
-        let saved = self.persist_listens();
-        if saved.is_err() {
-            if let Ok(mut listens) = self.listens.write() {
-                let at = index.min(listens.queue.len());
-                listens.queue.insert(at, listen.clone());
-            }
         }
-        saved
+        // Fichier pas réécrit (disque plein) : l'écoute n'est plus en mémoire, elle ne repart donc plus pendant cette
+        // session ; la prochaine écriture réussie l'efface du fichier. Au pire, un seul renvoi au lancement suivant.
+        // (La remettre en mémoire la faisait renvoyer à Deezer à chaque envoi : comptée plusieurs fois.)
+        self.persist_listens()
     }
 
     /// Écoute en cours mise de côté (à une pause) ou oubliée (`None`, à la fin de l'écoute). Rien n'est écrit si rien
@@ -764,13 +763,25 @@ impl OfflineStore {
         Ok(queued)
     }
 
+    /// Déconnexion : téléchargements et écoutes du compte.
     pub fn clear(&self) -> io::Result<()> {
-        // Les téléchargements en cours ne seront pas enregistrés après l'effacement (voir `insert_if_current`).
         self.generation.fetch_add(1, Ordering::AcqRel);
         // Écoutes du compte qui se déconnecte : jamais envoyées au nom du compte suivant.
         if let Ok(mut listens) = self.listens.write() {
             *listens = ListensFile::default();
         }
+        self.wipe(true)
+    }
+
+    /// « Tout effacer » des téléchargements : les écoutes pas encore envoyées et celle en cours restent (avant, elles
+    /// étaient effacées avec, et le titre en cours n'était jamais compté).
+    pub fn clear_downloads(&self) -> io::Result<()> {
+        self.wipe(false)
+    }
+
+    fn wipe(&self, with_listens: bool) -> io::Result<()> {
+        // Les téléchargements en cours ne seront pas enregistrés après l'effacement (voir `insert_if_current`).
+        self.wipes.fetch_add(1, Ordering::AcqRel);
         // Tout est vidé en mémoire et sur le disque AVANT d'écrire quoi que ce soit : disque plein, la première écriture
         // échouait et rien n'était effacé (les téléchargements du compte précédent restaient).
         if let Ok(mut pending) = self.pending.write() {
@@ -784,13 +795,22 @@ impl OfflineStore {
         }
         // Manifests vides écrits AVANT de supprimer les fichiers : l'app tuée entre les deux laissait sinon les
         // playlists de l'ancien compte (titres à 0/N), que la synchro retéléchargeait pour le compte suivant.
-        let written = [
-            ("listens.json", self.persist_listens()),
+        let mut written = vec![
             ("pending.json", self.persist_pending()),
             ("downloads.json", self.persist()),
             ("collections.json", self.persist_collections()),
         ];
+        if with_listens {
+            written.insert(0, ("listens.json", self.persist_listens()));
+        }
         let _ = std::fs::remove_file(self.root.join(JOURNAL));
+        // Listes illisibles mises de côté : elles gardaient les titres et playlists du compte effacé.
+        for name in ["downloads.json.corrupt", "collections.json.corrupt"] {
+            let _ = std::fs::remove_file(self.root.join(name));
+        }
+        if with_listens {
+            let _ = std::fs::remove_file(self.root.join("listens.json.corrupt"));
+        }
         for folder in ["audio", "covers", "lyrics"] {
             if let Ok(files) = std::fs::read_dir(self.root.join(folder)) {
                 for path in files.flatten().map(|f| f.path()) {
@@ -849,18 +869,18 @@ impl OfflineStore {
     /// Utilisé par les tests ; les téléchargements passent par `insert_if_current` / `insert_if_pending`.
     #[cfg(test)]
     fn insert(&self, entry: OfflineTrack) -> io::Result<()> {
-        self.insert_if_current(entry, self.generation()).map(|_| ())
+        self.insert_if_current(entry, self.wipes.load(Ordering::Acquire)).map(|_| ())
     }
 
     /// Enregistre un titre seulement si aucun effacement complet n'a eu lieu depuis le début de son téléchargement.
-    fn insert_if_current(&self, mut entry: OfflineTrack, generation: u64) -> io::Result<bool> {
+    fn insert_if_current(&self, mut entry: OfflineTrack, wipes: u64) -> io::Result<bool> {
         entry.pinned |= !self.in_collection(entry.info.id);
         // Verrou des écritures pris d'abord (même ordre que `write_manifest`) : la ligne du journal ne peut pas arriver
         // après une réécriture complète qui aurait déjà retiré ce titre.
         let _guard = self.persist_lock.lock().map_err(|_| io::Error::other("écriture des manifests verrouillée"))?;
         let previous = {
             let mut entries = self.entries.write().map_err(|_| io::Error::other("index des téléchargements verrouillé"))?;
-            if self.generation.load(Ordering::Acquire) != generation {
+            if self.wipes.load(Ordering::Acquire) != wipes {
                 return Ok(false);
             }
             entry.pinned |= entries.get(&entry.info.id).is_some_and(|old| old.pinned);
@@ -965,7 +985,10 @@ impl OfflineStore {
         if self.journal_len.load(Ordering::Acquire) >= JOURNAL_MAX as u64 {
             return self.persist_entries_locked();
         }
-        let mut line = serde_json::to_vec(entry).map_err(io::Error::other)?;
+        // Saut de ligne AVANT aussi : une ligne coupée net (coupure de courant) ne se colle plus à la suivante, qui était
+        // alors illisible (titre perdu, son audio effacé comme orphelin). Les lignes vides sont ignorées à la lecture.
+        let mut line = vec![b'\n'];
+        line.extend(serde_json::to_vec(entry).map_err(io::Error::other)?);
         line.push(b'\n');
         let mut file = std::fs::OpenOptions::new().create(true).append(true).open(self.root.join(JOURNAL))?;
         let start = file.metadata()?.len();
@@ -1083,7 +1106,17 @@ fn sync_removal_limit(previous: usize) -> usize {
     (previous / 4).max(20)
 }
 
-pub async fn store_collection(api: Arc<DeezerClient>, store: OfflineStore, mut collection: OfflineCollection) -> Result<OfflineCollection, DownloadError> {
+pub async fn store_collection(api: Arc<DeezerClient>, store: OfflineStore, collection: OfflineCollection) -> Result<OfflineCollection, DownloadError> {
+    store_collection_removing(api, store, collection).await.map(|(saved, _)| saved)
+}
+
+/// Comme `store_collection`, avec les titres retirés du téléphone parce qu'ils ne sont plus dans la collection chez
+/// Deezer (l'app annule leur téléchargement s'il était encore en attente).
+pub async fn store_collection_removing(
+    api: Arc<DeezerClient>,
+    store: OfflineStore,
+    mut collection: OfflineCollection,
+) -> Result<(OfflineCollection, Vec<i64>), DownloadError> {
     let kind = collection.kind.clone();
     let id = collection.id;
     let previous = store.collections.read().ok().and_then(|collections| collections.get(&collection_key(&kind, id)).cloned());
@@ -1100,17 +1133,21 @@ pub async fn store_collection(api: Arc<DeezerClient>, store: OfflineStore, mut c
     let same_url = previous.as_ref().is_some_and(|saved| saved.cover_url == collection.cover_url);
     // L'ancienne pochette reste en place pendant le téléchargement de la nouvelle (gardée si celui-ci échoue).
     collection.cover = previous_cover.clone();
-    store.insert_collection(collection.clone())?;
     // Titres retirés de la collection chez Deezer (synchro) : plus téléchargés, sauf s'ils l'ont été pour eux-mêmes ou
     // restent dans une autre collection. Une liste bien plus courte qu'avant peut venir d'une réponse incomplète de
     // Deezer (page manquante) : rien n'est supprimé dans ce cas, mieux vaut garder des titres en trop qu'en perdre.
-    if let Some(saved) = &previous {
+    // Ils restent alors dans la collection : sortis de toute collection, ils devenaient des titres téléchargés seuls,
+    // gardés pour toujours (même la collection supprimée).
+    let dropped: Vec<i64> = previous.as_ref().map_or_else(Vec::new, |saved| {
         let kept: BTreeSet<i64> = collection.track_ids.iter().copied().collect();
-        let dropped: Vec<i64> = saved.track_ids.iter().copied().filter(|id| !kept.contains(id)).collect();
-        if !dropped.is_empty() && dropped.len() <= sync_removal_limit(saved.track_ids.len()) {
-            store.remove_unused(&dropped)?;
-        }
+        saved.track_ids.iter().copied().filter(|id| !kept.contains(id)).collect()
+    });
+    let suspicious = previous.as_ref().is_some_and(|saved| dropped.len() > sync_removal_limit(saved.track_ids.len()));
+    if suspicious {
+        collection.track_ids.extend(dropped.iter().copied());
     }
+    store.insert_collection(collection.clone())?;
+    let removed = if suspicious || dropped.is_empty() { Vec::new() } else { store.remove_unused(&dropped)? };
     if !(same_url && previous_cover.is_some()) {
         if let Some(url) = collection.cover_url.as_deref().filter(|url| is_remote(url)) {
             let safe_kind: String = kind.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
@@ -1120,7 +1157,7 @@ pub async fn store_collection(api: Arc<DeezerClient>, store: OfflineStore, mut c
             }
         }
     }
-    Ok(store.collection(&kind, id).map(|(collection, _)| collection).unwrap_or(collection))
+    Ok((store.collection(&kind, id).map(|(collection, _)| collection).unwrap_or(collection), removed))
 }
 
 pub async fn download_track(
@@ -1131,7 +1168,7 @@ pub async fn download_track(
     cancelled: Arc<AtomicBool>,
     progress: impl Fn(u64, Option<u64>) + Send + Sync,
 ) -> Result<OfflineTrack, DownloadError> {
-    let generation = store.generation.load(Ordering::Acquire);
+    let wipes = store.wipes.load(Ordering::Acquire);
     let id = info.id;
     let resolved = api.media_with_recovery(id, Some(info), quality).await?;
     let (media, stream_id, mut info) = (resolved.media, resolved.stream_id, resolved.info);
@@ -1217,7 +1254,7 @@ pub async fn download_track(
     };
     // Écriture sur le disque hors des deux threads du cœur (partagés avec le lecteur).
     let saving = (store.clone(), entry.clone());
-    let saved = tokio::task::spawn_blocking(move || saving.0.insert_if_current(saving.1, generation))
+    let saved = tokio::task::spawn_blocking(move || saving.0.insert_if_current(saving.1, wipes))
         .await
         .unwrap_or_else(|error| Err(io::Error::other(error)));
     match saved {
@@ -1781,7 +1818,7 @@ mod tests {
         let store = OfflineStore::open(root.clone()).unwrap();
         std::fs::create_dir_all(root.join(JOURNAL)).unwrap(); // journal impossible à écrire
         let entry = OfflineTrack { info: info(42), ext: "mp3".into(), bytes: 5, downloaded_at: 1, cover: None, cover_version: 0, pinned: false, cover_tries: 0, cover_retry_at: 0 };
-        assert!(store.insert_if_current(entry.clone(), store.generation()).is_err());
+        assert!(store.insert_if_current(entry.clone(), store.wipes.load(Ordering::Acquire)).is_err());
         assert!(store.list().is_empty());
 
         let (job, _, _) = native_pending(&root);
@@ -1902,8 +1939,8 @@ mod tests {
         let collection = OfflineCollection::new("playlist".into(), 10, true, "Ma playlist".into(), String::new(), None, vec![42]);
         store_collection(Arc::new(DeezerClient::new().unwrap()), store.clone(), collection).await.unwrap();
 
-        assert!(store.remove_collection_track("playlist", 10, 42).unwrap());
-        assert!(!store.remove_collection_track("playlist", 10, 42).unwrap());
+        assert!(store.remove_collection_track("playlist", 10, 42).unwrap().is_some());
+        assert!(store.remove_collection_track("playlist", 10, 42).unwrap().is_none());
         assert!(store.collection("playlist", 10).unwrap().1.is_empty());
         assert!(store.local(42).is_some());
         assert!(audio_path(&store.root, 42, "mp3").exists());
@@ -1995,12 +2032,12 @@ mod tests {
         insert_file(&store, 2);
         insert_file(&store, 3);
 
-        assert!(store.remove_collection_track("loved", 0, 2).unwrap());
+        assert!(store.remove_collection_track("loved", 0, 2).unwrap().is_some());
         assert!(store.local(2).is_none(), "retiré des Titres aimés : plus téléchargé");
         assert!(!audio_path(&root, 2, "mp3").exists());
-        assert!(store.remove_collection_track("loved", 0, 1).unwrap());
+        assert!(store.remove_collection_track("loved", 0, 1).unwrap().is_some());
         assert!(store.local(1).is_some(), "téléchargé seul : gardé");
-        assert!(store.remove_collection_track("loved", 0, 3).unwrap());
+        assert!(store.remove_collection_track("loved", 0, 3).unwrap().is_some());
         assert!(store.local(3).is_some(), "encore dans une playlist téléchargée");
         assert!(store.standalone_infos().iter().all(|t| t.id != 3));
         std::fs::remove_dir_all(root).unwrap();
@@ -2015,13 +2052,18 @@ mod tests {
         for id in &all {
             insert_file(&store, *id);
         }
-        // Un titre retiré chez Deezer.
-        store_collection(api(), store.clone(), playlist(10, (1..=39).collect())).await.unwrap();
+        // Un titre retiré chez Deezer : supprimé du téléphone, et signalé (son téléchargement en attente est annulé).
+        let (_, removed) = store_collection_removing(api(), store.clone(), playlist(10, (1..=39).collect())).await.unwrap();
+        assert_eq!(removed, vec![40]);
         assert!(store.local(40).is_none());
         assert!(store.local(39).is_some());
-        // Réponse tronquée (page manquante) : 34 titres en moins d'un coup, rien n'est supprimé.
-        store_collection(api(), store.clone(), playlist(10, (1..=5).collect())).await.unwrap();
+        // Réponse tronquée (page manquante) : 34 titres en moins d'un coup, rien n'est supprimé, et ils restent dans la
+        // collection (pas des titres téléchargés seuls, gardés pour toujours).
+        let (_, removed) = store_collection_removing(api(), store.clone(), playlist(10, (1..=5).collect())).await.unwrap();
+        assert!(removed.is_empty());
         assert!((1..=39).all(|id| store.local(id).is_some()));
+        assert_eq!(store.collection("playlist", 10).unwrap().0.track_ids.len(), 39);
+        assert!((1..=39).all(|id| store.in_collection(id)));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2271,7 +2313,7 @@ mod tests {
         }
         // Une ligne par titre, sans réécrire tout le manifest.
         let journal = std::fs::read_to_string(root.join(JOURNAL)).unwrap();
-        assert_eq!(journal.lines().count(), 3);
+        assert_eq!(journal.lines().filter(|l| !l.is_empty()).count(), 3);
         assert!(!root.join("downloads.json").exists());
         // Coupure pendant l'écriture d'une ligne : elle est ignorée, les autres restent.
         std::io::Write::write_all(&mut std::fs::OpenOptions::new().append(true).open(root.join(JOURNAL)).unwrap(), b"{\"info\":{\"id\":4").unwrap();
@@ -2291,7 +2333,7 @@ mod tests {
         for id in 10..10 + JOURNAL_MAX as i64 + 1 {
             insert_file(&store, id);
         }
-        assert!(std::fs::read_to_string(root.join(JOURNAL)).map_or(0, |j| j.lines().count()) <= 1);
+        assert!(std::fs::read_to_string(root.join(JOURNAL)).map_or(0, |j| j.lines().filter(|l| !l.is_empty()).count()) <= 1);
         drop(store);
         assert_eq!(OfflineStore::open(root.clone()).unwrap().list().len(), 3 + JOURNAL_MAX + 1);
         std::fs::remove_dir_all(root).unwrap();
@@ -2521,6 +2563,51 @@ mod tests {
 
         std::fs::write(root.join("listens.json"), b"{broken").unwrap();
         assert!(OfflineStore::open(root.clone()).unwrap().pending_listens().is_empty());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn torn_journal_line_does_not_lose_the_next_download() {
+        let root = root("journal-torn");
+        let store = OfflineStore::open(root.clone()).unwrap();
+        // Ligne coupée net par une coupure de courant (pas de saut de ligne final).
+        std::fs::write(root.join(JOURNAL), b"{\"info\":{\"id\":4").unwrap();
+        insert_file(&store, 42);
+        drop(store);
+        assert!(OfflineStore::open(root.clone()).unwrap().local(42).is_some());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unreadable_listens_file_is_set_aside() {
+        let root = root("listens-corrupt");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("listens.json"), b"{broken").unwrap();
+        let store = OfflineStore::open(root.clone()).unwrap();
+        assert!(store.pending_listens().is_empty());
+        assert_eq!(std::fs::read(root.join("listens.json.corrupt")).unwrap(), b"{broken");
+        store.clear().unwrap();
+        assert!(!root.join("listens.json.corrupt").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn clearing_downloads_keeps_listens_waiting_to_be_sent() {
+        let root = root("downloads-clear");
+        let store = OfflineStore::open(root.clone()).unwrap();
+        insert_file(&store, 42);
+        let (gen, wipes) = (store.generation(), store.wipes.load(Ordering::Acquire));
+        store.queue_listen(listen(1, 100), gen).unwrap();
+        store.set_open_listen(Some(listen(2, 200)), gen).unwrap();
+        store.clear_downloads().unwrap();
+        assert!(store.list().is_empty() && !audio_path(&root, 42, "mp3").exists());
+        // Téléchargement commencé avant l'effacement : pas enregistré après.
+        let entry = OfflineTrack { info: info(43), ext: "mp3".into(), bytes: 5, downloaded_at: 1, cover: None, cover_version: 0, pinned: false, cover_tries: 0, cover_retry_at: 0 };
+        assert!(!store.insert_if_current(entry, wipes).unwrap());
+        // Le titre qui jouait pendant l'effacement est toujours compté à sa fin.
+        assert!(store.close_listen(Some(listen(2, 200)), gen).unwrap());
+        drop(store);
+        assert_eq!(OfflineStore::open(root.clone()).unwrap().pending_listens(), vec![listen(1, 100), listen(2, 200)]);
         std::fs::remove_dir_all(root).unwrap();
     }
 

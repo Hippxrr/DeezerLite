@@ -201,11 +201,16 @@ final class Player {
         }
     }
 
-    private func storeDownloadCollection(_ detail: Detail) async throws -> [Track] {
+    /// `refresh` : listes relues tout de suite (action de l'utilisateur) ; sinon hors du thread principal (synchro au
+    /// lancement : une relecture complète par collection, avec un contrôle de fichier par titre téléchargé).
+    private func storeDownloadCollection(_ detail: Detail, refresh: Bool = true) async throws -> [Track] {
         guard let core else { return [] }
-        try await core.downloadCollection(detail: detail)
-        refreshDownloads()
-        return detail.tracks.filter { !downloadedIds.contains($0.id) }
+        let removed = try await core.downloadCollection(detail: detail)
+        // Titres sortis de la collection : leur téléchargement en attente ne finit plus en titre téléchargé seul.
+        if !removed.isEmpty { BackgroundDownloadManager.shared.cancel(removed) }
+        if refresh { refreshDownloads() } else { scheduleDownloadsRefresh() }
+        // Titres pas encore sortis ou retirés : Deezer refuse de les télécharger (ils échouaient à chaque lancement).
+        return detail.tracks.filter { !downloadedIds.contains($0.id) && !$0.unavailable }
     }
 
     private func syncDownloadedCollection(kind: String, id: UInt64) async -> Bool {
@@ -222,7 +227,7 @@ final class Player {
             guard gen == profileGeneration else { return false }
             // La collection a pu être retirée des téléchargements pendant la requête.
             guard downloadedCollection(kind: kind, id: id) != nil else { return true }
-            let missing = try await storeDownloadCollection(fresh)
+            let missing = try await storeDownloadCollection(fresh, refresh: false)
             // Sauf ceux annulés ou supprimés à la main (voir `skippedDownloads`).
             let new = missing.filter { downloadStates[$0.id] == nil && !skippedDownloads.contains($0.id) }
             if !new.isEmpty { download(new) }
@@ -255,7 +260,8 @@ final class Player {
     private func removeDownloadedTrack(kind: String, id: UInt64, trackId: Int64) {
         guard let core, downloadedCollection(kind: kind, id: id) != nil else { return }
         do {
-            _ = try core.removeDownloadTrackFromCollection(kind: kind, id: Self.downloadId(kind: kind, id: id), trackId: trackId)
+            let removed = try core.removeDownloadTrackFromCollection(kind: kind, id: Self.downloadId(kind: kind, id: id), trackId: trackId)
+            if !removed.isEmpty { BackgroundDownloadManager.shared.cancel(removed) }
             refreshDownloads()
         } catch {
             showToast(tr("La copie hors ligne n'a pas pu être actualisée"), seconds: 4)
@@ -379,28 +385,35 @@ final class Player {
         } catch { message = describe(error) }
     }
 
+    /// Fichiers supprimés hors du thread principal : des centaines de titres figeaient l'app quelques secondes.
     func removeDownloadCollection(_ collection: DownloadCollection) {
         guard let core else { return }
-        do {
-            let ids = try core.removeDownloadCollection(kind: collection.kind, id: collection.id)
-            BackgroundDownloadManager.shared.cancel(ids)
-            // Copies hors ligne gardées en mémoire : elles montraient encore la collection supprimée.
-            forgetOfflineDetails()
-            refreshDownloads()
-            showToast(tr("%@ supprimé des téléchargements", collection.title))
-        } catch { message = describe(error) }
+        let (kind, id) = (collection.kind, collection.id)
+        Task {
+            do {
+                let ids = try await Task.detached(priority: .userInitiated) { try core.removeDownloadCollection(kind: kind, id: id) }.value
+                BackgroundDownloadManager.shared.cancel(ids)
+                // Copies hors ligne gardées en mémoire : elles montraient encore la collection supprimée.
+                forgetOfflineDetails()
+                refreshDownloads()
+                showToast(tr("%@ supprimé des téléchargements", collection.title))
+            } catch { message = describe(error) }
+        }
     }
 
     func clearDownloads() {
         guard let core else { return }
         BackgroundDownloadManager.shared.stopAll()
-        do {
-            try core.clearDownloads()
-            downloadStates = [:]
-            downloadTracks = [:]
-            refreshDownloads()
-            showToast(tr("Téléchargements effacés"))
-        } catch { message = describe(error) }
+        Task {
+            do {
+                // Tous les fichiers supprimés : hors du thread principal (l'app restait figée avec une grosse bibliothèque).
+                try await Task.detached(priority: .userInitiated) { try core.clearDownloads() }.value
+                downloadStates = [:]
+                downloadTracks = [:]
+                refreshDownloads()
+                showToast(tr("Téléchargements effacés"))
+            } catch { message = describe(error) }
+        }
     }
 
     func restoreDownloadQueue(_ tracks: [Track]) {
@@ -490,11 +503,13 @@ final class Player {
         downloadsRefreshTask = Task { [weak self] in
             try? await Task.sleep(for: .milliseconds(800))
             guard !Task.isCancelled else { return }
+            // Libéré avant la lecture : un titre qui finit pendant celle-ci programme une nouvelle relecture (avant, il
+            // était ignoré, et cette lecture plus ancienne le faisait disparaître de la liste).
+            self?.downloadsRefreshTask = nil
             let lists = await Task.detached(priority: .utility) {
                 (Set(core.downloads().map(\.id)), core.standaloneDownloads(), core.downloadCollections())
             }.value
             guard !Task.isCancelled, let self, version == self.downloadsVersion else { return }
-            self.downloadsRefreshTask = nil
             if self.downloadedIds != lists.0 { self.downloadedIds = lists.0 }
             self.downloads = lists.1
             self.downloadCollections = lists.2
@@ -660,7 +675,7 @@ final class Player {
     /// Lance un titre de l'historique : sa fiche est redemandée à Deezer si le cœur ne la connaît plus.
     func playHistoryTrack(_ entry: HistoryEntry) {
         guard let core, let id = entry.trackId else { return }
-        let before = current
+        let before = beforePlay()
         pendingRestore = nil
         activateOutput()
         current = Track(id: id, title: entry.title ?? "", artist: entry.subtitle ?? "", album: "", durationS: 0, coverUrl: entry.coverUrl,
@@ -671,9 +686,7 @@ final class Player {
             do {
                 try await core.playById(id: id)
             } catch {
-                loading = false
-                if current?.id == id { current = before } // rien n'a démarré : le titre qui joue reste affiché
-                showToast(describe(error), seconds: 4)
+                playFailed(error, before: before, ifShowing: id)
             }
         }
     }
@@ -873,6 +886,8 @@ final class Player {
             MainActor.assumeIsolated {
                 // Ouverture de session ratée plus tôt (Wi-Fi lent, portail…) : retentée au retour dans l'app.
                 self?.retrySessionIfNeeded()
+                // Téléchargements arrêtés faute de place : repris (de la place a pu être libérée dans Réglages).
+                BackgroundDownloadManager.shared.resumeAfterStorageFull()
             }
         }
         for name in [UIApplication.willResignActiveNotification, UIApplication.didEnterBackgroundNotification, UIApplication.willEnterForegroundNotification] {
@@ -981,6 +996,11 @@ final class Player {
             } catch {
                 loading = false
                 pendingRestore = last // un nouvel appui sur lecture la retente (avant : plus rien ne se passait)
+                // Titre gardé de nouveau affiché (avant : celui demandé, avec la position de l'autre).
+                if queue.indices.contains(queueIndex) {
+                    current = queue[queueIndex]
+                    shownIndex = queueIndex
+                }
                 showToast(describe(error), seconds: 4)
             }
         }
@@ -996,7 +1016,17 @@ final class Player {
     private(set) var switchingProfile = false
     /// Réglages ouverts : « Qui écoute ? » s'affiche par-dessus eux (iOS ne montre qu'une fenêtre à la fois depuis
     /// un même écran ; sinon la question n'apparaissait pas).
-    var settingsOpen = false
+    var settingsOpen = false {
+        // « Barre d'onglets complète » figée tant que les Réglages sont ouverts : changer de barre reconstruit les pages,
+        // et la feuille des Réglages (ouverte depuis l'une d'elles) se refermait. Figée dès l'ouverture : la figer au
+        // changement arrivait après la reconstruction. La nouvelle barre arrive à la fermeture.
+        didSet {
+            guard settingsOpen != oldValue else { return }
+            tabBarFullHeld = settingsOpen ? (UserDefaults.standard.object(forKey: "tabBarFull") as? Bool ?? true) : nil
+        }
+    }
+    /// Valeur de « Barre d'onglets complète » affichée pendant que les Réglages sont ouverts (voir `settingsOpen`).
+    private(set) var tabBarFullHeld: Bool?
     /// Change à chaque changement de profil (et à la déconnexion) : une réponse de Deezer demandée pour le profil
     /// d'avant, arrivée après, n'est pas affichée.
     @ObservationIgnored private var profileGeneration = 0
@@ -1026,6 +1056,7 @@ final class Player {
         if let saved = Self.savedProfile, !list.contains(where: { $0.id == saved }) {
             Self.savedProfile = nil
             core.setProfile(id: nil)
+            reloadProfileData()
         }
         guard list.count > 1 else { return }
         let current = list.first { $0.current }
@@ -1036,6 +1067,7 @@ final class Player {
         // Profil choisi devenu inaccessible (retiré du compte…) : le cœur a ouvert le titulaire.
         if current?.id != saved {
             Self.savedProfile = nil
+            reloadProfileData()
             showToast(tr("Ton profil n'est plus accessible : %@ est ouvert.", current?.name ?? tr("profil principal")), seconds: 4)
             choosingProfile = true
         }
@@ -1046,6 +1078,7 @@ final class Player {
         guard let core, !switchingProfile else { return }
         if p.current {
             Self.savedProfile = p.id
+            reloadProfileData()
             choosingProfile = false
             return
         }
@@ -1061,7 +1094,6 @@ final class Player {
             // Historique de recherche et éléments épinglés : ceux de ce profil (gardés à part pour chacun).
             history = HistoryEntry.load()
             pins = Pin.load()
-            pendingRestore = nil
             profileEpoch += 1
             // Onglets de la bibliothèque déjà ouverts (albums, artistes) : rechargés aussi, sinon ils restaient vides.
             let openTabs = library.keys.filter { $0 != 0 }
@@ -1083,7 +1115,17 @@ final class Player {
 
     /// « Qui écoute ? » fermé sans choisir : le profil ouvert est gardé (la question n'est plus posée).
     func keepCurrentProfile() {
-        if Self.savedProfile == nil, let id = currentProfile?.id { Self.savedProfile = id }
+        if Self.savedProfile == nil, let id = currentProfile?.id {
+            Self.savedProfile = id
+            reloadProfileData()
+        }
+    }
+
+    /// Profil enregistré changé : historique de recherche et épinglés relus pour lui. Avant, ceux du profil d'avant
+    /// (enfant retiré du compte) restaient affichés pour le titulaire, puis écrasaient les siens à la sauvegarde suivante.
+    private func reloadProfileData() {
+        history = HistoryEntry.load()
+        pins = Pin.load()
     }
 
     /// Ce qui venait du profil d'avant : accueil, bibliothèque, titres aimés, pages ouvertes, paroles.
@@ -1218,11 +1260,21 @@ final class Player {
     /// Change à chaque déconnexion : une ouverture de session lancée avant ne rouvre pas le compte.
     @ObservationIgnored private var accountGeneration = 0
 
+    /// Session refusée par Deezer en cours d'utilisation : même chose qu'au lancement (écran de connexion).
+    private func sessionExpired() {
+        guard loggedIn == true else { return }
+        accountGeneration += 1
+        forgetAccountCopies()
+        message = tr("Session Deezer expirée : reconnecte-toi.")
+    }
+
     func logout() async {
         guard let core else { return }
         accountGeneration += 1
         BackgroundDownloadManager.shared.stopAll()
         do { try await core.logout() } catch { message = describe(error) }
+        // Ouverture de session lancée pendant la déconnexion (réseau revenu, nouvel essai) : elle ne rouvre pas le compte.
+        accountGeneration += 1
         // Profil choisi oublié : un autre compte peut se connecter.
         Self.savedProfile = nil
         profileGeneration += 1
@@ -1544,17 +1596,49 @@ final class Player {
             play(playable, at: at)
             return
         }
+        guard let core else { return }
+        let before = beforePlay()
         pendingRestore = nil
         activateOutput()
         current = tracks[index]
         isFlow = false
         startLoading()
-        attempt { try $0.play(ids: tracks.map(\.id), index: UInt32(index)) }
+        let (ids, id) = (tracks.map(\.id), tracks[index].id)
+        do {
+            try core.play(ids: ids, index: UInt32(index))
+        } catch CoreError.UnknownTrack {
+            // Fiches oubliées par le cœur (grosse page ouverte avant d'autres) : redemandées à Deezer par paquets.
+            // Avant : « Titre inconnu » et 20 s de chargement sur les titres du haut des grosses listes.
+            Task {
+                do { try await core.restoreQueue(ids: ids, index: UInt32(index), positionMs: 0) }
+                catch { playFailed(error, before: before, ifShowing: id) }
+            }
+        } catch {
+            playFailed(error, before: before, ifShowing: id)
+        }
+    }
+
+    /// État d'avant une lecture demandée, remis par `playFailed` si rien n'a démarré.
+    private func beforePlay() -> (current: Track?, isFlow: Bool, restore: LastSession?) {
+        (current, isFlow, pendingRestore)
+    }
+
+    /// Rien n'a démarré : le titre qui joue reste affiché (écran verrouillé aussi), le Flow reste marqué, et une
+    /// dernière écoute en attente reste reprenable (avant : le bouton lecture ne faisait plus rien).
+    private func playFailed(_ error: Error, before: (current: Track?, isFlow: Bool, restore: LastSession?), ifShowing id: Int64?) {
+        loading = false
+        if current?.id == id {
+            current = before.current
+            isFlow = before.isFlow
+            pendingRestore = before.restore
+            NowPlaying.update(track: current, status: status)
+        }
+        showToast(describe(error), seconds: 4)
     }
 
     func playFlow() {
         guard let core else { return }
-        let before = (current: current, isFlow: isFlow, restore: pendingRestore)
+        let before = beforePlay()
         pendingRestore = nil
         activateOutput()
         isFlow = true
@@ -1567,16 +1651,7 @@ final class Player {
             do {
                 try await core.playFlow()
             } catch {
-                loading = false
-                // Rien n'a démarré : retour à l'état d'avant (un titre qui joue encore reste affiché, sur l'écran
-                // verrouillé aussi ; une dernière écoute en attente reste reprenable).
-                if current?.id == 0 {
-                    current = before.current
-                    isFlow = before.isFlow
-                    pendingRestore = before.restore
-                    NowPlaying.update(track: current, status: status)
-                }
-                showToast(describe(error), seconds: 4)
+                playFailed(error, before: before, ifShowing: 0)
             }
         }
     }
@@ -1584,12 +1659,13 @@ final class Player {
     /// Lance le mix inspiré d'un titre (« Mixes inspirés par » de l'accueil).
     func playTrackMix(_ id: UInt64) {
         guard let core else { return }
+        let before = beforePlay()
         pendingRestore = nil
         activateOutput()
         isFlow = false
         startLoading()
         Task {
-            do { try await core.playTrackMix(id: Int64(id)) } catch { loading = false; showToast(describe(error), seconds: 4) }
+            do { try await core.playTrackMix(id: Int64(id)) } catch { playFailed(error, before: before, ifShowing: before.current?.id) }
         }
     }
 
@@ -1726,7 +1802,8 @@ final class Player {
     }
 
     func queueAdd(_ tracks: [Track], next: Bool) {
-        attempt { try $0.queueAdd(ids: tracks.map(\.id), next: next) }
+        let pending = editPendingQueue { queue, index in queue.insert(contentsOf: tracks, at: next ? index + 1 : queue.count) }
+        if !pending { attempt { try $0.queueAdd(ids: tracks.map(\.id), next: next) } }
         showToast(next ? tr("Lu juste après") : tr("Ajouté à la file"))
     }
 
@@ -1928,10 +2005,44 @@ final class Player {
             loading = false
         }
     }
-    func queueRemove(_ index: Int) { attempt { try $0.queueRemove(index: UInt32(index)) } }
+    func queueRemove(_ index: Int) {
+        let pending = editPendingQueue { queue, current in
+            guard queue.indices.contains(index), index != current else { return }
+            queue.remove(at: index)
+            if index < current { current -= 1 }
+        }
+        if !pending { attempt { try $0.queueRemove(index: UInt32(index)) } }
+    }
 
     /// `to` : position finale du titre (déjà corrigée du décalage de SwiftUI).
-    func queueMove(from: Int, to: Int) { attempt { try $0.queueMove(from: UInt32(from), to: UInt32(to)) } }
+    func queueMove(from: Int, to: Int) {
+        let pending = editPendingQueue { queue, current in
+            guard queue.indices.contains(from), queue.indices.contains(to) else { return }
+            queue.insert(queue.remove(at: from), at: to)
+            if from == current { current = to }
+            else if from < current, to >= current { current -= 1 }
+            else if from > current, to <= current { current += 1 }
+        }
+        if !pending { attempt { try $0.queueMove(from: UInt32(from), to: UInt32(to)) } }
+    }
+
+    /// Dernière écoute pas encore relancée : le cœur n'a pas encore de file, la modification est faite sur la file
+    /// affichée et gardée pour la reprise. Avant, un ajout lançait le titre ajouté pendant que l'app restait affichée
+    /// en pause, et le bouton lecture relançait ensuite l'ancienne file. `false` : pas de reprise en attente.
+    private func editPendingQueue(_ change: (inout [Track], inout Int) -> Void) -> Bool {
+        guard var last = pendingRestore else { return false }
+        var tracks = queue, index = queueIndex
+        change(&tracks, &index)
+        guard tracks.indices.contains(index) else { return true }
+        queue = tracks
+        queueIndex = index
+        shownIndex = index
+        last.tracks = tracks.map { LastSession.SavedTrack($0) }
+        last.index = index
+        last.save()
+        pendingRestore = last
+        return true
+    }
 
     func toggleShuffle() {
         shuffle.toggle()
@@ -2020,9 +2131,15 @@ final class Player {
 
     func describe(_ error: Error) -> String {
         switch error as? CoreError {
-        case .Api(let m), .Keychain(let m): return m
+        case .Api(let m): return tr(m) // messages du cœur, en français : traduits s'ils sont connus
+        case .Keychain(let m): return m
         case .Player: return tr("Lecteur indisponible.")
         case .UnknownTrack: return tr("Titre inconnu : recharge la page.")
+        case .SessionExpired:
+            // ARL expiré ou révoqué pendant que l'app restait ouverte : retour à l'écran de connexion. Avant, tout
+            // échouait avec ce message jusqu'à ce que l'app soit tuée. Fait après coup : l'appelant finit d'abord.
+            if loggedIn == true { Task { [weak self] in self?.sessionExpired() } }
+            return tr("ARL invalide ou expiré.")
         case nil: return error.localizedDescription
         }
     }
@@ -2064,8 +2181,8 @@ final class Player {
             skipTarget = nil
             sentTarget = nil
             syncStatus()
-            // Message court du cœur (déjà traduit) : bulle discrète, pas une alerte à fermer.
-            showToast(m, seconds: 4)
+            // Message court du cœur (en français, traduit s'il est connu) : bulle discrète, pas une alerte à fermer.
+            showToast(tr(m), seconds: 4)
         case .stopped:
             loading = false
             syncStatus()

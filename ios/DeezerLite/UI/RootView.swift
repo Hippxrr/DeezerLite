@@ -132,62 +132,71 @@ struct LoginView: View {
         ZStack {
             LinearGradient(colors: [Theme.accent.opacity(0.55), Theme.background, Theme.background], startPoint: .top, endPoint: .bottom)
                 .ignoresSafeArea()
-            VStack(spacing: 22) {
-                Spacer()
-                Image(systemName: "waveform")
-                    .font(.system(size: 46, weight: .semibold))
-                    .foregroundStyle(Theme.onAccent)
-                    .frame(width: 96, height: 96)
-                    .background(Theme.accent,
-                                in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-                    .shadow(color: Theme.accent.opacity(0.5), radius: 24, y: 10)
-                VStack(spacing: 6) {
-                    Text("Deezer Lite").font(.largeTitle.bold())
-                    Text(tr("Ta musique Deezer, légère et rapide.")).font(.subheadline).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Button { web = true } label: {
-                    HStack {
-                        if busy { ProgressView().tint(Theme.onAccent) }
-                        Text(busy ? tr("Connexion…") : tr("Se connecter avec Deezer")).font(.headline)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 16)
-                    .foregroundStyle(Theme.onAccent)
-                    .background(Theme.accent, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                }
-                .buttonStyle(.pressable)
-                .disabled(busy)
+            // Défilable : sur un petit iPhone (SE), le champ arl passait sous le clavier. Toute la hauteur quand il y a la
+            // place (même mise en page qu'avant).
+            GeometryReader { geo in
+                ScrollView {
+                    VStack(spacing: 22) {
+                        Spacer()
+                        Image(systemName: "waveform")
+                            .font(.system(size: 46, weight: .semibold))
+                            .foregroundStyle(Theme.onAccent)
+                            .frame(width: 96, height: 96)
+                            .background(Theme.accent,
+                                        in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+                            .shadow(color: Theme.accent.opacity(0.5), radius: 24, y: 10)
+                        VStack(spacing: 6) {
+                            Text("Deezer Lite").font(.largeTitle.bold())
+                            Text(tr("Ta musique Deezer, légère et rapide.")).font(.subheadline).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button { web = true } label: {
+                            HStack {
+                                if busy { ProgressView().tint(Theme.onAccent) }
+                                Text(busy ? tr("Connexion…") : tr("Se connecter avec Deezer")).font(.headline)
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 16)
+                            .foregroundStyle(Theme.onAccent)
+                            .background(Theme.accent, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        }
+                        .buttonStyle(.pressable)
+                        .disabled(busy)
 
-                // Autre moyen : coller le cookie « arl » (comme sur la version bureau).
-                VStack(spacing: 12) {
-                    Button { withAnimation(.snappy) { showArl.toggle() } } label: {
-                        HStack(spacing: 6) {
-                            Text(tr("Utiliser un cookie arl"))
-                            Image(systemName: "chevron.down").rotationEffect(.degrees(showArl ? 180 : 0))
+                        // Autre moyen : coller le cookie « arl » (comme sur la version bureau).
+                        VStack(spacing: 12) {
+                            Button { withAnimation(.snappy) { showArl.toggle() } } label: {
+                                HStack(spacing: 6) {
+                                    Text(tr("Utiliser un cookie arl"))
+                                    Image(systemName: "chevron.down").rotationEffect(.degrees(showArl ? 180 : 0))
+                                }
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(.secondary)
+                            }
+                            if showArl {
+                                HStack(spacing: 10) {
+                                    SecureField("arl", text: $arl)
+                                        .textContentType(.password)
+                                        .textInputAutocapitalization(.never)
+                                        .autocorrectionDisabled()
+                                        .submitLabel(.go)
+                                        .onSubmit(loginWithArl)
+                                    Button(action: loginWithArl) { Image(systemName: "arrow.right.circle.fill").font(.title2) }
+                                        .disabled(arl.trimmingCharacters(in: .whitespaces).isEmpty || busy)
+                                }
+                                .padding(14)
+                                .surface(RoundedRectangle(cornerRadius: 14, style: .continuous), interactive: false)
+                                .transition(.opacity.combined(with: .move(edge: .top)))
+                            }
                         }
-                        .font(.subheadline.weight(.medium))
-                        .foregroundStyle(.secondary)
+                        .padding(.bottom, 12)
                     }
-                    if showArl {
-                        HStack(spacing: 10) {
-                            SecureField("arl", text: $arl)
-                                .textContentType(.password)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                                .submitLabel(.go)
-                                .onSubmit(loginWithArl)
-                            Button(action: loginWithArl) { Image(systemName: "arrow.right.circle.fill").font(.title2) }
-                                .disabled(arl.trimmingCharacters(in: .whitespaces).isEmpty || busy)
-                        }
-                        .padding(14)
-                        .surface(RoundedRectangle(cornerRadius: 14, style: .continuous), interactive: false)
-                        .transition(.opacity.combined(with: .move(edge: .top)))
-                    }
+                    .padding(24)
+                    .frame(minHeight: geo.size.height)
                 }
-                .padding(.bottom, 12)
+                .scrollBounceBehavior(.basedOnSize)
+                .scrollDismissesKeyboard(.interactively)
             }
-            .padding(24)
         }
         .sheet(isPresented: $web) {
             WebLoginSheet { cookie in login(cookie) }
@@ -220,10 +229,8 @@ struct MainTabs: View {
     @AppStorage("tabLabelsHidden") private var tabLabelsHidden = false
     /// Réglages > Apparence : barre de l'app sur toute la largeur, sinon celle d'iOS.
     @AppStorage("tabBarFull") private var tabBarFull = true
-    /// Ancienne valeur gardée tant que les Réglages sont ouverts : changer de barre reconstruit les pages, et la feuille
-    /// des Réglages (ouverte depuis l'une d'elles) se refermait aussitôt. La nouvelle barre arrive à leur fermeture.
-    @State private var barFullHeld: Bool?
-    private var barFullShown: Bool { barFullHeld ?? tabBarFull }
+    /// Valeur figée tant que les Réglages sont ouverts (voir `Player.settingsOpen`).
+    private var barFullShown: Bool { player.tabBarFullHeld ?? tabBarFull }
     /// Barre de l'app réduite par le défilement.
     @State private var barCollapsed = false
     /// Onglets déjà ouverts : une page n'est construite qu'à sa première visite.
@@ -435,9 +442,6 @@ struct MainTabs: View {
             Text(tr("Seulement sur ce téléphone. Laisse vide pour revenir à « %@ ».", tr(Player.defaultLovedTitle)))
         }
         .onChange(of: player.renamingLoved) { _, open in if open { lovedName = player.lovedTitle } }
-        // « Barre d'onglets complète » changée dans les Réglages : la barre change à leur fermeture (voir `barFullShown`).
-        .onChange(of: tabBarFull) { old, _ in if player.settingsOpen, barFullHeld == nil { barFullHeld = old } }
-        .onChange(of: player.settingsOpen) { _, open in if !open { barFullHeld = nil } }
         // Compte Famille : « Qui écoute ? » à la première connexion (fermée sans choisir : le profil ouvert est gardé).
         .sheet(isPresented: Binding(get: { player.choosingProfile && !player.settingsOpen }, set: { player.choosingProfile = $0 }), onDismiss: { player.keepCurrentProfile() }) {
             ProfilePicker().environment(player).presentationDetents([.medium, .large])
@@ -518,7 +522,7 @@ private struct MiniPlayerSpace: ViewModifier {
         content.safeAreaInset(edge: .bottom, spacing: 0) {
             if MiniPlayerMetrics.inTabBar {
                 // Barre de l'app : la place est à laisser ici. Barre d'iOS : c'est elle qui s'en charge.
-                if tabBarFull { Color.clear.frame(height: GlassBarMetrics.pageSpace(mini: mini)) }
+                if player.tabBarFullHeld ?? tabBarFull { Color.clear.frame(height: GlassBarMetrics.pageSpace(mini: mini)) }
             } else if mini {
                 Color.clear.frame(height: MiniPlayerMetrics.mini)
             }

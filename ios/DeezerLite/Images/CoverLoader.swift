@@ -22,7 +22,9 @@ final class CoverLoader: @unchecked Sendable {
     private var running: [String: Task<UIImage?, Never>] = [:]
 
     private init() {
-        cache.totalCostLimit = 16 << 20 // 16 Mo d'images décodées : des vignettes et la grande pochette du titre suivant
+        // 64 Mo d'images décodées (vidé si iOS manque de mémoire, et en arrière-plan). 16 Mo ne tenaient pas un écran
+        // d'accueil (≈ 1 Mo par carte, 4 Mo par grande pochette) : au retour, les pochettes se rechargeaient.
+        cache.totalCostLimit = 64 << 20
         backdrops.countLimit = 6 // fonds floutés (≈ 640 Ko chacun) : le titre en cours et ses voisins suffisent
         let config = URLSessionConfiguration.default
         config.urlCache = URLCache(memoryCapacity: 0, diskCapacity: 80 << 20) // rien en RAM, 80 Mo sur disque

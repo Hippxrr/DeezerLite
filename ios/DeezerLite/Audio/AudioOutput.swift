@@ -68,6 +68,7 @@ enum AudioOutput {
         let e = engine ?? make()
         engine = e
         guard !e.isRunning else { return }
+        dz_output_restarting() // le son repart en fondu (iOS a pu arrêter le moteur sans le laisser descendre)
         do {
             try e.start()
         } catch {

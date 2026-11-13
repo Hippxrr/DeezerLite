@@ -39,10 +39,16 @@ pub enum CoreError {
     Player,
     #[error("titre inconnu : recharge la page")]
     UnknownTrack,
+    /// ARL refusé par Deezer (expiré, révoqué) : l'app revient à l'écran de connexion.
+    #[error("arl invalide ou expiré")]
+    SessionExpired,
 }
 
 impl From<dz_api::DeezerError> for CoreError {
     fn from(e: dz_api::DeezerError) -> Self {
+        if matches!(e, dz_api::DeezerError::InvalidArl) {
+            return Self::SessionExpired;
+        }
         // Même message lisible que pour le lecteur (réseau trop faible, etc.).
         let raw = e.to_string();
         Self::Api(friendly_error(&raw).unwrap_or(raw))
@@ -715,6 +721,9 @@ impl Core {
     /// Toutes les étapes sont faites même si l'une échoue (avant, un échec d'effacement des téléchargements laissait
     /// la session et le trousseau en place) ; la première erreur est renvoyée à la fin.
     pub async fn logout(&self) -> Result<(), CoreError> {
+        // Un chargement encore en route (accueil, bibliothèque) n'écrit plus sa copie : la déconnexion attend jusqu'à
+        // 7 s (écoutes), il la réécrivait après l'effacement.
+        COPIES_GEN.fetch_add(1, Ordering::AcqRel);
         let mut first_error: Option<CoreError> = None;
         let _ = self.player.send(PlayerCmd::Close);
         // Écoutes du compte : la dernière est terminée (le lecteur a traité l'arrêt), puis tout ce qui attend part à
@@ -819,8 +828,13 @@ impl Core {
         let (sections, loved) = self.run(async move { (api.home_sections().await, loved_id(&api).await) }).await?;
         let out: Vec<Shelf> = sections?
             .into_iter()
-            .filter(|s| !s.items.is_empty())
             .map(|s| Shelf { kind: s.kind.to_owned(), title: s.title, items: mark_loved(cards(s.items), loved) })
+            // Genres (« Tes genres favoris ») : leur page n'est pas dans l'app, la carte ne s'ouvrait pas.
+            .map(|mut s| {
+                s.items.retain(|c| c.kind != "channel");
+                s
+            })
+            .filter(|s| !s.items.is_empty())
             .collect();
         self.persist(copies, "home.json", &out);
         Ok(out)
@@ -1044,10 +1058,12 @@ impl Core {
         Ok(Track::from(&entry.info))
     }
 
-    pub async fn download_collection(&self, detail: Detail) -> Result<(), CoreError> {
+    /// Renvoie les titres retirés du téléphone parce qu'ils ne sont plus dans la collection : leur téléchargement en
+    /// attente est annulé par l'app (sinon il finissait en titre téléchargé seul, gardé pour toujours).
+    pub async fn download_collection(&self, detail: Detail) -> Result<Vec<i64>, CoreError> {
         // Copie hors ligne : la réenregistrer ferait disparaître de la collection les titres pas encore téléchargés.
         if detail.offline {
-            return Ok(());
+            return Ok(Vec::new());
         }
         let id = self.stored_id(&detail.kind, detail.id);
         let collection = OfflineCollection::new(
@@ -1061,8 +1077,8 @@ impl Core {
         );
         let api = self.api.clone();
         let store = self.offline.clone();
-        self.run(async move { dz_offline::store_collection(api, store, collection).await }).await??;
-        Ok(())
+        let (_, removed) = self.run(async move { dz_offline::store_collection_removing(api, store, collection).await }).await??;
+        Ok(removed)
     }
 
     pub fn download_collections(&self) -> Vec<DownloadCollection> {
@@ -1113,8 +1129,12 @@ impl Core {
         self.offline.add_collection_track(&kind, self.stored_id(&kind, id), track_id).map_err(|e| CoreError::Api(e.to_string()))
     }
 
-    pub fn remove_download_track_from_collection(&self, kind: String, id: u64, track_id: i64) -> Result<bool, CoreError> {
-        self.offline.remove_collection_track(&kind, self.stored_id(&kind, id), track_id).map_err(|e| CoreError::Api(e.to_string()))
+    /// Renvoie les titres retirés du téléphone (voir `download_collection`).
+    pub fn remove_download_track_from_collection(&self, kind: String, id: u64, track_id: i64) -> Result<Vec<i64>, CoreError> {
+        self.offline
+            .remove_collection_track(&kind, self.stored_id(&kind, id), track_id)
+            .map(Option::unwrap_or_default)
+            .map_err(|e| CoreError::Api(e.to_string()))
     }
 
     pub fn remove_download_collection(&self, kind: String, id: u64) -> Result<Vec<i64>, CoreError> {
@@ -1138,7 +1158,7 @@ impl Core {
     }
 
     pub fn clear_downloads(&self) -> Result<(), CoreError> {
-        self.offline.clear().map_err(|e| CoreError::Api(e.to_string()))
+        self.offline.clear_downloads().map_err(|e| CoreError::Api(e.to_string()))
     }
 
     pub fn downloads(&self) -> Vec<Track> {
@@ -1444,9 +1464,17 @@ impl Core {
         let Ok(bytes) = serde_json::to_vec(value) else { return };
         let path = self.cache_dir.join(name);
         self.rt.spawn_blocking(move || {
+            // Revérifié ici : l'écriture peut attendre son tour quelques secondes (changement de profil entre-temps).
+            if copies != COPIES_GEN.load(Ordering::Acquire) {
+                return;
+            }
             let tmp = path.with_extension("tmp");
             if std::fs::write(&tmp, bytes).is_ok() {
                 let _ = std::fs::rename(&tmp, &path);
+            }
+            // Copies effacées pendant l'écriture : celle-ci ne reste pas.
+            if copies != COPIES_GEN.load(Ordering::Acquire) {
+                let _ = std::fs::remove_file(&path);
             }
         });
     }
@@ -1631,7 +1659,17 @@ fn friendly_error(raw: &str) -> Option<String> {
     if NETWORK.iter().any(|k| lower.contains(k)) {
         return Some("Connexion trop faible pour joindre Deezer. La lecture reprendra quand le réseau sera meilleur.".into());
     }
-    Some(raw.to_owned())
+    // Page qui n'est pas celle de Deezer (portail Wi-Fi, maintenance) ou erreur du serveur.
+    if lower.contains("error decoding response body") || lower.contains("http status server error") {
+        return Some("Deezer ne répond pas correctement pour le moment (maintenance, portail Wi-Fi ?). Réessaie dans un instant.".into());
+    }
+    // Adresse retirée du message (jeton de session, adresse signée du fichier) : « … for url (…) ».
+    let mut text = raw.to_owned();
+    while let Some(start) = text.find(" for url (") {
+        let end = text[start..].find(')').map_or(text.len(), |i| start + i + 1);
+        text.replace_range(start..end, "");
+    }
+    Some(text)
 }
 
 #[cfg(test)]
@@ -1701,6 +1739,11 @@ mod tests {
     fn errors_are_readable_and_prefetch_is_silent() {
         assert_eq!(friendly_error("préchargement: http: error sending request for url (https://media.deezer.com/v1/get_url)"), None);
         assert!(friendly_error("http: error sending request for url (x)").unwrap().starts_with("Connexion trop faible"));
+        assert!(friendly_error("http: error decoding response body for url (https://x/?api_token=s)").unwrap().starts_with("Deezer ne répond pas"));
+        assert_eq!(
+            friendly_error("http: HTTP status client error (403 Forbidden) for url (https://x/?api_token=secret)").as_deref(),
+            Some("http: HTTP status client error (403 Forbidden)")
+        );
         assert_eq!(friendly_error("Lecture interrompue, nouvelle tentative…").as_deref(), Some("Lecture interrompue, nouvelle tentative…"));
         // Plus confondu avec un problème de réseau.
         assert_eq!(friendly_error("Session déconnectée").as_deref(), Some("Session déconnectée"));
@@ -1744,6 +1787,13 @@ mod tests {
 pub extern "C" fn dz_render(left: *mut f32, right: *mut f32, frames: u32) {
     // SAFETY: AVAudioEngine fournit deux tampons de `frames` échantillons, valides pendant l'appel.
     unsafe { dz_audio::ios_render(left, right, frames) }
+}
+
+/// Appelée par Swift juste avant de (re)démarrer AVAudioEngine : le son repart en fondu (pas de clic).
+#[cfg(target_os = "ios")]
+#[no_mangle]
+pub extern "C" fn dz_output_restarting() {
+    dz_audio::ios_output_restarting();
 }
 
 /// Fonctions Swift qui démarrent et arrêtent AVAudioEngine, appelées par le moteur (lecture, pause, nouveau titre).

@@ -157,10 +157,12 @@ struct SearchView: View {
                             .id("\(r.tracks.first?.id ?? 0)-\(r.tracks.count)")
                             .transition(.opacity)
                     }
-                    if !r.albums.isEmpty { ShelfRow(title: tr("Albums"), cards: r.albums, onOpen: remember) }
-                    if !r.playlists.isEmpty { ShelfRow(title: tr("Playlists"), cards: r.playlists, onOpen: remember) }
+                    // `.id` : une nouvelle recherche repart au début de chaque rangée (avant : elle gardait le défilement de
+                    // l'ancienne, les premiers résultats étaient hors de l'écran).
+                    if !r.albums.isEmpty { ShelfRow(title: tr("Albums"), cards: r.albums, onOpen: remember).id(resultsQuery) }
+                    if !r.playlists.isEmpty { ShelfRow(title: tr("Playlists"), cards: r.playlists, onOpen: remember).id(resultsQuery) }
                     let others = r.artists.filter { $0.id != top?.id }
-                    if !others.isEmpty { ShelfRow(title: tr("Artistes"), cards: others, onOpen: remember) }
+                    if !others.isEmpty { ShelfRow(title: tr("Artistes"), cards: others, onOpen: remember).id(resultsQuery) }
                 }
             }
             .padding(.vertical, 12)
@@ -349,6 +351,7 @@ private struct AllTracks: View {
         }
         .navigationTitle(tr("Titres"))
         .navigationBarTitleDisplayMode(.inline)
+        .pageBackground() // comme les autres pages ouvertes (avant : fond noir du système)
         .miniPlayerSpace()
     }
 }
@@ -387,9 +390,10 @@ private struct HistoryList: View {
                         }
                         .buttonStyle(.pressable)
                         Button { withAnimation { player.forget(entry) } } label: {
-                            Image(systemName: "xmark").font(.caption.weight(.semibold)).foregroundStyle(.secondary).frame(width: 32, height: 32)
+                            Image(systemName: "xmark").font(.caption.weight(.semibold)).foregroundStyle(.secondary).frame(width: 44, height: 44)
                         }
                         .buttonStyle(.pressable)
+                        .accessibilityLabel(tr("Retirer de l'historique"))
                     }
                 }
             }

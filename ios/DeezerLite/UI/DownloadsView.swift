@@ -57,7 +57,7 @@ struct DownloadsView: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text(tr("Téléchargements en cours")).font(.title3.bold())
                         if queuedCount > 0 {
-                            Text("\(queuedCount) en attente").font(.subheadline).foregroundStyle(.secondary)
+                            Text(tr("%@ en attente", "\(queuedCount)")).font(.subheadline).foregroundStyle(.secondary)
                         }
                     }
                     Spacer()
@@ -81,7 +81,7 @@ struct DownloadsView: View {
 
             if failedCount > 0 {
                 HStack {
-                    Text(failedCount == 1 ? "1 échec" : "\(failedCount) échecs")
+                    Text(failedCount == 1 ? tr("1 échec") : tr("%@ échecs", "\(failedCount)"))
                         .font(.subheadline).foregroundStyle(.secondary)
                     Spacer()
                     Button(tr("Tout réessayer")) { retryFailed() }
@@ -129,7 +129,7 @@ struct DownloadsView: View {
                         ForEach(player.downloadCollections, id: \.key) { collection in
                             Button { openRoute(route(collection)) } label: {
                                 ItemRow(title: title(collection),
-                                        subtitle: "\(collection.downloaded)/\(collection.total) titres disponibles") {
+                                        subtitle: tr("%@/%@ titres disponibles", "\(collection.downloaded)", "\(collection.total)")) {
                                     CardArt(card: card(collection))
                                 }
                             }
@@ -162,7 +162,7 @@ struct DownloadsView: View {
                                 .font(.headline)
                                 .frame(maxWidth: .infinity)
                                 .padding(.vertical, 13)
-                                .foregroundStyle(.white)
+                                .foregroundStyle(.primary) // blanc : invisible sur fond clair
                                 .surface(Capsule())
                         }
                     }

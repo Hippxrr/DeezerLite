@@ -73,7 +73,8 @@ struct EqBandSlider: View {
     let onChange: (Double) -> Void
     private let knob = CGSize(width: 34, height: 26)
     /// Écart entre le doigt et le centre de la poignée au début du glissement : la poignée ne saute pas sous le doigt.
-    @State private var grab: CGFloat?
+    /// Repris à chaque nouveau geste (autre point de départ) : un geste interrompu (appel) ne le laisse plus au suivant.
+    @State private var grab: (from: CGPoint, offset: CGFloat)?
     /// Changements faits ici (glissement, appui) : seuls eux font vibrer, pas un changement de préréglage.
     @State private var touches = 0
 
@@ -101,9 +102,8 @@ struct EqBandSlider: View {
                     .gesture(
                         DragGesture(minimumDistance: 0, coordinateSpace: .named("eqTrack"))
                             .onChanged { g in
-                                let offset = grab ?? (g.startLocation.y - (y + knob.height / 2))
-                                grab = offset
-                                let v = db(g.location.y - offset)
+                                if grab?.from != g.startLocation { grab = (g.startLocation, g.startLocation.y - (y + knob.height / 2)) }
+                                let v = db(g.location.y - (grab?.offset ?? 0))
                                 if v != value { onChange(v); touches += 1 }
                             }
                             .onEnded { _ in grab = nil }

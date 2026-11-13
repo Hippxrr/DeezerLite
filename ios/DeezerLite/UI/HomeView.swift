@@ -22,7 +22,10 @@ struct HomeView: View {
                     EmptyView()
                 } else if let all = player.home {
                     let shelves = player.reco.shelves(all)
-                    ForEach(shelves.indices, id: \.self) { i in
+                    // Rangées identifiées par leur contenu, pas leur rang : en masquer une ne donne plus sa place (et son
+                    // défilement) à la suivante.
+                    ForEach(ShelfSlot.slots(shelves)) { slot in
+                        let i = slot.index
                         let kind = shelves[i].kind
                         let hide = { withAnimation { player.updateReco { $0.hidden.append(kind) } } }
                         if kind == "track-mixes" {
@@ -151,7 +154,7 @@ private struct LovedRow: View {
 
     var body: some View {
         Button(action: action) {
-            ItemRow(title: player.lovedTitle, subtitle: tr("%@ titres", "\(player.lovedIds.count)")) {
+            ItemRow(title: player.lovedTitle, subtitle: player.lovedIds.count == 1 ? tr("1 titre") : tr("%@ titres", "\(player.lovedIds.count)")) {
                 if let url = player.lovedCover {
                     CoverView(url: url, side: 64, radius: 10)
                 } else {
@@ -204,5 +207,20 @@ private struct TrackMixShelf: View {
         .buttonStyle(.pressable)
         // Colonne un peu plus étroite que l'écran : la suivante dépasse, on voit qu'on peut glisser.
         .containerRelativeFrame(.horizontal) { width, _ in width - 56 }
+    }
+}
+
+/// Rangée de l'accueil : son type et son titre (numérotés s'ils se répètent), et sa place dans la liste.
+private struct ShelfSlot: Identifiable {
+    let id: String
+    let index: Int
+
+    static func slots(_ shelves: [Shelf]) -> [ShelfSlot] {
+        var seen: [String: Int] = [:]
+        return shelves.indices.map { i in
+            let key = "\(shelves[i].kind)|\(shelves[i].title)"
+            seen[key, default: 0] += 1
+            return ShelfSlot(id: "\(key)|\(seen[key] ?? 0)", index: i)
+        }
     }
 }

@@ -476,7 +476,7 @@ private struct TrackMenu: View, Equatable {
         } else {
             switch downloadState {
             case .failed:
-                Button { player.download([track]) } label: { Label("Réessayer", systemImage: "arrow.clockwise") }
+                Button { player.download([track]) } label: { Label(tr("Réessayer"), systemImage: "arrow.clockwise") }
                 Button(role: .destructive) { player.cancelDownload(track.id) } label: {
                     Label(tr("Annuler le téléchargement"), systemImage: "xmark.circle")
                 }

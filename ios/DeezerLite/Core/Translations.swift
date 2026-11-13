@@ -1,7 +1,34 @@
 /// Textes de l'app : le français sert de clé, avec l'anglais et l'espagnol (voir `tr`). Un texte absent reste en français.
 enum Translations {
     static let table: [String: (en: String, es: String)] = [
+        // Messages du cœur (Rust, en français)
+        "Connexion trop faible pour joindre Deezer. La lecture reprendra quand le réseau sera meilleur.": ("Connection too weak to reach Deezer. Playback will resume when the network improves.", "Conexión demasiado débil para llegar a Deezer. La reproducción se reanudará cuando mejore la red."),
+        "Deezer ne répond pas correctement pour le moment (maintenance, portail Wi-Fi ?). Réessaie dans un instant.": ("Deezer isn't responding properly right now (maintenance, Wi-Fi login page?). Try again in a moment.", "Deezer no responde correctamente ahora mismo (¿mantenimiento, portal Wi-Fi?). Inténtalo de nuevo en un momento."),
+        "Flow est vide pour le moment, réessaie dans un instant.": ("Flow is empty for now, try again in a moment.", "Flow está vacío por ahora, inténtalo de nuevo en un momento."),
+        "Deezer n'a pas de mix pour ce titre": ("Deezer has no mix for this track", "Deezer no tiene mix para esta canción"),
+        "ce profil Deezer n'est pas accessible depuis ce compte": ("This Deezer profile isn't available from this account", "Este perfil de Deezer no está disponible desde esta cuenta"),
+        "Lecture interrompue, nouvelle tentative…": ("Playback interrupted, retrying…", "Reproducción interrumpida, reintentando…"),
+        "Sortie audio perdue (casque ou périphérique débranché ?). Lecture en pause : appuie sur lecture pour reprendre.": ("Audio output lost (headphones or device unplugged?). Paused: press play to resume.", "Salida de audio perdida (¿auriculares o dispositivo desconectados?). En pausa: pulsa reproducir para continuar."),
+        "Lecture complète indisponible : aperçu de 30 s (flux Deezer chiffré).": ("Full track unavailable: 30-second preview (encrypted Deezer stream).", "Canción completa no disponible: vista previa de 30 s (flujo de Deezer cifrado)."),
+        "titre déjà téléchargé": ("track already downloaded", "canción ya descargada"),
+        "téléchargement annulé": ("download cancelled", "descarga cancelada"),
         // Téléchargements
+        "%@ en attente": ("%@ queued", "%@ en espera"),
+        "1 échec": ("1 failed", "1 fallida"),
+        "%@ échecs": ("%@ failed", "%@ fallidas"),
+        "%@/%@ titres disponibles": ("%@/%@ tracks available", "%@/%@ canciones disponibles"),
+        // Lecteur, VoiceOver
+        "Label": ("Label", "Sello"),
+        "Pause": ("Pause", "Pausa"),
+        "Titre précédent": ("Previous track", "Canción anterior"),
+        "Titre suivant": ("Next track", "Canción siguiente"),
+        "Paroles": ("Lyrics", "Letra"),
+        "File d'attente": ("Queue", "Cola"),
+        "Retirer de l'historique": ("Remove from history", "Quitar del historial"),
+        "Télécharger le reste": ("Download the rest", "Descargar el resto"),
+        "Plus assez de place sur l'iPhone : téléchargements en pause.": ("Not enough space on the iPhone: downloads paused.", "No queda espacio en el iPhone: descargas en pausa."),
+        "ARL invalide ou expiré.": ("Invalid or expired ARL.", "ARL no válido o caducado."),
+        "Session Deezer expirée : reconnecte-toi.": ("Deezer session expired: please sign in again.", "La sesión de Deezer ha caducado: vuelve a iniciar sesión."),
         "Téléchargements en cours": ("Downloads in progress", "Descargas en curso"),
         "Tout arrêter": ("Stop all", "Detener todo"),
         "Téléchargements en échec": ("Failed downloads", "Descargas fallidas"),
