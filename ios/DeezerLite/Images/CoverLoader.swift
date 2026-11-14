@@ -1,4 +1,5 @@
 import CoreImage
+import CoreImage.CIFilterBuiltins
 import ImageIO
 import UIKit
 
@@ -185,10 +186,33 @@ final class CoverLoader: @unchecked Sendable {
             // Repère de Core Image : origine en bas. Le fond flouté est posé sous la barre d'état ; ses premières et dernières
             // lignes sont prolongées vers le haut et vers le bas.
             let gap = (width * inset).rounded()
-            let placed = input.transformed(by: CGAffineTransform(translationX: 0, y: canvas.height - gap - input.extent.height))
-            // Flou léger en plus : les fines traînées des lignes prolongées et la jonction disparaissent.
-            let smooth = placed.clampedToExtent().applyingGaussianBlur(sigma: 12).cropped(to: canvas)
-            guard let out = context.createCGImage(smooth, from: canvas) else { return nil }
+            let bottom = canvas.height - gap - input.extent.height // bas de la pochette ; en dessous, `bottom` pixels de fond
+            let placed = input.transformed(by: CGAffineTransform(translationX: 0, y: bottom))
+            // Sous la pochette (dessous = vers 0 en Core Image), en courbe douce : de `from` (rien) à `to` (tout).
+            func ramp(_ from: CGFloat, _ to: CGFloat) -> CIImage? {
+                let g = CIFilter.smoothLinearGradient()
+                g.point0 = CGPoint(x: 0, y: bottom - from * bottom)
+                g.point1 = CGPoint(x: 0, y: bottom - to * bottom)
+                g.color0 = .black
+                g.color1 = .white
+                return g.outputImage
+            }
+            // Ligne du bas prolongée, de plus en plus floue en descendant : ses couleurs se mélangent. Prolongée telle quelle,
+            // une ligne contrastée (clavier, mains) faisait des bandes verticales sur toute la hauteur.
+            let blur = CIFilter.maskedVariableBlur()
+            blur.inputImage = placed.clampedToExtent().applyingGaussianBlur(sigma: 12)
+            blur.mask = ramp(0, 0.45)
+            blur.radius = 110
+            // Puis une seule couleur : la moyenne du bas de la pochette.
+            let average = CIFilter.areaAverage()
+            average.inputImage = placed
+            average.extent = CGRect(x: 0, y: bottom, width: width, height: input.extent.height * 0.35)
+            let mix = CIFilter.blendWithMask()
+            mix.inputImage = average.outputImage?.clampedToExtent()
+            mix.backgroundImage = blur.outputImage
+            mix.maskImage = ramp(0, 0.7)
+            guard let smooth = mix.outputImage?.cropped(to: canvas),
+                  let out = context.createCGImage(smooth, from: canvas) else { return nil }
             return UIImage(cgImage: out)
         }.value
         guard let extended else { return nil }
