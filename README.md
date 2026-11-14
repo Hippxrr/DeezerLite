@@ -57,7 +57,8 @@ networking, the play queue and audio.
 - **Gapless playback** between tracks, plus an adjustable **crossfade** from 0 to 10 s.
 - **5-band equalizer** (60 Hz, 230 Hz, 910 Hz, 3.6 kHz, 14 kHz) with about fifteen presets and a custom mode. When
   flat, the signal is left strictly untouched.
-- **Full player**: synced lyrics, editable queue, track credits, sharing, blurred background taken from the cover.
+- **Full player**: synced lyrics (Genius as an optional plain-text fallback, online only), editable queue, track
+  credits, sharing, blurred background taken from the cover.
 - **Mini player**: swipe sideways to change track (the carousel follows the finger's speed and lands smoothly), tap
   to open the full player; its progress bar can be hidden.
 - **Lock screen and Control Center**: title, artwork, position and controls.

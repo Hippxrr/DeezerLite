@@ -12,6 +12,9 @@ final class CoverLoader: @unchecked Sendable {
     /// image vide, toute blanche. Peu de variantes, donc plus de réutilisation entre écrans (une ligne de liste et le
     /// mini-lecteur partagent la même image de 250 px).
     private static let sizes = [56, 120, 250, 500, 1000]
+    /// Pochette pleine largeur du grand lecteur (réglage) : le CDN donne aussi 1500 x 1500, demandé seulement par elle
+    /// (plus nette sur toute la largeur de l'écran).
+    static let large = 1500
     /// Image vide du CDN (md5 d'un texte vide) : celle vers laquelle il redirige quand il n'a pas la taille demandée.
     private static let emptyPicture = "d41d8cd98f00b204e9800998ecf8427e"
 
@@ -25,7 +28,7 @@ final class CoverLoader: @unchecked Sendable {
         // 64 Mo d'images décodées (vidé si iOS manque de mémoire, et en arrière-plan). 16 Mo ne tenaient pas un écran
         // d'accueil (≈ 1 Mo par carte, 4 Mo par grande pochette) : au retour, les pochettes se rechargeaient.
         cache.totalCostLimit = 64 << 20
-        backdrops.countLimit = 6 // fonds floutés (≈ 640 Ko chacun) : le titre en cours et ses voisins suffisent
+        backdrops.countLimit = 8 // fonds floutés (≈ 640 Ko chacun ; 1,4 Mo en pleine largeur) : le titre en cours et ses voisins
         let config = URLSessionConfiguration.default
         config.urlCache = URLCache(memoryCapacity: 0, diskCapacity: 80 << 20) // rien en RAM, 80 Mo sur disque
         config.requestCachePolicy = .returnCacheDataElseLoad
@@ -51,7 +54,7 @@ final class CoverLoader: @unchecked Sendable {
         session.configuration.urlCache?.removeAllCachedResponses()
     }
 
-    static func bucket(_ pixels: Int) -> Int { sizes.first { $0 >= pixels } ?? sizes[sizes.count - 1] }
+    static func bucket(_ pixels: Int) -> Int { pixels >= large ? large : sizes.first { $0 >= pixels } ?? sizes[sizes.count - 1] }
 
     private static func key(_ url: String, _ side: Int) -> NSString { "\(side)|\(url)" as NSString }
 
@@ -62,7 +65,7 @@ final class CoverLoader: @unchecked Sendable {
 
     /// N'importe quelle taille déjà en mémoire, la plus grande d'abord : affichée en attendant la bonne.
     func anyCached(url: String) -> UIImage? {
-        for side in Self.sizes.reversed() {
+        for side in [Self.large] + Self.sizes.reversed() {
             if let hit = cache.object(forKey: Self.key(url, side)) { return hit }
         }
         return nil
@@ -85,7 +88,7 @@ final class CoverLoader: @unchecked Sendable {
                     // Taille absente chez Deezer (redirigée vers l'image vide, blanche) : la grande, qui existe toujours,
                     // réduite ici à la taille voulue.
                     if let final = answer?.1.url?.absoluteString, final.contains(Self.emptyPicture), !url.contains(Self.emptyPicture),
-                       let big = URL(string: Self.sized(url, 500)) {
+                       let big = URL(string: Self.sized(url, side > 1000 ? 1000 : 500)) {
                         data = (try? await session.data(from: big))?.0
                     } else {
                         data = answer?.0
@@ -164,6 +167,28 @@ final class CoverLoader: @unchecked Sendable {
         guard let blurred else { return nil }
         backdrops.setObject(blurred, forKey: url as NSString)
         return blurred
+    }
+
+    /// Fond de la pochette pleine largeur : le fond flouté en haut, aux mêmes proportions que la pochette nette posée
+    /// dessus, puis les couleurs de son bas prolongées jusqu'en bas de l'écran (dégradé des mêmes couleurs). Fait une
+    /// fois par titre, hors du thread principal. `tall` : hauteur de l'écran divisée par sa largeur.
+    func bleedBackdrop(url: String, download: Bool, tall: CGFloat) async -> UIImage? {
+        let key = "\(tall)|\(url)" as NSString
+        if let hit = backdrops.object(forKey: key) { return hit }
+        guard let square = await backdrop(url: url, download: download)?.cgImage else { return nil }
+        let context = blurContext
+        let extended: UIImage? = await Task.detached(priority: .userInitiated) {
+            let input = CIImage(cgImage: square)
+            let width = input.extent.width
+            let canvas = CGRect(x: 0, y: 0, width: width, height: (width * tall).rounded())
+            // Repère de Core Image : origine en bas. Le fond flouté est posé en haut ; sa dernière ligne est prolongée.
+            let placed = input.transformed(by: CGAffineTransform(translationX: 0, y: canvas.height - input.extent.height))
+            guard let out = context.createCGImage(placed.clampedToExtent().cropped(to: canvas), from: canvas) else { return nil }
+            return UIImage(cgImage: out)
+        }.value
+        guard let extended else { return nil }
+        backdrops.setObject(extended, forKey: key)
+        return extended
     }
 
     /// Prépare des pochettes avant qu'elles ne soient affichées (titres suivants de la file).

@@ -214,6 +214,7 @@ struct SettingsView: View {
     @AppStorage("tabLabelsHidden") private var tabLabelsHidden = false
     @AppStorage("tabBarFull") private var tabBarFull = true
     @AppStorage("miniProgress") private var miniProgress = true
+    @AppStorage("fullBleedCover") private var fullBleedCover = false
 
     enum SettingsTab: String, CaseIterable {
         case general, look, sound, quality
@@ -398,6 +399,18 @@ struct SettingsView: View {
             }
             .tint(Theme.accent)
             .padding(14)
+            divider
+            Toggle(isOn: $fullBleedCover) {
+                HStack(spacing: 12) {
+                    Image(systemName: "photo").foregroundStyle(Theme.accent).frame(width: 26)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(tr("Pochette pleine largeur"))
+                        Text(tr("Grand lecteur : la pochette en haut, sur toute la largeur, fondue dans le fond")).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .tint(Theme.accent)
+            .padding(14)
             if MiniPlayerMetrics.inTabBar {
                 divider
                 Toggle(isOn: $tabBarFull) {
@@ -424,6 +437,18 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(tr("Reprendre la dernière écoute"))
                         Text(tr("Au relancement de l'app : même titre, même position")).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .tint(Theme.accent)
+            .padding(14)
+            divider
+            Toggle(isOn: Binding(get: { player.geniusLyrics }, set: { player.setGeniusLyrics($0) })) {
+                HStack(spacing: 12) {
+                    Image(systemName: "quote.bubble").foregroundStyle(Theme.accent).frame(width: 26)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(tr("Paroles de secours (Genius)"))
+                        Text(tr("Si Deezer n'a pas les paroles : texte simple, en ligne. Genius reçoit alors le titre et l'artiste.")).font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }

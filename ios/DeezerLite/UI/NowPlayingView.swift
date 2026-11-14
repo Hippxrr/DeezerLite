@@ -171,6 +171,22 @@ struct MiniPlayer: View {
 
 }
 
+/// Place sa vue à sa largeur naturelle plus la moitié de la place libre à sa droite (zone d'appui du titre et de l'artiste
+/// élargie, avec une marge avant les boutons). Texte plus large que la place : toute la largeur.
+private struct HalfGapLayout: Layout {
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard let v = subviews.first else { return .zero }
+        let width = proposal.width ?? v.sizeThatFits(.unspecified).width
+        return CGSize(width: width, height: v.sizeThatFits(ProposedViewSize(width: width, height: proposal.height)).height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard let v = subviews.first else { return }
+        let natural = min(v.sizeThatFits(.unspecified).width, bounds.width)
+        v.place(at: bounds.origin, proposal: ProposedViewSize(width: natural + (bounds.width - natural) / 2, height: bounds.height))
+    }
+}
+
 /// Titre du mini-lecteur qu'on fait glisser. À part du mini-lecteur : pendant le glissement, seul ce carrousel est
 /// redessiné (avant, tout le mini-lecteur pouvait l'être à chaque mouvement du doigt : boutons, barre de progression…).
 private struct MiniCarousel: View {
@@ -582,9 +598,27 @@ struct NowPlayingView: View {
     @State private var clean = false
     /// Doigt posé sur le lecteur : revient à `false` même si le système annule le geste, sans `onEnded`.
     @GestureState private var pulling = false
+    /// Réglages › Apparence : pochette en haut de l'écran sur toute la largeur, fondue dans le fond.
+    @AppStorage("fullBleedCover") private var fullBleed = false
     var body: some View {
         GeometryReader { geo in
             let side = min(geo.size.width - 48, geo.size.height * 0.42)
+            // Pochette pleine largeur : sous l'heure, sans marge, son bas fondu dans le fond. Le titre et les boutons restent
+            // à leur place (celle de la pochette normale reste vide). Paroles ou file ouvertes : elle s'efface, comme l'autre.
+            let bleed = fullBleed && panel == .cover
+            ZStack(alignment: .top) {
+            if bleed {
+                VStack(spacing: 0) {
+                    CoverCarousel(side: geo.size.width, width: geo.size.width, pull: pull, bleed: true, onPullEnd: pullEnded) { clean.toggle() }
+                        .mask {
+                            LinearGradient(stops: [.init(color: .black, location: 0.7), .init(color: .clear, location: 1)],
+                                           startPoint: .top, endPoint: .bottom)
+                        }
+                    Spacer(minLength: 0)
+                }
+                .ignoresSafeArea(edges: .top)
+                .transition(.opacity)
+            }
             VStack(spacing: 0) {
                 Color.clear.frame(height: 21) // marge du haut (le lecteur se ferme en le tirant vers le bas)
                 if panel != .cover {
@@ -596,8 +630,12 @@ struct NowPlayingView: View {
                     .transition(.opacity)
                 } else {
                     Spacer(minLength: 8)
-                    CoverCarousel(side: side, width: geo.size.width, pull: pull, onPullEnd: pullEnded) { clean.toggle() }
-                        .transition(.opacity)
+                    if bleed {
+                        Color.clear.frame(width: side, height: side)
+                    } else {
+                        CoverCarousel(side: side, width: geo.size.width, pull: pull, onPullEnd: pullEnded) { clean.toggle() }
+                            .transition(.opacity)
+                    }
                     Spacer(minLength: 8)
                     titleRow
                         .legible()
@@ -618,15 +656,21 @@ struct NowPlayingView: View {
             }
             .padding(.horizontal, 26)
             .padding(.bottom, 4)
-            .animation(.easeInOut(duration: 0.3), value: panel)
             .animation(.easeInOut(duration: 0.3), value: clean)
+            }
+            .animation(.easeInOut(duration: 0.3), value: panel)
         }
         // Retour haptique à l'appui long seulement (pas à la remise en mode normal quand le lecteur se ferme).
         .sensoryFeedback(trigger: clean) { _, _ in player.showFullPlayer ? .impact(weight: .medium) : nil }
         // Lecteur fermé : il se rouvre toujours en mode normal.
         .onChange(of: player.showFullPlayer) { _, open in if !open { clean = false } }
         .foregroundStyle(.white)
-        .background { Backdrop(url: player.current?.coverUrl, open: player.showFullPlayer) }
+        // Pochette pleine largeur : fond prolongé sous elle (refait à neuf si le réglage change, sans fondu déformé).
+        .background {
+            Backdrop(url: player.current?.coverUrl, open: player.showFullPlayer,
+                     tall: fullBleed ? UIScreen.main.bounds.height / max(UIScreen.main.bounds.width, 1) : nil)
+                .id(fullBleed)
+        }
         .contentShape(Rectangle())
         // File ou paroles ouvertes : le geste est coupé pour laisser défiler la liste.
         .gesture(pullGesture, including: panel == .cover ? .all : .subviews)
@@ -667,27 +711,31 @@ struct NowPlayingView: View {
 
     private var titleRow: some View {
         HStack(alignment: .center, spacing: 10) {
-            VStack(alignment: .leading, spacing: 3) {
-                // Titre trop long : réduit pour tenir sur la ligne, plutôt que coupé par « … ».
-                Text(player.current?.title ?? "").font(.title3.weight(.bold)).lineLimit(1).minimumScaleFactor(0.5)
-                if let t = player.current, t.id == 0 {
-                    // Flow en chargement (« Chargement… ») : pas de menu, il n'y a ni artiste ni crédits à ouvrir.
-                    Text(t.artist).font(.title3).foregroundStyle(.white.opacity(0.65)).lineLimit(1)
-                } else if let t = player.current {
-                    // Appui sur l'artiste : choisir lequel ouvrir (tous ceux d'un feat), ou l'album.
-                    Menu {
-                        ForEach(t.artistLinks, id: \.id) { a in
-                            Button { player.navigate(.detail(kind: "artist", id: a.id, title: a.name)) } label: { Label(a.name, systemImage: "music.mic") }
+            Group {
+                if let t = player.current, t.id != 0 {
+                    // Appui sur le titre ou l'artiste : choisir lequel ouvrir (tous ceux d'un feat), l'album, les crédits ou le
+                    // partage. Avant, seul l'artiste réagissait. La zone va jusqu'à la moitié de la place libre à droite du
+                    // texte : une marge reste avant le « + » et le cœur.
+                    HalfGapLayout {
+                        Menu {
+                            ForEach(t.artistLinks, id: \.id) { a in
+                                Button { player.navigate(.detail(kind: "artist", id: a.id, title: a.name)) } label: { Label(a.name, systemImage: "music.mic") }
+                            }
+                            if t.albumId != 0 {
+                                Button { player.navigate(.detail(kind: "album", id: t.albumId, title: t.album)) } label: { Label(t.album, systemImage: "square.stack") }
+                            }
+                            Divider()
+                            Button { player.creditsTrack = t } label: { Label(tr("Voir les crédits"), systemImage: "person.2") }
+                            ShareTrackButton(track: t)
+                        } label: {
+                            titleTexts(t)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
                         }
-                        if t.albumId != 0 {
-                            Button { player.navigate(.detail(kind: "album", id: t.albumId, title: t.album)) } label: { Label(t.album, systemImage: "square.stack") }
-                        }
-                        Divider()
-                        Button { player.creditsTrack = t } label: { Label(tr("Voir les crédits"), systemImage: "person.2") }
-                        ShareTrackButton(track: t)
-                    } label: {
-                        Text(t.artist).font(.title3).foregroundStyle(.white.opacity(0.65)).lineLimit(1).minimumScaleFactor(0.6)
                     }
+                } else if let t = player.current {
+                    // Flow en chargement (« Chargement… ») : pas de menu, il n'y a ni artiste ni crédits à ouvrir.
+                    titleTexts(t)
                 }
             }
             .id(player.current?.id)
@@ -698,6 +746,14 @@ struct NowPlayingView: View {
                 .allowsHitTesting(!clean)
         }
         .animation(.easeOut(duration: 0.25), value: player.current?.id)
+    }
+
+    /// Titre (réduit pour tenir sur la ligne plutôt que coupé par « … ») et artiste, sous la pochette.
+    private func titleTexts(_ t: Track) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(t.title).font(.title3.weight(.bold)).foregroundStyle(.white).lineLimit(1).minimumScaleFactor(0.5)
+            Text(t.artist).font(.title3).foregroundStyle(.white.opacity(0.65)).lineLimit(1).minimumScaleFactor(0.6)
+        }
     }
 
     /// En-tête réduit quand la file d'attente ou les paroles sont ouvertes. Un appui sur la petite pochette ou sur le
@@ -846,6 +902,9 @@ private struct Backdrop: View {
     let url: String?
     /// Lecteur fermé : fond fait seulement à partir de la pochette déjà en mémoire, sans téléchargement.
     let open: Bool
+    /// Pochette pleine largeur : hauteur de l'écran / largeur. Le fond suit la pochette posée en haut, puis prolonge
+    /// les couleurs de son bas (voir `CoverLoader.bleedBackdrop`).
+    var tall: CGFloat? = nil
     @Environment(\.scenePhase) private var phase
     /// Fond précédent (dessous) et nouveau (dessus, qui apparaît en fondu) : d'une pochette à l'autre, jamais de
     /// passage par le noir, et un fondu long pour adoucir un passage clair → sombre.
@@ -873,7 +932,13 @@ private struct Backdrop: View {
             guard phase != .background else { return }
             // Titre sans pochette (image de secours) : fondu vers le noir.
             guard let url else { fadeToBlack(); return }
-            guard let img = await CoverLoader.shared.backdrop(url: url, download: open) else {
+            let image: UIImage?
+            if let tall {
+                image = await CoverLoader.shared.bleedBackdrop(url: url, download: open, tall: tall)
+            } else {
+                image = await CoverLoader.shared.backdrop(url: url, download: open)
+            }
+            guard let img = image else {
                 // Lecteur fermé et pochette pas encore en mémoire : le fond sera fait à l'ouverture.
                 if open { fadeToBlack() }
                 return
@@ -907,12 +972,14 @@ private struct Backdrop: View {
         }
     }
 
+    @ViewBuilder
     private func layer(_ image: UIImage) -> some View {
-        Image(uiImage: image)
-            .resizable()
-            .interpolation(.high)
-            .scaledToFill()
-            .saturation(1.15)
+        if tall != nil {
+            // Aux proportions de l'écran : rien n'est recadré, le haut tombe exactement sous la pochette nette.
+            Image(uiImage: image).resizable().interpolation(.high).saturation(1.15)
+        } else {
+            Image(uiImage: image).resizable().interpolation(.high).scaledToFill().saturation(1.15)
+        }
     }
 }
 
@@ -925,6 +992,8 @@ private struct CoverCarousel: View {
     /// Largeur de l'écran : les voisines restent hors champ au repos.
     let width: CGFloat
     let pull: PullState
+    /// Pochette pleine largeur : sans coins arrondis ni ombre, et pas réduite en pause.
+    var bleed = false
     let onPullEnd: (DragGesture.Value) -> Void
     /// Appui long : mode épuré du lecteur.
     let onLongPress: () -> Void
@@ -934,6 +1003,7 @@ private struct CoverCarousel: View {
     @State private var steps = CarouselSteps()
 
     private var step: CGFloat { (width + side) / 2 + 12 }
+    private var radius: CGFloat { bleed ? 0 : 14 }
 
     var body: some View {
         let previous = steps.neighbor(player, -1)
@@ -943,23 +1013,23 @@ private struct CoverCarousel: View {
         let open = player.showFullPlayer
         ZStack {
             // Chaque pochette a l'identité de son image : rien d'ancien ne s'affiche quand les voisines changent.
-            if let previous { CoverView(url: previous.coverUrl, side: side, radius: 14, load: open).id(previous.coverUrl ?? "").offset(x: -step) }
-            if let next { CoverView(url: next.coverUrl, side: side, radius: 14, load: open).id(next.coverUrl ?? "").offset(x: step) }
+            if let previous { CoverView(url: previous.coverUrl, side: side, radius: radius, load: open).id(previous.coverUrl ?? "").offset(x: -step) }
+            if let next { CoverView(url: next.coverUrl, side: side, radius: radius, load: open).id(next.coverUrl ?? "").offset(x: step) }
             // Lecteur fermé : pas de téléchargement de la grande pochette à chaque titre.
             Group {
                 if current?.id == 0 {
                     // Flow en chargement : indicateur, pas la pochette de secours des MP3 importés.
-                    RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.white.opacity(0.08))
+                    RoundedRectangle(cornerRadius: radius, style: .continuous).fill(.white.opacity(0.08))
                         .frame(width: side, height: side)
                         .overlay { ProgressView().controlSize(.large).tint(.white) }
                 } else {
-                    CoverView(url: current?.coverUrl, side: side, radius: 14, load: open)
+                    CoverView(url: current?.coverUrl, side: side, radius: radius, load: open, large: bleed)
                 }
             }
                 .id(current?.coverUrl ?? "")
-                .shadow(color: .black.opacity(0.4), radius: active ? 24 : 12, y: active ? 14 : 6)
-                // Pochette réduite en pause, pleine taille en lecture (comme Apple Music).
-                .scaleEffect(active ? 1 : 0.8)
+                .shadow(color: .black.opacity(bleed ? 0 : 0.4), radius: active ? 24 : 12, y: active ? 14 : 6)
+                // Pochette réduite en pause, pleine taille en lecture (comme Apple Music). Pleine largeur : aucun effet.
+                .scaleEffect(active || bleed ? 1 : 0.8)
                 .animation(.spring(response: 0.5, dampingFraction: 0.72), value: active)
         }
         .modifier(SlideOffset(state: slide))
@@ -1385,7 +1455,7 @@ private struct LyricsPanel: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                Text(tr("Pas de paroles pour ce titre sur Deezer."))
+                Text(tr(player.geniusLyrics ? "Pas de paroles chez Deezer ni sur Genius." : "Pas de paroles pour ce titre sur Deezer."))
                     .font(.subheadline)
                     .foregroundStyle(.white.opacity(0.6))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1400,8 +1470,8 @@ private struct LyricsPanel: View {
             failed = false
             active = -1
             lyrics = nil
-            if player.showFullPlayer, let id = player.current?.id, id != 0 {
-                do { lyrics = try await player.lyrics(id) } catch { failed = !Task.isCancelled }
+            if player.showFullPlayer, let track = player.current, track.id != 0 {
+                do { lyrics = try await player.lyrics(track) } catch { failed = !Task.isCancelled }
             }
             loaded = true
         }

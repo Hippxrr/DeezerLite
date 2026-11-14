@@ -1179,6 +1179,19 @@ impl Core {
     /// Titre téléchargé avec des paroles synchronisées : lues sur le téléphone. Sinon (pas de paroles gardées, ou
     /// seulement le texte) : redemandées à Deezer, qui a pu en ajouter depuis, et gardées si elles ont changé ; sans
     /// réseau, ce qui est gardé.
+    /// Paroles de secours sur Genius (texte simple), demandées par l'app seulement quand Deezer n'en a pas et si le réglage
+    /// le permet. Jamais gardées avec les titres téléchargés : en ligne seulement. Genius injoignable : `None`.
+    pub async fn genius_lyrics(&self, title: String, artist: String) -> Result<Option<Lyrics>, CoreError> {
+        let api = self.api.clone();
+        let q = dz_api::LyricsQuery { title, artist };
+        let found = self.run(async move { api.lyrics_genius(&q).await }).await?;
+        Ok(found.ok().flatten().map(|l| Lyrics {
+            synced: false,
+            lines: l.lines.into_iter().map(|x| LyricLine { ms: x.ms, text: x.text }).collect(),
+            copyright: l.copyright,
+        }))
+    }
+
     pub async fn lyrics(&self, id: i64) -> Result<Option<Lyrics>, CoreError> {
         let to_ffi = |l: dz_offline::StoredLyrics| Lyrics {
             synced: l.synced,

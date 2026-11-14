@@ -12,14 +12,14 @@ use tokio::sync::{Mutex, RwLock};
 use url::Url;
 
 mod catalog;
-mod ytmusic;
+mod genius;
 mod cover;
 mod listen;
 /// Pour les crates qui lisent ou écrivent du JSON sans en dépendre elles-mêmes.
 pub use serde_json;
 mod stats;
 pub use stats::{MonthStats, RecentListen, StatArtist, StatGenre, StatTrack};
-pub use ytmusic::LyricsQuery;
+pub use genius::LyricsQuery;
 pub use catalog::{drain_notes, Card, Collection, LyricLine, Lyrics, PageView, SearchResults, Section};
 
 const GW_URL: &str = "https://www.deezer.com/ajax/gw-light.php";

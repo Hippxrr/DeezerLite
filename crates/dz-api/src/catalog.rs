@@ -46,7 +46,7 @@ pub struct Lyrics {
     pub synced: bool,
     pub lines: Vec<LyricLine>,
     pub copyright: String,
-    /// Provenance : "deezer" ou "youtube" (paroles de secours, YouTube Music).
+    /// Provenance : "deezer" ou "genius" (paroles de secours, voir `lyrics_genius`).
     pub source: &'static str,
 }
 

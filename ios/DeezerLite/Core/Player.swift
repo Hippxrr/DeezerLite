@@ -627,18 +627,35 @@ final class Player {
     /// ouverte des jours). Avant : plus jamais redemandés tant que l'app restait ouverte.
     @ObservationIgnored private var noLyrics: [Int64: Date] = [:]
 
-    /// Paroles Deezer du titre ; `nil` s'il n'en a pas. Erreur si Deezer ne répond pas (réseau) : avant, elle passait
-    /// pour « pas de paroles ».
-    func lyrics(_ id: Int64) async throws -> Lyrics? {
+    /// Paroles du titre : Deezer d'abord. Seulement s'il n'en a pas (pas sur une erreur réseau) et si le réglage le permet,
+    /// Genius en secours : texte simple, en ligne seulement, jamais gardé avec les titres téléchargés. `nil` : pas de
+    /// paroles. Erreur si Deezer ne répond pas (réseau) : avant, elle passait pour « pas de paroles ».
+    func lyrics(_ track: Track) async throws -> Lyrics? {
+        let id = track.id
         if let hit = lyricsCache[id] { return hit }
         guard let core, noLyrics[id].map({ Date().timeIntervalSince($0) > 30 * 60 }) ?? true else { return nil }
-        guard let found = try await core.lyrics(id: id) else {
+        var found = try await core.lyrics(id: id)
+        if found == nil, geniusLyrics, let genius = try await core.geniusLyrics(title: track.title, artist: track.artist) {
+            found = Lyrics(synced: false, lines: genius.lines, copyright: tr("Paroles : Genius"))
+        }
+        guard let lyrics = found else {
             noLyrics[id] = Date()
             return nil
         }
         if lyricsCache.count >= 30 { lyricsCache.removeAll() }
-        lyricsCache[id] = found
-        return found
+        lyricsCache[id] = lyrics
+        return lyrics
+    }
+
+    /// Réglage : paroles de secours sur Genius pour les titres sans paroles chez Deezer (activé par défaut).
+    private(set) var geniusLyrics = UserDefaults.standard.object(forKey: "geniusLyrics") as? Bool ?? true
+
+    func setGeniusLyrics(_ on: Bool) {
+        geniusLyrics = on
+        UserDefaults.standard.set(on, forKey: "geniusLyrics")
+        // Titres « sans paroles » redemandés avec le nouveau réglage ; désactivé, les paroles de Genius ne s'affichent plus.
+        lyricsCache = [:]
+        noLyrics = [:]
     }
 
     /// Un titre plus loin ou plus tôt dans la file, sans la règle « précédent = retour au début »
