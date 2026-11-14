@@ -1417,6 +1417,9 @@ private struct LyricsPanel: View {
     /// Paroles pas chargées (réseau) ; `attempt` relance le chargement (bouton « Réessayer »).
     @State private var failed = false
     @State private var attempt = 0
+    /// Demande déjà faite (titre et essai) : au retour dans l'app, rien n'est redemandé si le titre n'a pas changé.
+    @State private var shownFor: String?
+    @Environment(\.scenePhase) private var phase
     /// Ligne en cours (-1 : avant la première).
     @State private var active = -1
     /// Jusqu'à quand le texte ne suit plus la ligne en cours (l'utilisateur le fait défiler).
@@ -1490,13 +1493,19 @@ private struct LyricsPanel: View {
             LyricsShareSheet(request: request).environment(player)
         }
         .sensoryFeedback(.impact(weight: .medium), trigger: share?.id)
-        .task(id: "\(player.showFullPlayer ? player.current?.id ?? 0 : -1)-\(attempt)") {
+        .task(id: "\(player.showFullPlayer ? player.current?.id ?? 0 : -1)-\(attempt)-\(phase == .background)") {
+            // App en arrière-plan : rien n'est demandé (personne ne les lit). Au retour, seulement si le titre a changé.
+            let key = "\(player.showFullPlayer ? player.current?.id ?? 0 : -1)-\(attempt)"
+            guard phase != .background, key != shownFor else { return }
+            shownFor = key
             loaded = false
             failed = false
             active = -1
             lyrics = nil
             if player.showFullPlayer, let track = player.current, track.id != 0 {
-                do { lyrics = try await player.lyrics(track) } catch { failed = !Task.isCancelled }
+                do { lyrics = try await player.lyrics(track) } catch { failed = true }
+                // Interrompu (arrière-plan, autre titre) : refait au prochain affichage.
+                if Task.isCancelled { shownFor = nil; return }
             }
             loaded = true
         }
