@@ -169,11 +169,12 @@ final class CoverLoader: @unchecked Sendable {
         return blurred
     }
 
-    /// Fond de la pochette pleine largeur : le fond flouté en haut, aux mêmes proportions que la pochette nette posée
-    /// dessus, puis les couleurs de son bas prolongées jusqu'en bas de l'écran (dégradé des mêmes couleurs). Fait une
-    /// fois par titre, hors du thread principal. `tall` : hauteur de l'écran divisée par sa largeur.
-    func bleedBackdrop(url: String, download: Bool, tall: CGFloat) async -> UIImage? {
-        let key = "\(tall)|\(url)" as NSString
+    /// Fond de la pochette pleine largeur : le fond flouté à la place de la pochette nette posée dessus (sous la barre
+    /// d'état), ses couleurs du haut prolongées derrière l'heure et celles du bas jusqu'en bas de l'écran (dégradé des
+    /// mêmes couleurs). Fait une fois par titre, hors du thread principal. `tall` : hauteur de l'écran / largeur ;
+    /// `inset` : hauteur de la barre d'état / largeur.
+    func bleedBackdrop(url: String, download: Bool, tall: CGFloat, inset: CGFloat) async -> UIImage? {
+        let key = "\(tall)|\(inset)|\(url)" as NSString
         if let hit = backdrops.object(forKey: key) { return hit }
         guard let square = await backdrop(url: url, download: download)?.cgImage else { return nil }
         let context = blurContext
@@ -181,8 +182,10 @@ final class CoverLoader: @unchecked Sendable {
             let input = CIImage(cgImage: square)
             let width = input.extent.width
             let canvas = CGRect(x: 0, y: 0, width: width, height: (width * tall).rounded())
-            // Repère de Core Image : origine en bas. Le fond flouté est posé en haut ; sa dernière ligne est prolongée.
-            let placed = input.transformed(by: CGAffineTransform(translationX: 0, y: canvas.height - input.extent.height))
+            // Repère de Core Image : origine en bas. Le fond flouté est posé sous la barre d'état ; ses premières et dernières
+            // lignes sont prolongées vers le haut et vers le bas.
+            let gap = (width * inset).rounded()
+            let placed = input.transformed(by: CGAffineTransform(translationX: 0, y: canvas.height - gap - input.extent.height))
             guard let out = context.createCGImage(placed.clampedToExtent().cropped(to: canvas), from: canvas) else { return nil }
             return UIImage(cgImage: out)
         }.value

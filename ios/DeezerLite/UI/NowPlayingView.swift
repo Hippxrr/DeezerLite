@@ -603,20 +603,21 @@ struct NowPlayingView: View {
     var body: some View {
         GeometryReader { geo in
             let side = min(geo.size.width - 48, geo.size.height * 0.42)
-            // Pochette pleine largeur : sous l'heure, sans marge, son bas fondu dans le fond. Le titre et les boutons restent
-            // à leur place (celle de la pochette normale reste vide). Paroles ou file ouvertes : elle s'efface, comme l'autre.
+            // Pochette pleine largeur : juste sous l'heure (au-dessus, le fond prolonge ses couleurs), sans marge sur les côtés,
+            // ses bords haut et bas fondus dans le fond. Le titre et les boutons restent à leur place (celle de la pochette
+            // normale reste vide). Paroles ou file ouvertes : elle s'efface, comme l'autre.
             let bleed = fullBleed && panel == .cover
             ZStack(alignment: .top) {
             if bleed {
                 VStack(spacing: 0) {
                     CoverCarousel(side: geo.size.width, width: geo.size.width, pull: pull, bleed: true, onPullEnd: pullEnded) { clean.toggle() }
                         .mask {
-                            LinearGradient(stops: [.init(color: .black, location: 0.7), .init(color: .clear, location: 1)],
+                            LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.06),
+                                                   .init(color: .black, location: 0.7), .init(color: .clear, location: 1)],
                                            startPoint: .top, endPoint: .bottom)
                         }
                     Spacer(minLength: 0)
                 }
-                .ignoresSafeArea(edges: .top)
                 .transition(.opacity)
             }
             VStack(spacing: 0) {
@@ -659,18 +660,20 @@ struct NowPlayingView: View {
             .animation(.easeInOut(duration: 0.3), value: clean)
             }
             .animation(.easeInOut(duration: 0.3), value: panel)
+            // Pochette pleine largeur : fond aligné sous elle (mesures de l'écran), refait à neuf si le réglage change.
+            .background {
+                let screen = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
+                Backdrop(url: player.current?.coverUrl, open: player.showFullPlayer,
+                         tall: fullBleed ? screen / max(geo.size.width, 1) : nil,
+                         inset: geo.safeAreaInsets.top / max(geo.size.width, 1))
+                    .id(fullBleed)
+            }
         }
         // Retour haptique à l'appui long seulement (pas à la remise en mode normal quand le lecteur se ferme).
         .sensoryFeedback(trigger: clean) { _, _ in player.showFullPlayer ? .impact(weight: .medium) : nil }
         // Lecteur fermé : il se rouvre toujours en mode normal.
         .onChange(of: player.showFullPlayer) { _, open in if !open { clean = false } }
         .foregroundStyle(.white)
-        // Pochette pleine largeur : fond prolongé sous elle (refait à neuf si le réglage change, sans fondu déformé).
-        .background {
-            Backdrop(url: player.current?.coverUrl, open: player.showFullPlayer,
-                     tall: fullBleed ? UIScreen.main.bounds.height / max(UIScreen.main.bounds.width, 1) : nil)
-                .id(fullBleed)
-        }
         .contentShape(Rectangle())
         // File ou paroles ouvertes : le geste est coupé pour laisser défiler la liste.
         .gesture(pullGesture, including: panel == .cover ? .all : .subviews)
@@ -905,6 +908,8 @@ private struct Backdrop: View {
     /// Pochette pleine largeur : hauteur de l'écran / largeur. Le fond suit la pochette posée en haut, puis prolonge
     /// les couleurs de son bas (voir `CoverLoader.bleedBackdrop`).
     var tall: CGFloat? = nil
+    /// Hauteur de la barre d'état (heure, batterie) / largeur de l'écran : la pochette pleine largeur commence juste dessous.
+    var inset: CGFloat = 0
     @Environment(\.scenePhase) private var phase
     /// Fond précédent (dessous) et nouveau (dessus, qui apparaît en fondu) : d'une pochette à l'autre, jamais de
     /// passage par le noir, et un fondu long pour adoucir un passage clair → sombre.
@@ -924,8 +929,16 @@ private struct Backdrop: View {
                 if let top { layer(top).opacity(topOpacity) }
             }
             .opacity(shown)
-            // Voile sombre : les couleurs restent présentes mais les écarts de clarté sont atténués.
-            LinearGradient(colors: [.black.opacity(0.3), .black.opacity(0.6)], startPoint: .top, endPoint: .bottom)
+            // Voile sombre : les couleurs restent présentes mais les écarts de clarté sont atténués. Pochette pleine largeur :
+            // aucun voile jusqu'au bas de la pochette (elle n'en a pas : sur une pochette claire, la jonction faisait une bande
+            // sombre), puis il s'assombrit peu à peu sous le titre et les boutons.
+            if let tall {
+                let end = min((inset + 1) / tall, 0.8)
+                LinearGradient(stops: [.init(color: .clear, location: end), .init(color: .black.opacity(0.3), location: min(end + 0.18, 0.95)),
+                                       .init(color: .black.opacity(0.5), location: 1)], startPoint: .top, endPoint: .bottom)
+            } else {
+                LinearGradient(colors: [.black.opacity(0.3), .black.opacity(0.6)], startPoint: .top, endPoint: .bottom)
+            }
         }
         .ignoresSafeArea()
         .task(id: "\(url ?? "")|\(phase == .background)|\(open)") {
@@ -934,7 +947,7 @@ private struct Backdrop: View {
             guard let url else { fadeToBlack(); return }
             let image: UIImage?
             if let tall {
-                image = await CoverLoader.shared.bleedBackdrop(url: url, download: open, tall: tall)
+                image = await CoverLoader.shared.bleedBackdrop(url: url, download: open, tall: tall, inset: inset)
             } else {
                 image = await CoverLoader.shared.backdrop(url: url, download: open)
             }
@@ -975,8 +988,9 @@ private struct Backdrop: View {
     @ViewBuilder
     private func layer(_ image: UIImage) -> some View {
         if tall != nil {
-            // Aux proportions de l'écran : rien n'est recadré, le haut tombe exactement sous la pochette nette.
-            Image(uiImage: image).resizable().interpolation(.high).saturation(1.15)
+            // Aux proportions de l'écran : rien n'est recadré, l'image tombe exactement sous la pochette nette. Mêmes couleurs
+            // qu'elle (sans saturation en plus) : aucune jonction visible.
+            Image(uiImage: image).resizable().interpolation(.high)
         } else {
             Image(uiImage: image).resizable().interpolation(.high).scaledToFill().saturation(1.15)
         }
