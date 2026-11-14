@@ -186,7 +186,9 @@ final class CoverLoader: @unchecked Sendable {
             // lignes sont prolongées vers le haut et vers le bas.
             let gap = (width * inset).rounded()
             let placed = input.transformed(by: CGAffineTransform(translationX: 0, y: canvas.height - gap - input.extent.height))
-            guard let out = context.createCGImage(placed.clampedToExtent().cropped(to: canvas), from: canvas) else { return nil }
+            // Flou léger en plus : les fines traînées des lignes prolongées et la jonction disparaissent.
+            let smooth = placed.clampedToExtent().applyingGaussianBlur(sigma: 12).cropped(to: canvas)
+            guard let out = context.createCGImage(smooth, from: canvas) else { return nil }
             return UIImage(cgImage: out)
         }.value
         guard let extended else { return nil }

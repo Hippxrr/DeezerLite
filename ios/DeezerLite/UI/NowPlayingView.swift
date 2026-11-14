@@ -612,12 +612,17 @@ struct NowPlayingView: View {
                 VStack(spacing: 0) {
                     CoverCarousel(side: geo.size.width, width: geo.size.width, pull: pull, bleed: true, onPullEnd: pullEnded) { clean.toggle() }
                         .mask {
-                            LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.06),
-                                                   .init(color: .black, location: 0.7), .init(color: .clear, location: 1)],
+                            // Bas fondu en courbe douce (pas de départ visible du fondu, comme une ligne).
+                            LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.04),
+                                                   .init(color: .black, location: 0.7), .init(color: .black.opacity(0.74), location: 0.8),
+                                                   .init(color: .black.opacity(0.35), location: 0.88), .init(color: .black.opacity(0.07), location: 0.95),
+                                                   .init(color: .clear, location: 1)],
                                            startPoint: .top, endPoint: .bottom)
                         }
                     Spacer(minLength: 0)
                 }
+                // Collée sous l'heure : la zone réservée en haut (île dynamique comprise) est plus haute que l'heure.
+                .offset(y: -geo.safeAreaInsets.top * 0.3)
                 .transition(.opacity)
             }
             VStack(spacing: 0) {
@@ -665,7 +670,7 @@ struct NowPlayingView: View {
                 let screen = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
                 Backdrop(url: player.current?.coverUrl, open: player.showFullPlayer,
                          tall: fullBleed ? screen / max(geo.size.width, 1) : nil,
-                         inset: geo.safeAreaInsets.top / max(geo.size.width, 1))
+                         inset: geo.safeAreaInsets.top * 0.7 / max(geo.size.width, 1))
                     .id(fullBleed)
             }
         }
