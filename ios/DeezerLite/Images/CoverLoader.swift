@@ -200,7 +200,7 @@ final class CoverLoader: @unchecked Sendable {
             let extendedCover = mirrored.clampedToExtent().cropped(to: belowArea).composited(over: placed.clampedToExtent())
             // Force du flou, ligne par ligne (0 : net ; 1 : rayon maximal). Derrière l'heure, comme le fond flouté habituel ;
             // nul sous la pochette (cachée ou en train de s'effacer), à peine au bas de celle-ci ; puis sous elle, il part de
-            // presque rien et augmente de plus en plus vite jusqu'à 60 % de la hauteur restante.
+            // presque rien et augmente de plus en plus vite jusqu'à la moitié de la hauteur restante.
             let base: CGFloat = 0.27
             func eased(_ t: CGFloat) -> CGFloat { let t = min(max(t, 0), 1); return t * t * (3 - 2 * t) }
             func amount(_ row: CGFloat) -> CGFloat { // `row` : depuis le haut de l'écran
@@ -208,7 +208,7 @@ final class CoverLoader: @unchecked Sendable {
                 if row < gap + side * 0.1 { return base * (1 - eased((row - gap) / (side * 0.1))) }
                 if row < gap + side * 0.7 { return 0 }
                 if row < gap + side { return 0.04 * pow((row - gap - side * 0.7) / (side * 0.3), 2) }
-                return 0.04 + 0.96 * pow(min((row - gap - side) / (bottom * 0.6), 1), 1.6)
+                return 0.05 + 0.95 * pow(min((row - gap - side) / (bottom * 0.52), 1), 1.45)
             }
             let rows = Int(canvas.height)
             let column = (0..<rows).map { UInt8((amount(CGFloat($0)) * 255).rounded()) }

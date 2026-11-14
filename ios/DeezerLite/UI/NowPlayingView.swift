@@ -665,13 +665,19 @@ struct NowPlayingView: View {
             .animation(.easeInOut(duration: 0.3), value: clean)
             }
             .animation(.easeInOut(duration: 0.3), value: panel)
-            // Pochette pleine largeur : fond aligné sous elle (mesures de l'écran), refait à neuf si le réglage change.
             .background {
-                let screen = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
-                Backdrop(url: player.current?.coverUrl, open: player.showFullPlayer,
-                         tall: fullBleed ? screen / max(geo.size.width, 1) : nil,
-                         inset: geo.safeAreaInsets.top * 0.7 / max(geo.size.width, 1))
-                    .id(fullBleed)
+                Backdrop(url: player.current?.coverUrl, open: player.showFullPlayer)
+                // Pochette pleine largeur (réglage activé seulement) : son fond, aligné sous elle (mesures de l'écran), par-dessus
+                // le fond habituel. Paroles ou file ouvertes : il s'efface, le fond flouté habituel revient (le sien est net sous
+                // le milieu de la pochette, normalement cachée par elle).
+                if fullBleed {
+                    let screen = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
+                    Backdrop(url: player.current?.coverUrl, open: player.showFullPlayer,
+                             tall: screen / max(geo.size.width, 1),
+                             inset: geo.safeAreaInsets.top * 0.7 / max(geo.size.width, 1))
+                        .opacity(bleed ? 1 : 0)
+                        .animation(.easeInOut(duration: 0.3), value: bleed)
+                }
             }
         }
         // Retour haptique à l'appui long seulement (pas à la remise en mode normal quand le lecteur se ferme).
