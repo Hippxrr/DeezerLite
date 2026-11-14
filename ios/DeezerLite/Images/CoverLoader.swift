@@ -171,8 +171,8 @@ final class CoverLoader: @unchecked Sendable {
     }
 
     /// Fond de la pochette pleine largeur, posé sous la pochette nette (sous la barre d'état) : ses couleurs du haut
-    /// prolongées derrière l'heure, et celles du bas jusqu'en bas de l'écran, avec un flou progressif (presque net au début
-    /// du fondu de la pochette, de plus en plus fort en descendant) qui finit sur une seule couleur. Fait une fois par
+    /// prolongées derrière l'heure ; sous elle, son reflet, de plus en plus flou (en partant de presque rien), qui finit
+    /// sur une seule couleur. Fait une fois par
     /// titre, hors du thread principal. `tall` : hauteur de l'écran / largeur ; `inset` : hauteur de la barre d'état / largeur.
     func bleedBackdrop(url: String, download: Bool, tall: CGFloat, inset: CGFloat) async -> UIImage? {
         let key = "\(tall)|\(inset)|\(url)" as NSString
@@ -192,25 +192,23 @@ final class CoverLoader: @unchecked Sendable {
             let gap = (width * inset).rounded()
             let bottom = canvas.height - gap - side // bas de la pochette ; en dessous, `bottom` pixels de fond
             let placed = input.transformed(by: CGAffineTransform(translationX: 0, y: bottom))
-            // Sous la pochette : la moyenne de chaque colonne sur son dernier quart, pas sa dernière ligne. Sur une texture
-            // (grain, champ, pelage), la dernière ligne est plus claire ou plus sombre que la zone : ça faisait une ligne
-            // nette sous la pochette, et des taches claires en dessous.
-            let columns = CIFilter.columnAverage()
-            columns.inputImage = placed
-            columns.extent = CGRect(x: 0, y: bottom, width: width, height: side * 0.25)
-            guard let perColumn = columns.outputImage else { return nil }
+            // Sous la pochette : son reflet (bas de la pochette retourné). À la jonction, mêmes pixels des deux côtés : aucune
+            // coupure. Il y a ainsi une vraie image à flouter de plus en plus ; des couleurs prolongées, lisses dès le départ,
+            // donnaient un flou « d'un coup », sans dégradé visible. Au-delà du reflet, sa dernière ligne (déjà très floue).
+            let mirrored = placed.transformed(by: CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: 2 * bottom))
             let belowArea = CGRect(x: -width, y: -canvas.height, width: width * 3, height: canvas.height + bottom)
-            let extendedCover = perColumn.clampedToExtent().cropped(to: belowArea).composited(over: placed.clampedToExtent())
-            // Force du flou, ligne par ligne (0 : net ; 1 : rayon maximal). Derrière l'heure et au bas de la pochette, comme
-            // le fond flouté habituel ; nul sous le milieu de la pochette (caché) ; puis de plus en plus fort en descendant.
+            let extendedCover = mirrored.clampedToExtent().cropped(to: belowArea).composited(over: placed.clampedToExtent())
+            // Force du flou, ligne par ligne (0 : net ; 1 : rayon maximal). Derrière l'heure, comme le fond flouté habituel ;
+            // nul sous la pochette (cachée ou en train de s'effacer), à peine au bas de celle-ci ; puis sous elle, il part de
+            // presque rien et augmente de plus en plus vite jusqu'à 60 % de la hauteur restante.
             let base: CGFloat = 0.27
             func eased(_ t: CGFloat) -> CGFloat { let t = min(max(t, 0), 1); return t * t * (3 - 2 * t) }
             func amount(_ row: CGFloat) -> CGFloat { // `row` : depuis le haut de l'écran
                 if row < gap { return base }
                 if row < gap + side * 0.1 { return base * (1 - eased((row - gap) / (side * 0.1))) }
-                if row < gap + side * 0.6 { return 0 }
-                if row < gap + side { return base * eased((row - gap - side * 0.6) / (side * 0.4)) }
-                return base + (1 - base) * eased((row - gap - side) / (bottom * 0.45))
+                if row < gap + side * 0.7 { return 0 }
+                if row < gap + side { return 0.04 * pow((row - gap - side * 0.7) / (side * 0.3), 2) }
+                return 0.04 + 0.96 * pow(min((row - gap - side) / (bottom * 0.6), 1), 1.6)
             }
             let rows = Int(canvas.height)
             let column = (0..<rows).map { UInt8((amount(CGFloat($0)) * 255).rounded()) }
@@ -231,8 +229,7 @@ final class CoverLoader: @unchecked Sendable {
                 g.color1 = .white
                 return g.outputImage
             }
-            // Flou progressif : les couleurs se mélangent en descendant (sans lui, une ligne contrastée comme un clavier ou des
-            // mains faisait des bandes verticales), et le bas de la pochette nette se fond dans une version à peine floutée.
+            // Flou progressif sur la pochette et son reflet.
             let blur = CIFilter.maskedVariableBlur()
             blur.inputImage = extendedCover
             blur.mask = mask
@@ -244,7 +241,7 @@ final class CoverLoader: @unchecked Sendable {
             let mix = CIFilter.blendWithMask()
             mix.inputImage = average.outputImage?.clampedToExtent()
             mix.backgroundImage = blur.outputImage
-            mix.maskImage = ramp(0, 0.7)
+            mix.maskImage = ramp(0, 0.8)
             guard let smooth = mix.outputImage?.cropped(to: canvas),
                   let out = context.createCGImage(smooth, from: canvas) else { return nil }
             return UIImage(cgImage: out)
