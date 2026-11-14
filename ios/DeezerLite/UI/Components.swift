@@ -110,7 +110,7 @@ struct CoverView: View {
     var round = false
     /// `false` : seulement ce qui est déjà en mémoire, aucun téléchargement (lecteur plein écran fermé).
     var load = true
-    /// Pochette pleine largeur du grand lecteur : la version 1500 px (voir `CoverLoader.large`).
+    /// Pochette pleine largeur du grand lecteur : la version 1500 px au bas flouté peu à peu (voir `CoverLoader.bleedCover`).
     var large = false
     @Environment(\.displayScale) private var scale
     @Environment(\.scenePhase) private var phase
@@ -127,8 +127,8 @@ struct CoverView: View {
         self.load = load
         self.large = large
         // Déjà en mémoire à la bonne taille : affichée dès la première image, sans case vide ni fondu.
-        let pixels = large ? CoverLoader.large : Int(side * UIScreen.main.scale)
-        let exact = url.flatMap { CoverLoader.shared.cached(url: $0, pixels: pixels) }
+        let pixels = Int(side * UIScreen.main.scale)
+        let exact = url.flatMap { large ? CoverLoader.shared.cachedBleed(url: $0) : CoverLoader.shared.cached(url: $0, pixels: pixels) }
         _image = State(initialValue: exact)
         _imageURL = State(initialValue: exact == nil ? nil : url)
         _preview = State(initialValue: exact == nil ? url.flatMap { CoverLoader.shared.anyCached(url: $0) } : nil)
@@ -153,15 +153,16 @@ struct CoverView: View {
             guard let url else { image = nil; imageURL = nil; preview = nil; return }
             if imageURL != url { image = nil; imageURL = nil }
             let loader = CoverLoader.shared
-            let pixels = large ? CoverLoader.large : Int(side * scale)
-            if let hit = loader.cached(url: url, pixels: pixels) {
+            let pixels = Int(side * scale)
+            if let hit = large ? loader.cachedBleed(url: url) : loader.cached(url: url, pixels: pixels) {
                 image = hit
                 imageURL = url
                 preview = nil
                 return
             }
             if image == nil { preview = loader.anyCached(url: url) }
-            guard load, phase != .background, let sharp = await loader.image(url: url, pixels: pixels) else { return }
+            guard load, phase != .background,
+                  let sharp = large ? await loader.bleedCover(url: url) : await loader.image(url: url, pixels: pixels) else { return }
             image = sharp
             imageURL = url
         }

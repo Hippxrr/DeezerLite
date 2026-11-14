@@ -170,24 +170,58 @@ final class CoverLoader: @unchecked Sendable {
         return blurred
     }
 
-    /// Fond de la pochette pleine largeur : le fond flouté à la place de la pochette nette posée dessus (sous la barre
-    /// d'état), ses couleurs du haut prolongées derrière l'heure et celles du bas jusqu'en bas de l'écran (dégradé des
-    /// mêmes couleurs). Fait une fois par titre, hors du thread principal. `tall` : hauteur de l'écran / largeur ;
-    /// `inset` : hauteur de la barre d'état / largeur.
+    /// Fond de la pochette pleine largeur, posé sous la pochette nette (sous la barre d'état) : ses couleurs du haut
+    /// prolongées derrière l'heure, et celles du bas jusqu'en bas de l'écran, avec un flou progressif (presque net au début
+    /// du fondu de la pochette, de plus en plus fort en descendant) qui finit sur une seule couleur. Fait une fois par
+    /// titre, hors du thread principal. `tall` : hauteur de l'écran / largeur ; `inset` : hauteur de la barre d'état / largeur.
     func bleedBackdrop(url: String, download: Bool, tall: CGFloat, inset: CGFloat) async -> UIImage? {
         let key = "\(tall)|\(inset)|\(url)" as NSString
         if let hit = backdrops.object(forKey: key) { return hit }
-        guard let square = await backdrop(url: url, download: download)?.cgImage else { return nil }
+        let inMemory = anyCached(url: url).flatMap { ($0.cgImage?.width ?? 0) >= 400 ? $0 : nil }
+        let picture: UIImage?
+        if let inMemory { picture = inMemory } else if download { picture = await image(url: url, pixels: 500) } else { return nil }
+        guard let source = picture?.cgImage else { return nil }
         let context = blurContext
         let extended: UIImage? = await Task.detached(priority: .userInitiated) {
-            let input = CIImage(cgImage: square)
+            let scale = 400 / CGFloat(max(source.width, source.height, 1))
+            let input = CIImage(cgImage: source).transformed(by: CGAffineTransform(scaleX: scale, y: scale))
             let width = input.extent.width
+            let side = input.extent.height
             let canvas = CGRect(x: 0, y: 0, width: width, height: (width * tall).rounded())
-            // Repère de Core Image : origine en bas. Le fond flouté est posé sous la barre d'état ; ses premières et dernières
-            // lignes sont prolongées vers le haut et vers le bas.
+            // Repère de Core Image : origine en bas. La pochette est posée sous la barre d'état.
             let gap = (width * inset).rounded()
-            let bottom = canvas.height - gap - input.extent.height // bas de la pochette ; en dessous, `bottom` pixels de fond
+            let bottom = canvas.height - gap - side // bas de la pochette ; en dessous, `bottom` pixels de fond
             let placed = input.transformed(by: CGAffineTransform(translationX: 0, y: bottom))
+            // Sous la pochette : la moyenne de chaque colonne sur son dernier quart, pas sa dernière ligne. Sur une texture
+            // (grain, champ, pelage), la dernière ligne est plus claire ou plus sombre que la zone : ça faisait une ligne
+            // nette sous la pochette, et des taches claires en dessous.
+            let columns = CIFilter.columnAverage()
+            columns.inputImage = placed
+            columns.extent = CGRect(x: 0, y: bottom, width: width, height: side * 0.25)
+            guard let perColumn = columns.outputImage else { return nil }
+            let belowArea = CGRect(x: -width, y: -canvas.height, width: width * 3, height: canvas.height + bottom)
+            let extendedCover = perColumn.clampedToExtent().cropped(to: belowArea).composited(over: placed.clampedToExtent())
+            // Force du flou, ligne par ligne (0 : net ; 1 : rayon maximal). Derrière l'heure et au bas de la pochette, comme
+            // le fond flouté habituel ; nul sous le milieu de la pochette (caché) ; puis de plus en plus fort en descendant.
+            let base: CGFloat = 0.27
+            func eased(_ t: CGFloat) -> CGFloat { let t = min(max(t, 0), 1); return t * t * (3 - 2 * t) }
+            func amount(_ row: CGFloat) -> CGFloat { // `row` : depuis le haut de l'écran
+                if row < gap { return base }
+                if row < gap + side * 0.1 { return base * (1 - eased((row - gap) / (side * 0.1))) }
+                if row < gap + side * 0.6 { return 0 }
+                if row < gap + side { return base * eased((row - gap - side * 0.6) / (side * 0.4)) }
+                return base + (1 - base) * eased((row - gap - side) / (bottom * 0.45))
+            }
+            let rows = Int(canvas.height)
+            let column = (0..<rows).map { UInt8((amount(CGFloat($0)) * 255).rounded()) }
+            guard let provider = CGDataProvider(data: Data(column) as CFData),
+                  let strength = CGImage(width: 1, height: rows, bitsPerComponent: 8, bitsPerPixel: 8, bytesPerRow: 1,
+                                         space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGBitmapInfo(rawValue: 0),
+                                         provider: provider, decode: nil, shouldInterpolate: true, intent: .defaultIntent)
+            else { return nil }
+            // Valeurs prises telles quelles (sans gestion des couleurs, qui les aurait assombries).
+            let mask = CIImage(cgImage: strength, options: [.colorSpace: NSNull()])
+                .transformed(by: CGAffineTransform(scaleX: width, y: 1)).clampedToExtent()
             // Sous la pochette (dessous = vers 0 en Core Image), en courbe douce : de `from` (rien) à `to` (tout).
             func ramp(_ from: CGFloat, _ to: CGFloat) -> CIImage? {
                 let g = CIFilter.smoothLinearGradient()
@@ -197,16 +231,16 @@ final class CoverLoader: @unchecked Sendable {
                 g.color1 = .white
                 return g.outputImage
             }
-            // Ligne du bas prolongée, de plus en plus floue en descendant : ses couleurs se mélangent. Prolongée telle quelle,
-            // une ligne contrastée (clavier, mains) faisait des bandes verticales sur toute la hauteur.
+            // Flou progressif : les couleurs se mélangent en descendant (sans lui, une ligne contrastée comme un clavier ou des
+            // mains faisait des bandes verticales), et le bas de la pochette nette se fond dans une version à peine floutée.
             let blur = CIFilter.maskedVariableBlur()
-            blur.inputImage = placed.clampedToExtent().applyingGaussianBlur(sigma: 12)
-            blur.mask = ramp(0, 0.45)
+            blur.inputImage = extendedCover
+            blur.mask = mask
             blur.radius = 110
             // Puis une seule couleur : la moyenne du bas de la pochette.
             let average = CIFilter.areaAverage()
             average.inputImage = placed
-            average.extent = CGRect(x: 0, y: bottom, width: width, height: input.extent.height * 0.35)
+            average.extent = CGRect(x: 0, y: bottom, width: width, height: side * 0.35)
             let mix = CIFilter.blendWithMask()
             mix.inputImage = average.outputImage?.clampedToExtent()
             mix.backgroundImage = blur.outputImage
@@ -219,6 +253,37 @@ final class CoverLoader: @unchecked Sendable {
         backdrops.setObject(extended, forKey: key)
         return extended
     }
+
+    /// Pochette pleine largeur (1500 px) dont le bas devient de plus en plus flou, nette jusqu'à 55 % de sa hauteur. Elle
+    /// arrive ainsi au fond déjà floutée : une pochette nette jusqu'au bout passait d'un coup du détail (grain, texture) au
+    /// flou, comme une ligne. Faite une fois par titre, hors du thread principal.
+    func bleedCover(url: String) async -> UIImage? {
+        if let hit = cachedBleed(url: url) { return hit }
+        guard let source = await image(url: url, pixels: Self.large)?.cgImage else { return nil }
+        let context = blurContext
+        let result: UIImage? = await Task.detached(priority: .userInitiated) {
+            let input = CIImage(cgImage: source)
+            let frame = input.extent
+            // Repère de Core Image : origine en bas. Aucun flou au-dessus de 55 % de la hauteur, flou maximal tout en bas.
+            let ramp = CIFilter.smoothLinearGradient()
+            ramp.point0 = CGPoint(x: 0, y: frame.minY + frame.height * 0.45)
+            ramp.point1 = CGPoint(x: 0, y: frame.minY)
+            ramp.color0 = .black
+            ramp.color1 = .white
+            let blur = CIFilter.maskedVariableBlur()
+            blur.inputImage = input.clampedToExtent()
+            blur.mask = ramp.outputImage
+            blur.radius = Float(frame.width * 0.0375)
+            guard let out = blur.outputImage?.cropped(to: frame), let cg = context.createCGImage(out, from: frame) else { return nil }
+            return UIImage(cgImage: cg)
+        }.value
+        if let result, let cg = result.cgImage { cache.setObject(result, forKey: Self.bleedKey(url), cost: cg.bytesPerRow * cg.height) }
+        return result
+    }
+
+    func cachedBleed(url: String) -> UIImage? { cache.object(forKey: Self.bleedKey(url)) }
+
+    private static func bleedKey(_ url: String) -> NSString { "bleed|\(url)" as NSString }
 
     /// Prépare des pochettes avant qu'elles ne soient affichées (titres suivants de la file).
     func prefetch(_ urls: [String], pixels: Int) {
