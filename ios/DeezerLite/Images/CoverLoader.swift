@@ -254,37 +254,6 @@ final class CoverLoader: @unchecked Sendable {
         return extended
     }
 
-    /// Pochette pleine largeur (1500 px) dont le bas devient de plus en plus flou, nette jusqu'à 55 % de sa hauteur. Elle
-    /// arrive ainsi au fond déjà floutée : une pochette nette jusqu'au bout passait d'un coup du détail (grain, texture) au
-    /// flou, comme une ligne. Faite une fois par titre, hors du thread principal.
-    func bleedCover(url: String) async -> UIImage? {
-        if let hit = cachedBleed(url: url) { return hit }
-        guard let source = await image(url: url, pixels: Self.large)?.cgImage else { return nil }
-        let context = blurContext
-        let result: UIImage? = await Task.detached(priority: .userInitiated) {
-            let input = CIImage(cgImage: source)
-            let frame = input.extent
-            // Repère de Core Image : origine en bas. Aucun flou au-dessus de 55 % de la hauteur, flou maximal tout en bas.
-            let ramp = CIFilter.smoothLinearGradient()
-            ramp.point0 = CGPoint(x: 0, y: frame.minY + frame.height * 0.45)
-            ramp.point1 = CGPoint(x: 0, y: frame.minY)
-            ramp.color0 = .black
-            ramp.color1 = .white
-            let blur = CIFilter.maskedVariableBlur()
-            blur.inputImage = input.clampedToExtent()
-            blur.mask = ramp.outputImage
-            blur.radius = Float(frame.width * 0.0375)
-            guard let out = blur.outputImage?.cropped(to: frame), let cg = context.createCGImage(out, from: frame) else { return nil }
-            return UIImage(cgImage: cg)
-        }.value
-        if let result, let cg = result.cgImage { cache.setObject(result, forKey: Self.bleedKey(url), cost: cg.bytesPerRow * cg.height) }
-        return result
-    }
-
-    func cachedBleed(url: String) -> UIImage? { cache.object(forKey: Self.bleedKey(url)) }
-
-    private static func bleedKey(_ url: String) -> NSString { "bleed|\(url)" as NSString }
-
     /// Prépare des pochettes avant qu'elles ne soient affichées (titres suivants de la file).
     func prefetch(_ urls: [String], pixels: Int) {
         for url in urls where cached(url: url, pixels: pixels) == nil {
