@@ -304,11 +304,12 @@ pub struct LyricLine {
     pub text: String,
 }
 
-/// Titre et artiste écrits dans un MP3 (pour préremplir l'import).
+/// Titre, artiste et album écrits dans un MP3 (pour préremplir l'import).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct Mp3Tags {
     pub title: Option<String>,
     pub artist: Option<String>,
+    pub album: Option<String>,
 }
 
 /// Paroles de Deezer (uniquement Deezer, pas de source de secours).
@@ -1197,15 +1198,35 @@ impl Core {
     /// le permet. Jamais gardées avec les titres téléchargés : en ligne seulement. Genius injoignable : `None`.
     /// MP3 importés : titre et artiste écrits dans le fichier (son début suffit).
     pub fn mp3_tags(&self, head: Vec<u8>) -> Mp3Tags {
-        let (title, artist) = dz_api::read_mp3_tags(&head);
-        Mp3Tags { title, artist }
+        let (title, artist, album) = dz_api::read_mp3_tags(&head);
+        Mp3Tags { title, artist, album }
     }
 
     /// Envoie un MP3 sur le compte : nom, artiste et pochette (JPEG) écrits dans le fichier avant l'envoi (Deezer les
-    /// reprend, ils apparaissent partout). Renvoie l'identifiant du nouveau titre (négatif), 0 s'il n'est pas connu.
-    pub async fn personal_upload(&self, file_name: String, mp3: Vec<u8>, title: String, artist: String, cover: Option<Vec<u8>>) -> Result<i64, CoreError> {
+    /// reprend, ils apparaissent partout). `start_ms` / `end_ms` (0 : jusqu'à la fin) : seule cette partie est gardée,
+    /// coupée entre deux trames entières. Renvoie l'identifiant du nouveau titre (négatif), 0 s'il n'est pas connu.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn personal_upload(
+        &self,
+        file_name: String,
+        mp3: Vec<u8>,
+        title: String,
+        artist: String,
+        album: String,
+        cover: Option<Vec<u8>>,
+        start_ms: u64,
+        end_ms: u64,
+    ) -> Result<i64, CoreError> {
         let api = self.api.clone();
-        let tagged = dz_api::tag_mp3(&mp3, title.trim(), artist.trim(), "MP3", cover.as_deref());
+        let audio = if start_ms > 0 || end_ms > 0 {
+            dz_api::cut_mp3(&mp3, start_ms, (end_ms > 0).then_some(end_ms))
+                .ok_or_else(|| CoreError::Api("Rien à garder dans la partie choisie.".into()))?
+        } else {
+            mp3
+        };
+        // Album facultatif : « MP3 » sinon (Deezer refuse ensuite toute modification sans album).
+        let album = if album.trim().is_empty() { "MP3" } else { album.trim() };
+        let tagged = dz_api::tag_mp3(&audio, title.trim(), artist.trim(), album, cover.as_deref());
         let results = self.run(async move { api.upload_personal_song(&file_name, tagged).await }).await??;
         let id = match &results {
             dz_api::serde_json::Value::String(s) => s.trim().parse::<i64>().ok(),

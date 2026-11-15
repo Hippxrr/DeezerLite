@@ -131,14 +131,14 @@ fn id3_len(mp3: &[u8]) -> usize {
     10 + size + footer
 }
 
-/// Titre et artiste lus dans l'étiquette ID3v2 d'un MP3 (pour préremplir la fenêtre d'import), s'il y en a une.
-pub fn read_mp3_tags(mp3: &[u8]) -> (Option<String>, Option<String>) {
+/// Titre, artiste et album lus dans l'étiquette ID3v2 d'un MP3 (pour préremplir la fenêtre d'import), s'il y en a une.
+pub fn read_mp3_tags(mp3: &[u8]) -> (Option<String>, Option<String>, Option<String>) {
     let end = id3_len(mp3).min(mp3.len());
     if end == 0 {
-        return (None, None);
+        return (None, None, None);
     }
     let v3 = mp3[3] >= 3;
-    let (mut title, mut artist) = (None, None);
+    let (mut title, mut artist, mut album) = (None, None, None);
     let mut at = 10;
     while at + 10 <= end {
         let id = &mp3[at..at + 4];
@@ -153,13 +153,17 @@ pub fn read_mp3_tags(mp3: &[u8]) -> (Option<String>, Option<String>) {
         };
         let start = at + 10;
         let Some(body) = mp3.get(start..start + len) else { break };
-        if v3 && (id == b"TIT2" || id == b"TPE1") {
-            let text = decode_text(body);
-            if id == b"TIT2" { title = text } else { artist = text }
+        if v3 {
+            match id {
+                b"TIT2" => title = decode_text(body),
+                b"TPE1" => artist = decode_text(body),
+                b"TALB" => album = decode_text(body),
+                _ => {}
+            }
         }
         at = start + len;
     }
-    (title, artist)
+    (title, artist, album)
 }
 
 fn decode_text(body: &[u8]) -> Option<String> {
@@ -181,9 +185,203 @@ fn decode_text(body: &[u8]) -> Option<String> {
     (!t.is_empty()).then_some(t)
 }
 
+/// Une trame MPEG audio : longueur en octets, échantillons, fréquence, et de quoi reconnaître les suivantes.
+#[derive(Clone, Copy)]
+struct MpegFrame {
+    len: usize,
+    samples: u64,
+    rate: u64,
+    /// Version, couche et fréquence : les mêmes pour toutes les trames d'un fichier (évite les faux débuts de trame).
+    kind: u8,
+    /// Taille des infos de côté (position d'un en-tête Xing / Info dans la première trame).
+    side: usize,
+}
+
+fn mpeg_frame(h: &[u8]) -> Option<MpegFrame> {
+    let [a, b, c, d] = *h.get(..4)? else { return None };
+    if a != 0xFF || b & 0xE0 != 0xE0 {
+        return None;
+    }
+    let version = (b >> 3) & 3; // 0 : MPEG 2.5, 2 : MPEG 2, 3 : MPEG 1
+    let layer = (b >> 1) & 3; // 1 : couche III, 2 : II, 3 : I
+    let (bi, si) = ((c >> 4) as usize, ((c >> 2) & 3) as usize);
+    if version == 1 || layer == 0 || bi == 0 || bi == 15 || si == 3 {
+        return None;
+    }
+    let v1 = version == 3;
+    const B: [[u16; 14]; 5] = [
+        [32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448], // MPEG 1, couche I
+        [32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384],    // MPEG 1, couche II
+        [32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],     // MPEG 1, couche III
+        [32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],    // MPEG 2 / 2.5, couche I
+        [8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],         // MPEG 2 / 2.5, couches II et III
+    ];
+    let row = match (v1, layer) {
+        (true, 3) => 0,
+        (true, 2) => 1,
+        (true, _) => 2,
+        (false, 3) => 3,
+        _ => 4,
+    };
+    let bitrate = B[row][bi - 1] as usize * 1000;
+    let rate = [44100, 48000, 32000][si] >> if v1 { 0 } else if version == 2 { 1 } else { 2 };
+    let pad = ((c >> 1) & 1) as usize;
+    let (len, samples) = match layer {
+        3 => ((12 * bitrate / rate + pad) * 4, 384),
+        2 => (144 * bitrate / rate + pad, 1152),
+        _ if v1 => (144 * bitrate / rate + pad, 1152),
+        _ => (72 * bitrate / rate + pad, 576),
+    };
+    let mono = d >> 6 == 3;
+    let side = match (v1, mono) {
+        (true, true) => 17,
+        (true, false) => 32,
+        (false, true) => 9,
+        (false, false) => 17,
+    };
+    Some(MpegFrame { len, samples, rate: rate as u64, kind: b & 0xFE | (c & 0x0C), side })
+}
+
+/// Vraie trame à `at` : son en-tête est valable et la trame suivante (s'il y en a une) est du même genre.
+fn frame_at(data: &[u8], at: usize, kind: Option<u8>) -> Option<MpegFrame> {
+    let f = mpeg_frame(data.get(at..)?)?;
+    if kind.is_some_and(|k| k != f.kind) || at + f.len > data.len() {
+        return None;
+    }
+    match data.get(at + f.len..at + f.len + 4) {
+        Some(next) if kind.is_none() => mpeg_frame(next).filter(|n| n.kind == f.kind).map(|_| f),
+        _ => Some(f),
+    }
+}
+
+/// Garde de `start_ms` à `end_ms` (`None` : jusqu'à la fin) d'un MP3. Coupé entre deux trames entières : aucun bout de
+/// trame, ni étiquette (ID3, APE), ni en-tête Xing / Info (il donnerait l'ancienne durée) ne reste. `None` si le fichier
+/// n'a pas de son MPEG lisible ou si rien ne reste.
+pub fn cut_mp3(mp3: &[u8], start_ms: u64, end_ms: Option<u64>) -> Option<Vec<u8>> {
+    let mut at = id3_len(mp3).min(mp3.len());
+    // Première vraie trame (des octets parasites peuvent précéder).
+    let first = loop {
+        if at + 4 > mp3.len() {
+            return None;
+        }
+        if let Some(f) = frame_at(mp3, at, None) {
+            break f;
+        }
+        at += 1;
+    };
+    // En-tête Xing / Info (LAME) ou VBRI : une trame sans son qui décrit l'ancien fichier entier.
+    let head = &mp3[at..at + first.len];
+    let info = [4 + first.side, 36].iter().any(|&o| matches!(head.get(o..o + 4), Some(b"Xing" | b"Info" | b"VBRI")));
+    if info {
+        at += first.len;
+    }
+    let mut out = Vec::new();
+    let (mut count, mut bitrates) = (0u32, std::collections::BTreeSet::new());
+    let mut elapsed = 0u64; // échantillons déjà passés
+    while at + 4 <= mp3.len() {
+        let Some(f) = frame_at(mp3, at, Some(first.kind)) else {
+            // Étiquette de fin (ID3v1 « TAG », APE…) ou octets abîmés : on cherche la trame suivante, sinon c'est fini.
+            match (at + 1..mp3.len().saturating_sub(3)).find(|&i| frame_at(mp3, i, Some(first.kind)).is_some()) {
+                Some(next) if !mp3[at..].starts_with(b"TAG") && !mp3[at..].starts_with(b"APETAGEX") => {
+                    at = next;
+                    continue;
+                }
+                _ => break,
+            }
+        };
+        let ms = elapsed * 1000 / f.rate;
+        if end_ms.is_some_and(|end| ms >= end) {
+            break;
+        }
+        if ms >= start_ms {
+            out.extend_from_slice(&mp3[at..at + f.len]);
+            count += 1;
+            bitrates.insert(mp3[at + 2] >> 4);
+        }
+        elapsed += f.samples;
+        at += f.len;
+    }
+    if out.is_empty() {
+        return None;
+    }
+    Some(match info_frame(&out, count, bitrates.len() > 1) {
+        Some(mut head) => {
+            head.extend_from_slice(&out);
+            head
+        }
+        None => out,
+    })
+}
+
+/// Nouvel en-tête Xing (débit variable) ou Info (constant) : nombre de trames et taille du son coupé, pour que la durée
+/// soit exacte partout (sans lui, celle d'un débit variable est estimée, souvent fausse). Une trame muette, comme LAME.
+fn info_frame(audio: &[u8], frames: u32, vbr: bool) -> Option<Vec<u8>> {
+    let h = [audio[0], audio[1] | 1, audio[2], audio[3]]; // sans somme de contrôle (CRC)
+    let f = mpeg_frame(&h)?;
+    if f.len < 4 + f.side + 16 {
+        return None; // trame trop petite pour l'en-tête (très bas débit) : on s'en passe
+    }
+    let mut out = vec![0u8; f.len];
+    out[..4].copy_from_slice(&h);
+    let at = 4 + f.side;
+    out[at..at + 4].copy_from_slice(if vbr { b"Xing" } else { b"Info" });
+    out[at + 4..at + 8].copy_from_slice(&3u32.to_be_bytes()); // champs présents : trames et octets
+    out[at + 8..at + 12].copy_from_slice(&frames.to_be_bytes());
+    out[at + 12..at + 16].copy_from_slice(&((f.len + audio.len()) as u32).to_be_bytes());
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MP3 factice : MPEG 1 couche III, 128 kbit/s, 44,1 kHz (trames de 417 octets, 1152 échantillons ≈ 26,1 ms),
+    /// numérotées dans leur 5e octet.
+    fn fake_mp3(frames: usize, xing: bool) -> Vec<u8> {
+        let mut out = tag_mp3(b"", "Titre", "", "", None);
+        let mut frame = |n: u8, xing: bool| {
+            let mut f = vec![0u8; 417];
+            f[..4].copy_from_slice(&[0xFF, 0xFB, 0x90, 0x00]);
+            f[4] = n;
+            if xing {
+                f[36..40].copy_from_slice(b"Info");
+            }
+            out.extend_from_slice(&f);
+        };
+        if xing {
+            frame(255, true);
+        }
+        for n in 0..frames {
+            frame(n as u8, false);
+        }
+        out.extend_from_slice(b"TAG");
+        out.extend_from_slice(&[0u8; 125]);
+        out
+    }
+
+    #[test]
+    fn cut_keeps_whole_frames_of_the_chosen_part_only() {
+        let mp3 = fake_mp3(100, true);
+        let cut = cut_mp3(&mp3, 1000, Some(2000)).unwrap();
+        // Nouvel en-tête Info (1re trame, muette), puis les trames qui commencent entre 1 s et 2 s : n° 39 (1018 ms)
+        // à 76 (1985 ms).
+        assert_eq!(cut.len(), 39 * 417, "trames entières seulement");
+        let (info, audio) = cut.split_at(417);
+        assert_eq!(&info[36..40], b"Info");
+        assert_eq!(info[44..48], 38u32.to_be_bytes(), "nombre de trames du son coupé");
+        assert_eq!(info[48..52], (39u32 * 417).to_be_bytes(), "taille du fichier coupé");
+        let numbers: Vec<u8> = audio.chunks(417).map(|f| f[4]).collect();
+        assert_eq!(numbers, (39..=76).collect::<Vec<u8>>());
+        assert!(audio.chunks(417).all(|f| f[..4] == [0xFF, 0xFB, 0x90, 0x00]));
+        assert_eq!(cut.windows(4).filter(|w| w == b"Info").count(), 1, "l'ancien en-tête est retiré");
+        assert!(!cut.windows(3).any(|w| w == b"TAG" || w == b"ID3"));
+        // Jusqu'à la fin : toutes les trames depuis le début choisi, sans l'étiquette de fin.
+        assert_eq!(cut_mp3(&mp3, 0, None).unwrap().len(), 101 * 417);
+        assert_eq!(cut_mp3(&fake_mp3(10, false), 0, None).unwrap().len(), 11 * 417);
+        // Rien de lisible, ou rien dans la partie choisie.
+        assert!(cut_mp3(b"pas un mp3", 0, None).is_none());
+        assert!(cut_mp3(&mp3, 10_000, None).is_none());
+    }
 
     #[test]
     fn tags_replace_the_old_ones_and_are_read_back() {
@@ -194,8 +392,8 @@ mod tests {
         assert!(out.ends_with(b"\xFF\xFBson"), "le son reste intact");
         assert_eq!(out.windows(4).filter(|w| w == b"TIT2").count(), 1, "une seule étiquette");
         assert!(out.windows(10).any(|w| w == b"image/jpeg"));
-        assert_eq!(read_mp3_tags(&out), (Some("Mon titre é 🎵".into()), Some("Moi".into())));
-        assert_eq!(read_mp3_tags(b"\xFF\xFBson"), (None, None));
+        assert_eq!(read_mp3_tags(&out), (Some("Mon titre é 🎵".into()), Some("Moi".into()), Some("Mes MP3".into())));
+        assert_eq!(read_mp3_tags(b"\xFF\xFBson"), (None, None, None));
     }
 
     #[test]

@@ -1,5 +1,33 @@
+import AVFoundation
 import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
+
+/// Choix d'un MP3 en mode copie : le fichier est copié pour l'app au lieu d'être ouvert sur place. Ouvert sur place
+/// (`fileImporter`), « Ouvrir » ne répondait pas dans une app installée hors App Store (LiveContainer…).
+struct Mp3FilePicker: UIViewControllerRepresentable {
+    let onPick: (URL) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator(onPick: onPick) }
+
+    func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.mp3], asCopy: true)
+        picker.allowsMultipleSelection = false
+        picker.delegate = context.coordinator
+        return picker
+    }
+
+    func updateUIViewController(_ picker: UIDocumentPickerViewController, context: Context) {}
+
+    final class Coordinator: NSObject, UIDocumentPickerDelegate {
+        let onPick: (URL) -> Void
+        init(onPick: @escaping (URL) -> Void) { self.onPick = onPick }
+
+        func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+            if let url = urls.first { onPick(url) }
+        }
+    }
+}
 
 /// Import d'un MP3 (fichier choisi) ou modification d'un MP3 déjà envoyé sur le compte.
 struct Mp3Edit: Identifiable {
@@ -11,6 +39,7 @@ struct Mp3Edit: Identifiable {
     let fileName: String
     let title: String
     let artist: String
+    let album: String
 }
 
 /// Fenêtre nom (obligatoire), artiste et pochette d'un MP3. À l'import, nom, artiste et pochette sont écrits dans le
@@ -22,6 +51,7 @@ struct Mp3EditView: View {
     let edit: Mp3Edit
     @State private var title: String
     @State private var artist: String
+    @State private var album: String
     /// Pochette choisie et cadrée (JPEG carré).
     @State private var cover: Data?
     @State private var preview: UIImage?
@@ -30,6 +60,12 @@ struct Mp3EditView: View {
     @State private var sending = false
     /// « Pochette d'origine » choisie : la pochette mise sur ce téléphone est retirée à l'enregistrement.
     @State private var resetCover = false
+    /// Import : partie gardée (secondes), coupée entre deux trames à l'envoi ; écoute pour placer le début et la fin.
+    @State private var length: Double = 0
+    @State private var from: Double = 0
+    @State private var to: Double = 0
+    @State private var listener: AVAudioPlayer?
+    @State private var listening: Task<Void, Never>?
 
     private struct CropRequest: Identifiable {
         let id = UUID()
@@ -40,6 +76,7 @@ struct Mp3EditView: View {
         self.edit = edit
         _title = State(initialValue: edit.title)
         _artist = State(initialValue: edit.artist)
+        _album = State(initialValue: edit.album)
     }
 
     var body: some View {
@@ -50,6 +87,9 @@ struct Mp3EditView: View {
                 }
                 Section(tr("Artiste")) {
                     TextField(tr("Artiste"), text: $artist)
+                }
+                Section(tr("Album")) {
+                    TextField(tr("Facultatif"), text: $album)
                 }
                 Section {
                     HStack(spacing: 14) {
@@ -80,8 +120,30 @@ struct Mp3EditView: View {
                         Text(tr("Pochette visible seulement sur ce téléphone : Deezer ne permet pas de changer celle d'un MP3 déjà envoyé (l'app Deezer, le site et l'ordinateur gardent l'ancienne). Pour la changer partout, réimporte le MP3 avec la nouvelle pochette."))
                     }
                 }
+                if edit.file != nil, length >= 2 {
+                    Section {
+                        LabeledContent(tr("Début"), value: Self.time(from))
+                        Slider(value: $from, in: 0...length, onEditingChanged: { editing in if !editing { listen(at: from) } })
+                            .accessibilityLabel(tr("Début"))
+                        LabeledContent(tr("Fin"), value: Self.time(to))
+                        Slider(value: $to, in: 0...length, onEditingChanged: { editing in if !editing { listen(at: max(from, to - 3)) } })
+                            .accessibilityLabel(tr("Fin"))
+                        Button(listening == nil ? tr("Écouter") : tr("Pause")) {
+                            if listening == nil { listen(at: from) } else { stopListening() }
+                        }
+                    } header: {
+                        Text(tr("Couper"))
+                    } footer: {
+                        Text(tr("%@ gardées. Relâche un curseur pour écouter à cet endroit.", Self.time(to - from)))
+                    }
+                    // Au moins 1 s gardée.
+                    .onChange(of: from) { _, v in if v > to - 1 { from = max(0, to - 1) } }
+                    .onChange(of: to) { _, v in if v < from + 1 { to = min(length, from + 1) } }
+                }
             }
             .navigationTitle(edit.track == nil ? tr("Importer un MP3") : tr("Modifier le MP3"))
+            .task { prepareCut() }
+            .onDisappear { stopListening() }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button(tr("Annuler")) { dismiss() } }
@@ -89,7 +151,8 @@ struct Mp3EditView: View {
                     Button(edit.track == nil ? tr("Importer") : tr("Enregistrer")) {
                         sending = true
                         Task {
-                            await player.saveMp3(edit, title: title, artist: artist, cover: cover, resetCover: resetCover)
+                            stopListening()
+                            await player.saveMp3(edit, title: title, artist: artist, album: album, cover: cover, resetCover: resetCover, cut: cutRange)
                             dismiss()
                         }
                     }
@@ -129,5 +192,49 @@ struct Mp3Art: View {
             .overlay {
                 Image(systemName: "music.note").font(.system(size: side * 0.4, weight: .semibold)).foregroundStyle(.white)
             }
+    }
+}
+
+extension Mp3EditView {
+    /// Partie gardée en ms (`end` 0 : jusqu'à la fin), `nil` : le fichier entier.
+    fileprivate var cutRange: (start: UInt64, end: UInt64)? {
+        guard edit.file != nil, length >= 2, from > 0.05 || to < length - 0.05 else { return nil }
+        return (UInt64(from * 1000), to < length - 0.05 ? UInt64(to * 1000) : 0)
+    }
+
+    fileprivate static func time(_ seconds: Double) -> String {
+        let s = max(seconds, 0)
+        return String(format: "%d:%04.1f", Int(s) / 60, s.truncatingRemainder(dividingBy: 60))
+    }
+
+    /// Durée lue dans le fichier choisi (import seulement).
+    fileprivate func prepareCut() {
+        guard let file = edit.file, listener == nil, let audio = try? AVAudioPlayer(data: file) else { return }
+        listener = audio
+        length = audio.duration
+        to = audio.duration
+    }
+
+    /// Écoute de `at` jusqu'à la fin choisie ; la musique en cours s'arrête.
+    fileprivate func listen(at: Double) {
+        guard let listener else { return }
+        if player.status.playing { player.pause() }
+        listening?.cancel()
+        listener.currentTime = max(0, at)
+        listener.play()
+        listening = Task { @MainActor in
+            while !Task.isCancelled, listener.isPlaying, listener.currentTime < to {
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            guard !Task.isCancelled else { return }
+            listener.pause()
+            listening = nil
+        }
+    }
+
+    fileprivate func stopListening() {
+        listening?.cancel()
+        listening = nil
+        listener?.pause()
     }
 }

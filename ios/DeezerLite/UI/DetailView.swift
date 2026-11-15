@@ -378,6 +378,7 @@ struct DetailView: View {
 
     private var title: String {
         switch route {
+        case .detail("mp3", _, _): player.mp3Title
         case .detail(_, _, let t), .mix(_, let t): t
         case .loved: player.lovedTitle
         }
@@ -416,10 +417,14 @@ struct DetailView: View {
             // Appui long sur la pochette : la changer sur ce téléphone (playlists et titres aimés), renommer les titres aimés.
             .contextMenu {
                 if d.kind == "loved" { RenameLovedMenu() }
+                if d.kind == "mp3" {
+                    Button { player.renamingMp3 = true } label: { Label(tr("Renommer…"), systemImage: "pencil") }
+                }
                 if let card = coverCard(d) { CoverMenu(card: card) }
             }
             VStack(spacing: 4) {
-                Text(d.kind == "loved" ? player.lovedTitle : d.title).font(.title2.bold()).multilineTextAlignment(.center)
+                Text(d.kind == "loved" ? player.lovedTitle : d.kind == "mp3" ? player.mp3Title : d.title)
+                    .font(.title2.bold()).multilineTextAlignment(.center)
                 if !d.subtitle.isEmpty { Text(d.subtitle).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center) }
                 // Nombre de titres et durée totale (playlists, albums, titres aimés, mixes).
                 if d.kind != "artist", !d.tracks.isEmpty {

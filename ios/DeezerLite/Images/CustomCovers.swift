@@ -5,11 +5,12 @@ import UIKit
 /// rien n'est envoyé à Deezer. Une image carrée de 1000 px en JPEG par élément, dans Application Support
 /// (pas dans Caches : iOS ne doit pas les effacer). Tout est supprimé à la déconnexion.
 enum CustomCovers {
-    /// Seuls les playlists, les titres aimés et Flow peuvent avoir une pochette perso.
+    /// Seuls les playlists, les titres aimés, Flow et la page MP3 peuvent avoir une pochette perso.
     static func key(kind: String, id: UInt64) -> String? {
         switch kind {
         case "loved": "loved"
         case "flow": "flow"
+        case "mp3": "mp3"
         case "playlist": "playlist-\(id)"
         default: nil
         }

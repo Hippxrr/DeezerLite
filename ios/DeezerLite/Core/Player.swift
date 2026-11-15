@@ -584,6 +584,33 @@ final class Player {
         }
     }
 
+    /// Nom de la page MP3, choisi sur ce téléphone (rien n'est envoyé à Deezer).
+    private var customMp3Title = UserDefaults.standard.string(forKey: "mp3Title")
+    var mp3Title: String { customMp3Title ?? "MP3" }
+    /// Fenêtre « Renommer » de la page MP3 ouverte.
+    var renamingMp3 = false
+
+    func setMp3Title(_ name: String) {
+        let title = String(name.trimmingCharacters(in: .whitespacesAndNewlines).prefix(60))
+        customMp3Title = title.isEmpty || title == "MP3" ? nil : title
+        if let customMp3Title {
+            UserDefaults.standard.set(customMp3Title, forKey: "mp3Title")
+        } else {
+            UserDefaults.standard.removeObject(forKey: "mp3Title")
+        }
+    }
+
+    /// Page MP3 vue comme une carte (menus de pochette et d'épingle).
+    var mp3MenuCard: Card { Card(kind: "mp3", id: 0, title: mp3Title, subtitle: "", coverUrl: nil, owned: false, key: "") }
+
+    /// Ordre des playlists de la Bibliothèque, choisi dans « Réorganiser les playlists » (identifiants des lignes).
+    private(set) var libraryOrder: [String] = UserDefaults.standard.stringArray(forKey: "libraryOrder") ?? []
+
+    func setLibraryOrder(_ ids: [String]) {
+        libraryOrder = ids
+        UserDefaults.standard.set(ids, forKey: "libraryOrder")
+    }
+
     /// Titres aimés vus comme une carte (menus de pochette et de téléchargement).
     var lovedMenuCard: Card { Card(kind: "loved", id: 0, title: lovedTitle, subtitle: "", coverUrl: nil, owned: true, key: "") }
     /// Flow vu comme une carte (menu de pochette).
@@ -2069,24 +2096,30 @@ final class Player {
         guard let data = try? Data(contentsOf: url) else { showToast(tr("Fichier illisible."), seconds: 4); return }
         let tags = core?.mp3Tags(head: Data(data.prefix(1 << 20)))
         mp3Editor = Mp3Edit(track: nil, file: data, fileName: url.lastPathComponent,
-                            title: tags?.title ?? url.deletingPathExtension().lastPathComponent, artist: tags?.artist ?? "")
+                            title: tags?.title ?? url.deletingPathExtension().lastPathComponent, artist: tags?.artist ?? "",
+                            album: tags?.album ?? "")
     }
 
     /// Import (envoi sur le compte) ou modification d'un MP3.
-    func saveMp3(_ edit: Mp3Edit, title: String, artist: String, cover: Data?, resetCover: Bool = false) async {
+    /// `cut` (import) : partie gardée en ms, `end` 0 = jusqu'à la fin ; `nil` = le fichier entier.
+    func saveMp3(_ edit: Mp3Edit, title: String, artist: String, album: String, cover: Data?, resetCover: Bool = false,
+                 cut: (start: UInt64, end: UInt64)? = nil) async {
         guard let core else { return }
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let artist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        let album = album.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             if let file = edit.file {
                 showToast(tr("Envoi du MP3…"), seconds: 30)
-                _ = try await core.personalUpload(fileName: edit.fileName, mp3: file, title: title, artist: artist, cover: cover)
+                _ = try await core.personalUpload(fileName: edit.fileName, mp3: file, title: title, artist: artist, album: album, cover: cover,
+                                                  startMs: cut?.start ?? 0, endMs: cut?.end ?? 0)
                 showToast(tr("« %@ » importé", title))
                 refreshMp3s(again: true)
             } else if let track = edit.track {
-                if title != track.title || (!artist.isEmpty && artist != track.artist) {
+                // Champ vidé : l'artiste et l'album d'avant restent (Deezer refuse une modification sans eux).
+                if title != track.title || (!artist.isEmpty && artist != track.artist) || (!album.isEmpty && album != track.album) {
                     try await core.personalUpdate(id: track.id, title: title, artist: artist.isEmpty ? track.artist : artist,
-                                                  album: track.album.isEmpty ? "MP3" : track.album)
+                                                  album: !album.isEmpty ? album : track.album.isEmpty ? "MP3" : track.album)
                     // Copie téléchargée renommée par le cœur : la liste des téléchargements suit.
                     if downloadedIds.contains(track.id) {
                         forgetOfflineDetails()

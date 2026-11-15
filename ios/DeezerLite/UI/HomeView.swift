@@ -142,7 +142,7 @@ private struct HomeOrderView: View {
         switch item {
         case .flow: "Flow"
         case .loved: player.lovedTitle
-        case .pin(let pin): pin.title
+        case .pin(let pin): pin.card.kind == "mp3" ? player.mp3Title : pin.title
         }
     }
 }

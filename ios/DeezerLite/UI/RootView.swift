@@ -1,6 +1,5 @@
 import PhotosUI
 import SwiftUI
-import UniformTypeIdentifiers
 
 /// Pose le mode choisi sur la fenêtre dès qu'elle existe, avant le premier affichage.
 private struct WindowStyle: UIViewRepresentable {
@@ -226,6 +225,9 @@ struct MainTabs: View {
     @State private var lovedName = ""
     /// Photo choisie, à cadrer avant de devenir la pochette.
     @State private var crop: CoverCrop?
+    /// MP3 choisi (copie pour l'app), lu une fois le sélecteur fermé.
+    @State private var pickedMp3: URL?
+    @State private var mp3Name = ""
     /// Réglages > Apparence : onglets sans leur nom, icônes seules.
     @AppStorage("tabLabelsHidden") private var tabLabelsHidden = false
     /// Réglages > Apparence : barre de l'app sur toute la largeur, sinon celle d'iOS.
@@ -443,6 +445,15 @@ struct MainTabs: View {
             Text(tr("Seulement sur ce téléphone. Laisse vide pour revenir à « %@ ».", tr(Player.defaultLovedTitle)))
         }
         .onChange(of: player.renamingLoved) { _, open in if open { lovedName = player.lovedTitle } }
+        // Page MP3 renommée sur ce téléphone, comme les titres aimés.
+        .alert(tr("Renommer"), isPresented: Binding(get: { player.renamingMp3 }, set: { player.renamingMp3 = $0 })) {
+            TextField("MP3", text: $mp3Name)
+            Button(tr("Annuler"), role: .cancel) {}
+            Button("OK") { player.setMp3Title(mp3Name) }
+        } message: {
+            Text(tr("Seulement sur ce téléphone. Laisse vide pour revenir à « %@ ».", "MP3"))
+        }
+        .onChange(of: player.renamingMp3) { _, open in if open { mp3Name = player.mp3Title } }
         // Compte Famille : « Qui écoute ? » à la première connexion (fermée sans choisir : le profil ouvert est gardé).
         .sheet(isPresented: Binding(get: { player.choosingProfile && !player.settingsOpen }, set: { player.choosingProfile = $0 }), onDismiss: { player.keepCurrentProfile() }) {
             ProfilePicker().environment(player).presentationDetents([.medium, .large])
@@ -461,8 +472,16 @@ struct MainTabs: View {
             Text(tr("« %@ » sera supprimée de ton compte Deezer. Cette action est définitive.", card.title))
         }
         // MP3 importés : choix du fichier, fenêtre nom / artiste / pochette, confirmation avant suppression.
-        .fileImporter(isPresented: Binding(get: { player.importingMp3 }, set: { player.importingMp3 = $0 }), allowedContentTypes: [.mp3]) { result in
-            if case .success(let url) = result { Task { await player.importMp3(from: url) } }
+        // Lu une fois le sélecteur fermé : la fenêtre nom / artiste / pochette s'ouvre ensuite sans conflit d'affichage.
+        .sheet(isPresented: Binding(get: { player.importingMp3 }, set: { player.importingMp3 = $0 }), onDismiss: {
+            guard let url = pickedMp3 else { return }
+            pickedMp3 = nil
+            Task {
+                await player.importMp3(from: url)
+                try? FileManager.default.removeItem(at: url) // copie faite pour l'app, plus utile une fois lue
+            }
+        }) {
+            Mp3FilePicker { pickedMp3 = $0 }.ignoresSafeArea()
         }
         .sheet(item: Binding(get: { player.mp3Editor }, set: { player.mp3Editor = $0 })) { edit in
             Mp3EditView(edit: edit).environment(player)

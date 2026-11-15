@@ -29,6 +29,7 @@ struct LibraryView: View {
     @Environment(\.openRoute) private var openRoute
     @State private var creating = false
     @State private var newName = ""
+    @State private var reordering = false
 
     /// Ce qui est déjà sur l'accueil (titres aimés, éléments épinglés) n'est pas répété ici.
     private var playlists: [Card]? {
@@ -99,43 +100,11 @@ struct LibraryView: View {
     }
 
     private var playlistRows: some View {
-        LazyVStack(spacing: 10) {
-            // Flow et Titres aimés retirés de l'accueil : ils sont ici, en tête des playlists.
-            if !player.flowOnHome {
-                Button { player.playFlow() } label: {
-                    ItemRow(title: "Flow", subtitle: "", trailing: "play.fill") { FlowArt() }
-                }
-                .buttonStyle(.pressable)
-                .contextMenu {
-                    Button { withAnimation { player.setFlowOnHome(true) } } label: { Label(tr("Afficher sur l'accueil"), systemImage: "house") }
-                    CoverMenu(card: Player.flowCard)
-                }
-            }
-            if !player.lovedOnHome {
-                Button { openRoute(.loved) } label: {
-                    ItemRow(title: player.lovedTitle, subtitle: player.lovedIds.count == 1 ? tr("1 titre") : tr("%@ titres", "\(player.lovedIds.count)")) {
-                        if let url = player.lovedCover {
-                            CoverView(url: url, side: 64, radius: 10)
-                        } else {
-                            LovedArt(side: 64, radius: 10)
-                        }
-                    }
-                }
-                .buttonStyle(.pressable)
-                .contextMenu {
-                    DownloadCollectionMenu(card: player.lovedMenuCard)
-                    Button { withAnimation { player.setLovedOnHome(true) } } label: { Label(tr("Afficher sur l'accueil"), systemImage: "house") }
-                    RenameLovedMenu()
-                    CoverMenu(card: player.lovedMenuCard)
-                }
-            }
-            // MP3 importés sur le compte : la page permet d'en importer, de les modifier et de les supprimer.
-            Button { openRoute(.detail(kind: "mp3", id: 0, title: "MP3")) } label: {
-                ItemRow(title: "MP3", subtitle: tr("Tes MP3 importés")) { Mp3Art(side: 64, radius: 10) }
-            }
-            .buttonStyle(.pressable)
+        let rows = libraryRows(player)
+        return LazyVStack(spacing: 10) {
+            // Appui long puis « Réorganiser les playlists » pour changer l'ordre (comme sur l'accueil).
+            ForEach(rows) { row in self.row(row, canReorder: rows.count > 1) }
             if let playlists {
-                ForEach(playlists.indices, id: \.self) { i in CardRow(card: playlists[i]) }
                 if playlists.isEmpty && player.flowOnHome && player.lovedOnHome {
                     Text(tr("Pas d'autre playlist.")).font(.subheadline).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.top, 30)
                 }
@@ -144,6 +113,156 @@ struct LibraryView: View {
                     RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Theme.card).frame(height: 84)
                 }
             }
+        }
+        .animation(.snappy(duration: 0.3), value: rows.map(\.id))
+        .sheet(isPresented: $reordering) {
+            LibraryOrderView().environment(player).presentationDetents([.medium, .large])
+        }
+    }
+
+    @ViewBuilder
+    private func reorderButton(_ canReorder: Bool) -> some View {
+        if canReorder {
+            Button { reordering = true } label: { Label(tr("Réorganiser les playlists"), systemImage: "arrow.up.arrow.down") }
+        }
+    }
+
+    @ViewBuilder
+    private func row(_ row: LibraryRow, canReorder: Bool) -> some View {
+        switch row {
+        case .flow:
+            // Flow et Titres aimés retirés de l'accueil : ils sont ici, parmi les playlists.
+            Button { player.playFlow() } label: {
+                ItemRow(title: "Flow", subtitle: "", trailing: "play.fill") { FlowArt() }
+            }
+            .buttonStyle(.pressable)
+            .contextMenu {
+                Button { withAnimation { player.setFlowOnHome(true) } } label: { Label(tr("Afficher sur l'accueil"), systemImage: "house") }
+                CoverMenu(card: Player.flowCard)
+                reorderButton(canReorder)
+            }
+        case .loved:
+            Button { openRoute(.loved) } label: {
+                ItemRow(title: player.lovedTitle, subtitle: player.lovedIds.count == 1 ? tr("1 titre") : tr("%@ titres", "\(player.lovedIds.count)")) {
+                    if let url = player.lovedCover {
+                        CoverView(url: url, side: 64, radius: 10)
+                    } else {
+                        LovedArt(side: 64, radius: 10)
+                    }
+                }
+            }
+            .buttonStyle(.pressable)
+            .contextMenu {
+                DownloadCollectionMenu(card: player.lovedMenuCard)
+                Button { withAnimation { player.setLovedOnHome(true) } } label: { Label(tr("Afficher sur l'accueil"), systemImage: "house") }
+                RenameLovedMenu()
+                CoverMenu(card: player.lovedMenuCard)
+                reorderButton(canReorder)
+            }
+        case .mp3:
+            // MP3 importés sur le compte : la page permet d'en importer, de les modifier et de les supprimer. Nom et pochette
+            // changeables sur ce téléphone, comme les titres aimés.
+            Button { openRoute(.detail(kind: "mp3", id: 0, title: "MP3")) } label: {
+                ItemRow(title: player.mp3Title, subtitle: tr("Tes MP3 importés")) { CardArt(card: player.mp3MenuCard) }
+            }
+            .buttonStyle(.pressable)
+            .contextMenu {
+                PinMenu(card: player.mp3MenuCard)
+                Button { player.renamingMp3 = true } label: { Label(tr("Renommer…"), systemImage: "pencil") }
+                CoverMenu(card: player.mp3MenuCard)
+                reorderButton(canReorder)
+            }
+        case .playlist(let card):
+            CardRow(card: card, onReorder: canReorder ? { reordering = true } : nil, reorderLabel: tr("Réorganiser les playlists"))
+        }
+    }
+}
+
+/// Une ligne de la liste des playlists de la Bibliothèque.
+enum LibraryRow: Identifiable {
+    case flow, loved, mp3
+    case playlist(Card)
+
+    var id: String {
+        switch self {
+        case .flow: "flow"
+        case .loved: "loved"
+        case .mp3: "mp3"
+        case .playlist(let card): "playlist-\(card.id)"
+        }
+    }
+}
+
+/// Lignes de la Bibliothèque dans l'ordre choisi : Flow et Titres aimés s'ils ne sont pas sur l'accueil, la page MP3,
+/// puis les playlists (sans celles épinglées sur l'accueil). Celles jamais déplacées (nouvelles playlists) en tête.
+@MainActor
+func libraryRows(_ player: Player) -> [LibraryRow] {
+    var all: [LibraryRow] = []
+    if !player.flowOnHome { all.append(.flow) }
+    if !player.lovedOnHome { all.append(.loved) }
+    if !player.isPinned(player.mp3MenuCard) { all.append(.mp3) }
+    all += (player.library[0] ?? []).filter { $0.kind != "loved" && !player.isPinned($0) }.map { .playlist($0) }
+    let rank = Dictionary(player.libraryOrder.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
+    return all.enumerated()
+        .sorted { (rank[$0.element.id] ?? $0.offset - 10_000) < (rank[$1.element.id] ?? $1.offset - 10_000) }
+        .map(\.element)
+}
+
+/// Ordre des playlists de la Bibliothèque : une liste avec des poignées, comme « Réorganiser l'accueil ».
+private struct LibraryOrderView: View {
+    @Environment(Player.self) private var player
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        let rows = libraryRows(player)
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(rows) { row in
+                        HStack(spacing: 12) {
+                            art(row)
+                            Text(title(row)).lineLimit(1)
+                        }
+                    }
+                    .onMove { from, to in
+                        var ids = rows.map(\.id)
+                        ids.move(fromOffsets: from, toOffset: to)
+                        player.setLibraryOrder(ids)
+                    }
+                } footer: {
+                    Text(tr("Fais glisser avec les poignées à droite."))
+                }
+            }
+            .environment(\.editMode, .constant(.active))
+            .scrollContentBackground(.hidden)
+            .sheetBackground(Theme.accent, strength: 0.3)
+            .navigationTitle(tr("Réorganiser les playlists"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) { Button("OK") { dismiss() }.fontWeight(.semibold) }
+            }
+            .sensoryFeedback(.selection, trigger: rows.map(\.id))
+        }
+        .tint(Theme.accent)
+    }
+
+    @ViewBuilder
+    private func art(_ row: LibraryRow) -> some View {
+        switch row {
+        case .flow: FlowArt(side: 40)
+        case .loved:
+            if let url = player.lovedCover { CoverView(url: url, side: 40, radius: 8) } else { LovedArt(side: 40, radius: 8) }
+        case .mp3: CardArt(card: player.mp3MenuCard, side: 40)
+        case .playlist(let card): CardArt(card: card, side: 40)
+        }
+    }
+
+    private func title(_ row: LibraryRow) -> String {
+        switch row {
+        case .flow: "Flow"
+        case .loved: player.lovedTitle
+        case .mp3: player.mp3Title
+        case .playlist(let card): card.title
         }
     }
 }

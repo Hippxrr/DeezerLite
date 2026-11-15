@@ -498,7 +498,7 @@ private struct TrackMenu: View, Equatable {
         if track.id < 0 {
             // MP3 importé sur le compte.
             Button {
-                player.mp3Editor = Mp3Edit(track: track, file: nil, fileName: "", title: track.title, artist: track.artist)
+                player.mp3Editor = Mp3Edit(track: track, file: nil, fileName: "", title: track.title, artist: track.artist, album: track.album)
             } label: { Label(tr("Modifier…"), systemImage: "pencil") }
             Button(role: .destructive) { player.deletingMp3 = track } label: { Label(tr("Supprimer du compte…"), systemImage: "trash") }
         }
@@ -758,6 +758,8 @@ struct CardArt: View {
             CoverView(url: url, side: side, radius: 10, round: card.kind == "artist")
         } else if card.kind == "loved" {
             LovedArt(side: side, radius: 10)
+        } else if card.kind == "mp3" {
+            Mp3Art(side: side, radius: 10)
         } else {
             CoverView(url: nil, side: side, radius: 10, round: card.kind == "artist")
         }
@@ -769,14 +771,17 @@ struct CardRow: View {
     @Environment(Player.self) private var player
     @Environment(\.openRoute) private var openRoute
     let card: Card
-    /// Sur l'accueil : « Réorganiser l'accueil » dans le menu.
+    /// « Réorganiser l'accueil » (ou `reorderLabel`) dans le menu.
     var onReorder: (() -> Void)?
+    var reorderLabel: String?
 
     var body: some View {
         Button {
             if let route = Route(card) { openRoute(route) }
         } label: {
-            ItemRow(title: card.kind == "loved" ? player.lovedTitle : card.title, subtitle: card.subtitle) { CardArt(card: card) }
+            ItemRow(title: card.kind == "loved" ? player.lovedTitle : card.kind == "mp3" ? player.mp3Title : card.title, subtitle: card.subtitle) {
+                CardArt(card: card)
+            }
         }
         .buttonStyle(.pressable)
         .contextMenu {
@@ -785,7 +790,7 @@ struct CardRow: View {
             CoverMenu(card: card)
             ShareCardButton(card: card)
             if let onReorder {
-                Button(action: onReorder) { Label(tr("Réorganiser l'accueil"), systemImage: "arrow.up.arrow.down") }
+                Button(action: onReorder) { Label(reorderLabel ?? tr("Réorganiser l'accueil"), systemImage: "arrow.up.arrow.down") }
             }
             DeletePlaylistMenu(card: card)
         }
