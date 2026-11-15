@@ -2073,7 +2073,7 @@ final class Player {
     }
 
     /// Import (envoi sur le compte) ou modification d'un MP3.
-    func saveMp3(_ edit: Mp3Edit, title: String, artist: String, cover: Data?) async {
+    func saveMp3(_ edit: Mp3Edit, title: String, artist: String, cover: Data?, resetCover: Bool = false) async {
         guard let core else { return }
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let artist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -2093,6 +2093,12 @@ final class Player {
                         refreshDownloads()
                     }
                 }
+                if resetCover, cover == nil {
+                    let key = "mp3\(track.id)"
+                    customCovers[key] = nil
+                    CustomCovers.store(customCovers)
+                    CustomCovers.remove(key: key)
+                }
                 if let cover {
                     let key = "mp3\(track.id)"
                     if let url = await Task.detached(priority: .userInitiated, operation: { CustomCovers.save(cover, key: key) }).value {
@@ -2100,7 +2106,7 @@ final class Player {
                         CustomCovers.store(customCovers)
                     }
                 }
-                showToast(tr("MP3 modifié"))
+                showToast(cover != nil ? tr("MP3 modifié · pochette changée sur ce téléphone seulement") : tr("MP3 modifié"), seconds: cover != nil ? 3 : 2)
                 refreshMp3s()
             }
         } catch {

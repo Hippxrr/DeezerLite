@@ -28,6 +28,8 @@ struct Mp3EditView: View {
     @State private var photo: PhotosPickerItem?
     @State private var crop: CropRequest?
     @State private var sending = false
+    /// « Pochette d'origine » choisie : la pochette mise sur ce téléphone est retirée à l'enregistrement.
+    @State private var resetCover = false
 
     private struct CropRequest: Identifiable {
         let id = UUID()
@@ -55,18 +57,27 @@ struct Mp3EditView: View {
                             if let preview {
                                 Image(uiImage: preview).resizable().scaledToFill()
                             } else {
-                                CoverView(url: edit.track.flatMap { player.cover($0) }, side: 64, radius: 10)
+                                CoverView(url: resetCover ? edit.track?.coverUrl : edit.track.flatMap { player.cover($0) }, side: 64, radius: 10)
                             }
                         }
                         .frame(width: 64, height: 64)
                         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        PhotosPicker(selection: $photo, matching: .images) { Text(tr("Choisir la pochette…")) }
+                        PhotosPicker(selection: $photo, matching: .images) {
+                            Text(edit.track == nil ? tr("Choisir la pochette…") : tr("Pochette sur ce téléphone…"))
+                        }
+                    }
+                    if let track = edit.track, cover != nil || (!resetCover && player.mp3Cover(track) != nil) {
+                        Button(tr("Pochette d'origine")) {
+                            cover = nil
+                            preview = nil
+                            resetCover = true
+                        }
                     }
                 } header: {
                     Text(tr("Pochette"))
                 } footer: {
                     if edit.track != nil {
-                        Text(tr("Deezer ne permet pas de changer la pochette d'un MP3 déjà envoyé : elle est gardée sur ce téléphone."))
+                        Text(tr("Pochette visible seulement sur ce téléphone : Deezer ne permet pas de changer celle d'un MP3 déjà envoyé (l'app Deezer, le site et l'ordinateur gardent l'ancienne). Pour la changer partout, réimporte le MP3 avec la nouvelle pochette."))
                     }
                 }
             }
@@ -78,7 +89,7 @@ struct Mp3EditView: View {
                     Button(edit.track == nil ? tr("Importer") : tr("Enregistrer")) {
                         sending = true
                         Task {
-                            await player.saveMp3(edit, title: title, artist: artist, cover: cover)
+                            await player.saveMp3(edit, title: title, artist: artist, cover: cover, resetCover: resetCover)
                             dismiss()
                         }
                     }
@@ -100,6 +111,7 @@ struct Mp3EditView: View {
             CoverCropView(image: c.image) { data in
                 cover = data
                 preview = UIImage(data: data)
+                resetCover = false
             }
         }
     }
