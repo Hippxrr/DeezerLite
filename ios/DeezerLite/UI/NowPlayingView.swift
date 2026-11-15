@@ -381,6 +381,7 @@ private struct MiniStrip: View {
 }
 
 private struct MiniInfo: View {
+    @Environment(Player.self) private var player
     let track: Track?
     let placeholder: String
     let side: CGFloat
