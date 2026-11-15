@@ -50,18 +50,6 @@ struct SlideOffset: ViewModifier {
     }
 }
 
-/// Carrousel au repos (pas glissé, titre affiché = celui du lecteur), signalé au grand lecteur. Lu ici seulement, comme
-/// `SlideOffset` : le carrousel n'est pas reconstruit à chaque mouvement du doigt.
-struct RestReporter: ViewModifier {
-    let slide: SlideState
-    let steps: CarouselSteps
-    let settled: Binding<Bool>?
-
-    func body(content: Content) -> some View {
-        content.onChange(of: slide.dx == 0 && steps.pending == 0, initial: true) { _, rest in settled?.wrappedValue = rest }
-    }
-}
-
 /// Ressort doux qui part à la vitesse du doigt (`distance` = chemin restant jusqu'à l'arrivée).
 /// `bounce: false` : amorti juste ce qu'il faut pour s'arrêter pile, sans dépasser (mini-lecteur).
 func softSpring(distance: CGFloat, velocity: CGFloat, bounce: Bool = true, headStart: TimeInterval = 0) -> Animation {
@@ -613,9 +601,6 @@ struct NowPlayingView: View {
     @GestureState private var pulling = false
     /// Réglages › Apparence : pochette en haut de l'écran sur toute la largeur, fondue dans le fond.
     @AppStorage("fullBleedCover") private var fullBleed = false
-    /// Pochette pleine largeur au repos (ni glissée ni en train de changer de titre) : sinon le fond qui la prolonge, fait
-    /// pour être caché pile sous elle, se voyait derrière (copie fixe ou ancienne pochette qui chevauche la nouvelle).
-    @State private var coverSettled = true
     var body: some View {
         GeometryReader { geo in
             let side = min(geo.size.width - 48, geo.size.height * 0.42)
@@ -626,7 +611,7 @@ struct NowPlayingView: View {
             ZStack(alignment: .top) {
             if bleed {
                 VStack(spacing: 0) {
-                    CoverCarousel(side: geo.size.width, width: geo.size.width, pull: pull, bleed: true, settled: $coverSettled, onPullEnd: pullEnded) { clean.toggle() }
+                    CoverCarousel(side: geo.size.width, width: geo.size.width, pull: pull, bleed: true, onPullEnd: pullEnded) { clean.toggle() }
                         .mask {
                             // Bas fondu en courbe douce (pas de départ visible du fondu, comme une ligne).
                             LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.04),
@@ -691,9 +676,8 @@ struct NowPlayingView: View {
                     Backdrop(url: player.cover(player.current), open: player.showFullPlayer,
                              tall: screen / max(geo.size.width, 1),
                              inset: geo.safeAreaInsets.top * 0.7 / max(geo.size.width, 1))
-                        .opacity(bleed && coverSettled ? 1 : 0)
+                        .opacity(bleed ? 1 : 0)
                         .animation(.easeInOut(duration: 0.3), value: bleed)
-                        .animation(.easeInOut(duration: 0.25), value: coverSettled)
                 }
             }
         }
@@ -952,8 +936,6 @@ private struct Backdrop: View {
     @State private var shown: Double = 1
     /// Début du dernier fondu : une image qui arrive pendant un fondu ne fait pas sauter l'affichage.
     @State private var fadeStart = Date.distantPast
-    /// Pleine largeur : pochette du fond affiché (une autre pochette le fait disparaître d'un coup, voir `task`).
-    @State private var shownURL: String?
 
     var body: some View {
         ZStack {
@@ -977,14 +959,6 @@ private struct Backdrop: View {
         .ignoresSafeArea()
         .task(id: "\(url ?? "")|\(phase == .background)|\(open)") {
             guard phase != .background else { return }
-            // Pleine largeur : l'ancienne pochette, posée sous la nouvelle, la chevaucherait pendant le fondu. Elle disparaît
-            // tout de suite (le fond flouté habituel est dessous) et la nouvelle apparaît une fois prête.
-            if tall != nil, url != shownURL {
-                shownURL = url
-                below = nil
-                top = nil
-                shown = 0
-            }
             // Titre sans pochette (image de secours) : fondu vers le noir.
             guard let url else { fadeToBlack(); return }
             let image: UIImage?
@@ -994,8 +968,16 @@ private struct Backdrop: View {
                 image = await CoverLoader.shared.backdrop(url: url, download: open)
             }
             guard let img = image else {
-                // Lecteur fermé et pochette pas encore en mémoire : le fond sera fait à l'ouverture.
-                if open { fadeToBlack() }
+                // Lecteur fermé et pochette pas encore en mémoire : le fond sera fait à l'ouverture. Pleine largeur : celui de
+                // l'ancien titre est oublié (il se voyait sous la nouvelle pochette en rouvrant le lecteur) ; le fond flouté
+                // habituel, dessous, s'affiche le temps que le nouveau soit prêt.
+                if open {
+                    fadeToBlack()
+                } else if tall != nil {
+                    below = nil
+                    top = nil
+                    shown = 0
+                }
                 return
             }
             guard img !== top || shown < 1 else { return }
@@ -1004,7 +986,7 @@ private struct Backdrop: View {
                 below = nil
                 top = img
                 topOpacity = 1
-                withAnimation(.easeInOut(duration: tall == nil ? 0.9 : 0.4)) { shown = 1 }
+                withAnimation(.easeInOut(duration: 0.9)) { shown = 1 }
                 return
             }
             // Fondu précédent terminé : l'image affichée passe dessous. Encore en cours : le dessous ne change pas
@@ -1050,8 +1032,6 @@ private struct CoverCarousel: View {
     let pull: PullState
     /// Pochette pleine largeur : sans coins arrondis ni ombre, et pas réduite en pause.
     var bleed = false
-    /// Pleine largeur : `false` pendant un glissement et jusqu'à ce que le titre affiché soit celui du lecteur.
-    var settled: Binding<Bool>? = nil
     let onPullEnd: (DragGesture.Value) -> Void
     /// Appui long : mode épuré du lecteur.
     let onLongPress: () -> Void
@@ -1091,7 +1071,6 @@ private struct CoverCarousel: View {
                 .animation(.spring(response: 0.5, dampingFraction: 0.72), value: active)
         }
         .modifier(SlideOffset(state: slide))
-        .modifier(RestReporter(slide: slide, steps: steps, settled: settled))
         .frame(width: side, height: side)
         .frame(maxWidth: .infinity)
         .contentShape(Rectangle())

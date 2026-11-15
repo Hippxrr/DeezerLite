@@ -171,7 +171,7 @@ final class CoverLoader: @unchecked Sendable {
     }
 
     /// Fond de la pochette pleine largeur, posé sous la pochette nette (sous la barre d'état) : ses couleurs du haut
-    /// prolongées derrière l'heure ; sous elle, son reflet, déjà un peu flou puis de plus en plus, qui finit
+    /// prolongées derrière l'heure ; sous elle, son reflet, de plus en plus flou (en partant de presque rien), qui finit
     /// sur une seule couleur. Fait une fois par
     /// titre, hors du thread principal. `tall` : hauteur de l'écran / largeur ; `inset` : hauteur de la barre d'état / largeur.
     func bleedBackdrop(url: String, download: Bool, tall: CGFloat, inset: CGFloat) async -> UIImage? {
@@ -202,18 +202,17 @@ final class CoverLoader: @unchecked Sendable {
             let mirrored = placed.transformed(by: CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: 2 * bottom))
             let belowArea = CGRect(x: -width, y: -canvas.height, width: width * 3, height: canvas.height + bottom)
             let extendedCover = mirrored.clampedToExtent().cropped(to: belowArea).composited(over: placed.clampedToExtent())
-            // Force du flou, ligne par ligne (0 : net ; 1 : rayon maximal). Derrière l'heure, comme le fond flouté habituel.
-            // Sous la pochette, déjà flou (`soft`) : le bas de la pochette s'efface en fondu par-dessus, et une copie nette s'y
-            // voyait en double (pattes d'un cheval à côté des vraies) dès qu'elle n'était pas exactement dessous. Puis sous
-            // la pochette, le reflet garde ce flou et le fait augmenter de plus en plus vite jusqu'à la moitié de la hauteur restante.
+            // Force du flou, ligne par ligne (0 : net ; 1 : rayon maximal). Derrière l'heure, comme le fond flouté habituel ;
+            // nul sous la pochette (cachée ou en train de s'effacer), à peine au bas de celle-ci ; puis sous elle, il part de
+            // presque rien et augmente de plus en plus vite jusqu'à la moitié de la hauteur restante.
             let base: CGFloat = 0.27
-            let soft: CGFloat = 0.2
             func eased(_ t: CGFloat) -> CGFloat { let t = min(max(t, 0), 1); return t * t * (3 - 2 * t) }
             func amount(_ row: CGFloat) -> CGFloat { // `row` : depuis le haut de l'écran
                 if row < gap { return base }
-                if row < gap + side * 0.1 { return base + (soft - base) * eased((row - gap) / (side * 0.1)) }
-                if row < gap + side { return soft }
-                return max(soft, 0.05 + 0.95 * pow(min((row - gap - side) / (bottom * 0.52), 1), 1.45))
+                if row < gap + side * 0.1 { return base * (1 - eased((row - gap) / (side * 0.1))) }
+                if row < gap + side * 0.7 { return 0 }
+                if row < gap + side { return 0.04 * pow((row - gap - side * 0.7) / (side * 0.3), 2) }
+                return 0.05 + 0.95 * pow(min((row - gap - side) / (bottom * 0.52), 1), 1.45)
             }
             let rows = Int(canvas.height)
             let column = (0..<rows).map { UInt8((amount(CGFloat($0)) * 255).rounded()) }

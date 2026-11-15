@@ -1550,9 +1550,12 @@ final class Player {
             // Copie hors ligne : seulement les titres du téléphone, pas la liste complète des aimés.
             if case .loved = route, !result.offline { lovedIds = Set(result.tracks.map(\.id)) }
             // MP3 téléchargés : le cœur leur a donné le nom actuel, la liste des téléchargements suit.
-            if route.isMp3, !result.offline, result.tracks.contains(where: { downloadedIds.contains($0.id) }) {
-                forgetOfflineDetails()
-                refreshDownloads()
+            if route.isMp3, !result.offline {
+                if result.tracks.contains(where: { downloadedIds.contains($0.id) }) {
+                    forgetOfflineDetails()
+                    refreshDownloads()
+                }
+                pruneDeletedMp3s(present: Set(result.tracks.map(\.id)))
             }
             if case .detail(let kind, let id, _) = route, !result.offline {
                 fillHistoryCover(kind: kind, id: id, cover: result.coverUrl)
@@ -2152,7 +2155,8 @@ final class Player {
         do {
             try await core.personalDelete(id: track.id)
             // Plus sur le compte : la copie téléchargée part aussi.
-            if downloadedIds.contains(track.id) { removeDownload(track.id) }
+            // Plus sur le compte : la copie téléchargée (ou en cours de téléchargement) part aussi.
+            if downloadedIds.contains(track.id) || downloadStates[track.id] != nil { removeDownload(track.id) }
             let key = "mp3\(track.id)"
             if customCovers[key] != nil {
                 customCovers[key] = nil
@@ -2163,6 +2167,26 @@ final class Player {
             refreshMp3s()
         } catch {
             showToast(describe(error), seconds: 4)
+        }
+    }
+
+    /// MP3 téléchargés absents de la liste du compte au dernier chargement de la page MP3.
+    @ObservationIgnored private var mp3Missing: Set<Int64> = []
+
+    /// MP3 supprimés du compte ailleurs (ordinateur, site) mais encore téléchargés ici : retirés du téléphone. Deezer
+    /// renvoie parfois une liste en retard : un MP3 n'est retiré que s'il manque à deux chargements de suite.
+    private func pruneDeletedMp3s(present: Set<Int64>) {
+        let missing = Set((downloadedIds.union(downloadStates.keys)).filter { $0 < 0 && !present.contains($0) })
+        let gone = missing.intersection(mp3Missing)
+        mp3Missing = missing.subtracting(gone)
+        for id in gone {
+            removeDownload(id)
+            let key = "mp3\(id)"
+            if customCovers[key] != nil {
+                customCovers[key] = nil
+                CustomCovers.store(customCovers)
+                CustomCovers.remove(key: key)
+            }
         }
     }
 

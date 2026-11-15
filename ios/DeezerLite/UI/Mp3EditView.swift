@@ -66,6 +66,9 @@ struct Mp3EditView: View {
     @State private var to: Double = 0
     @State private var listener: AVAudioPlayer?
     @State private var listening: Task<Void, Never>?
+    /// Forme d'onde (une valeur de 0 à 1 par barre) et position de l'écoute en cours.
+    @State private var peaks: [Float] = []
+    @State private var playhead: Double?
 
     private struct CropRequest: Identifiable {
         let id = UUID()
@@ -122,19 +125,27 @@ struct Mp3EditView: View {
                 }
                 if edit.file != nil, length >= 2 {
                     Section {
-                        LabeledContent(tr("Début"), value: Self.time(from))
-                        Slider(value: $from, in: 0...length, onEditingChanged: { editing in if !editing { listen(at: from) } })
-                            .accessibilityLabel(tr("Début"))
-                        LabeledContent(tr("Fin"), value: Self.time(to))
-                        Slider(value: $to, in: 0...length, onEditingChanged: { editing in if !editing { listen(at: max(from, to - 3)) } })
-                            .accessibilityLabel(tr("Fin"))
+                        // Façon iPhone : forme d'onde, cadre avec une poignée de chaque côté, trait de lecture pendant l'écoute.
+                        TrimBar(peaks: peaks, length: length, from: $from, to: $to, playhead: playhead,
+                                onRelease: { start in listen(at: start ? from : max(from, to - 3)) },
+                                onTap: { t in if t >= from && t < to { listen(at: t) } })
+                            .frame(height: 56)
+                            .padding(.vertical, 12)
+                            .padding(.horizontal, 6)
+                        HStack {
+                            Text("\(tr("Début")) \(Self.time(from))")
+                            Spacer()
+                            Text("\(tr("Fin")) \(Self.time(to))")
+                        }
+                        .font(.footnote.monospacedDigit())
+                        .foregroundStyle(.secondary)
                         Button(listening == nil ? tr("Écouter") : tr("Pause")) {
                             if listening == nil { listen(at: from) } else { stopListening() }
                         }
                     } header: {
                         Text(tr("Couper"))
                     } footer: {
-                        Text(tr("%@ gardées. Relâche un curseur pour écouter à cet endroit.", Self.time(to - from)))
+                        Text(tr("%@ gardées. Lâche une poignée pour écouter à cet endroit.", Self.time(to - from)))
                     }
                     // Au moins 1 s gardée.
                     .onChange(of: from) { _, v in if v > to - 1 { from = max(0, to - 1) } }
@@ -142,7 +153,7 @@ struct Mp3EditView: View {
                 }
             }
             .navigationTitle(edit.track == nil ? tr("Importer un MP3") : tr("Modifier le MP3"))
-            .task { prepareCut() }
+            .task { await prepareCut() }
             .onDisappear { stopListening() }
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -202,17 +213,19 @@ extension Mp3EditView {
         return (UInt64(from * 1000), to < length - 0.05 ? UInt64(to * 1000) : 0)
     }
 
-    fileprivate static func time(_ seconds: Double) -> String {
+    static func time(_ seconds: Double) -> String {
         let s = max(seconds, 0)
         return String(format: "%d:%04.1f", Int(s) / 60, s.truncatingRemainder(dividingBy: 60))
     }
 
-    /// Durée lue dans le fichier choisi (import seulement).
-    fileprivate func prepareCut() {
+    /// Durée et forme d'onde du fichier choisi (import seulement).
+    fileprivate func prepareCut() async {
         guard let file = edit.file, listener == nil, let audio = try? AVAudioPlayer(data: file) else { return }
         listener = audio
         length = audio.duration
         to = audio.duration
+        let bars = TrimBar.bars
+        peaks = await Task.detached(priority: .userInitiated) { waveformPeaks(file, bars: bars) }.value
     }
 
     /// Écoute de `at` jusqu'à la fin choisie ; la musique en cours s'arrête.
@@ -224,17 +237,127 @@ extension Mp3EditView {
         listener.play()
         listening = Task { @MainActor in
             while !Task.isCancelled, listener.isPlaying, listener.currentTime < to {
-                try? await Task.sleep(for: .milliseconds(100))
+                playhead = listener.currentTime
+                try? await Task.sleep(for: .milliseconds(40))
             }
             guard !Task.isCancelled else { return }
             listener.pause()
             listening = nil
+            playhead = nil
         }
     }
 
     fileprivate func stopListening() {
         listening?.cancel()
         listening = nil
+        playhead = nil
         listener?.pause()
+    }
+}
+
+/// Forme d'onde d'un MP3 : le plus fort échantillon de chaque barre, de 0,12 à 1 (racine : les passages calmes restent
+/// visibles). Lu par morceaux depuis une copie temporaire, supprimée ensuite. Vide si le fichier est illisible.
+private func waveformPeaks(_ data: Data, bars: Int) -> [Float] {
+    let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp3")
+    defer { try? FileManager.default.removeItem(at: url) }
+    guard (try? data.write(to: url)) != nil, let file = try? AVAudioFile(forReading: url),
+          file.length > 0,
+          let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 16_384) else { return [] }
+    let total = file.length
+    var out = [Float](repeating: 0, count: bars)
+    var position: AVAudioFramePosition = 0
+    while position < total, (try? file.read(into: buffer)) != nil, buffer.frameLength > 0 {
+        let n = Int(buffer.frameLength)
+        if let samples = buffer.floatChannelData?[0] {
+            for i in stride(from: 0, to: n, by: 8) {
+                let bar = min(bars - 1, Int((position + AVAudioFramePosition(i)) * AVAudioFramePosition(bars) / total))
+                out[bar] = max(out[bar], abs(samples[i]))
+            }
+        }
+        position += AVAudioFramePosition(n)
+    }
+    guard let top = out.max(), top > 0 else { return [] }
+    return out.map { max(0.12, ($0 / top).squareRoot()) }
+}
+
+/// Découpe façon iPhone : barres de la forme d'onde, cadre clair entre deux poignées (début et fin, au moins 1 s
+/// d'écart), trait blanc à la position de l'écoute. Un appui dans le cadre écoute à partir de là.
+struct TrimBar: View {
+    static let bars = 60
+    let peaks: [Float]
+    let length: Double
+    @Binding var from: Double
+    @Binding var to: Double
+    let playhead: Double?
+    /// Poignée lâchée (`true` : celle du début).
+    let onRelease: (Bool) -> Void
+    let onTap: (Double) -> Void
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width, h = geo.size.height
+            let x = { (t: Double) in CGFloat(t / max(length, 0.001)) * w }
+            let time = { (px: CGFloat) in Double(min(max(px / max(w, 1), 0), 1)) * length }
+            ZStack(alignment: .topLeading) {
+                HStack(spacing: 2) {
+                    ForEach(0..<Self.bars, id: \.self) { i in
+                        let v = peaks.isEmpty ? 0.12 : CGFloat(peaks[min(i, peaks.count - 1)])
+                        let mid = (Double(i) + 0.5) / Double(Self.bars) * length
+                        Capsule()
+                            .fill(.white.opacity(mid < from || mid > to ? 0.3 : 0.9))
+                            .frame(maxWidth: 4)
+                            .frame(height: max(4, v * h))
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .frame(width: w, height: h)
+                // Cadre : un trait en haut et un en bas, entre les deux poignées.
+                ForEach([-4.0, h + 4], id: \.self) { y in
+                    Rectangle().fill(.white.opacity(0.85))
+                        .frame(width: max(x(to) - x(from), 0), height: 3)
+                        .position(x: (x(from) + x(to)) / 2, y: y)
+                }
+                if let playhead {
+                    Capsule().fill(.white)
+                        .frame(width: 3, height: h + 16)
+                        .shadow(color: .black.opacity(0.6), radius: 2)
+                        .position(x: x(playhead), y: h / 2)
+                        .allowsHitTesting(false)
+                }
+                handle(start: true, h: h)
+                    .position(x: x(from), y: h / 2)
+                    .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("trim"))
+                        .onChanged { v in from = min(max(0, time(v.location.x)), to - 1) }
+                        .onEnded { _ in onRelease(true) })
+                handle(start: false, h: h)
+                    .position(x: x(to), y: h / 2)
+                    .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("trim"))
+                        .onChanged { v in to = max(min(length, time(v.location.x)), from + 1) }
+                        .onEnded { _ in onRelease(false) })
+            }
+            .coordinateSpace(.named("trim"))
+            .contentShape(Rectangle())
+            .onTapGesture(coordinateSpace: .named("trim")) { p in onTap(time(p.x)) }
+        }
+    }
+
+    private func handle(start: Bool, h: CGFloat) -> some View {
+        RoundedRectangle(cornerRadius: 9, style: .continuous)
+            .fill(Color(white: 0.91))
+            .frame(width: 18, height: h + 12)
+            .overlay {
+                HStack(spacing: 2.5) {
+                    ForEach(0..<2, id: \.self) { _ in Capsule().fill(Color(white: 0.56)).frame(width: 1.5, height: h * 0.4) }
+                }
+            }
+            .shadow(color: .black.opacity(0.45), radius: 2, y: 1)
+            .contentShape(Rectangle().inset(by: -10))
+            .accessibilityElement()
+            .accessibilityLabel(start ? tr("Début") : tr("Fin"))
+            .accessibilityValue(Mp3EditView.time(start ? from : to))
+            .accessibilityAdjustableAction { direction in
+                let step = direction == .increment ? 0.5 : -0.5
+                if start { from = min(max(0, from + step), to - 1) } else { to = max(min(length, to + step), from + 1) }
+            }
     }
 }

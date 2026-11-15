@@ -129,7 +129,7 @@ enum Translations {
         "Début": ("Start", "Inicio"),
         "Fin": ("End", "Fin"),
         "Écouter": ("Listen", "Escuchar"),
-        "%@ gardées. Relâche un curseur pour écouter à cet endroit.": ("%@ kept. Release a slider to listen from there.", "%@ conservados. Suelta un control para escuchar desde ahí."),
+        "%@ gardées. Lâche une poignée pour écouter à cet endroit.": ("%@ kept. Release a handle to listen from there.", "%@ conservados. Suelta un tirador para escuchar desde ahí."),
         "Aucun MP3 pour l'instant : appuie sur + pour en importer un.": ("No MP3s yet: tap + to upload one.", "Aún no hay MP3: toca + para subir uno."),
         "Importer un MP3": ("Upload an MP3", "Subir un MP3"),
         "Modifier le MP3": ("Edit MP3", "Editar MP3"),
