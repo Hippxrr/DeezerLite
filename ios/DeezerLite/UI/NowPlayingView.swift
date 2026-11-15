@@ -666,11 +666,12 @@ struct NowPlayingView: View {
             .animation(.easeInOut(duration: 0.3), value: clean)
             }
             .animation(.easeInOut(duration: 0.3), value: panel)
+            // Pochette pleine largeur (réglage activé seulement) : son fond, aligné sous elle (mesures de l'écran), par-dessus
+            // le fond habituel. Paroles ou file ouvertes : il s'efface, le fond flouté habituel revient (le sien est net sous
+            // le milieu de la pochette, normalement cachée par elle). Dans son propre `background`, pas avec le fond habituel :
+            // posés ensemble, il prenait la largeur de celui-ci (bien plus large que l'écran) et son image était étirée en
+            // largeur, d'où une copie de la pochette décalée qui se voyait sous son fondu (pattes d'un cheval en double).
             .background {
-                Backdrop(url: player.cover(player.current), open: player.showFullPlayer)
-                // Pochette pleine largeur (réglage activé seulement) : son fond, aligné sous elle (mesures de l'écran), par-dessus
-                // le fond habituel. Paroles ou file ouvertes : il s'efface, le fond flouté habituel revient (le sien est net sous
-                // le milieu de la pochette, normalement cachée par elle).
                 if fullBleed {
                     let screen = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
                     Backdrop(url: player.cover(player.current), open: player.showFullPlayer,
@@ -680,6 +681,7 @@ struct NowPlayingView: View {
                         .animation(.easeInOut(duration: 0.3), value: bleed)
                 }
             }
+            .background { Backdrop(url: player.cover(player.current), open: player.showFullPlayer) }
         }
         // Retour haptique à l'appui long seulement (pas à la remise en mode normal quand le lecteur se ferme).
         .sensoryFeedback(trigger: clean) { _, _ in player.showFullPlayer ? .impact(weight: .medium) : nil }
@@ -1016,7 +1018,9 @@ private struct Backdrop: View {
             // qu'elle (sans saturation en plus) : aucune jonction visible.
             Image(uiImage: image).resizable().interpolation(.high)
         } else {
-            Image(uiImage: image).resizable().interpolation(.high).scaledToFill().saturation(1.15)
+            // Remplissage sans agrandir la vue : l'image carrée, à la hauteur de l'écran, est bien plus large que lui ; posée
+            // telle quelle, elle donnait cette largeur au fond entier (et à ce qui est posé avec lui).
+            Color.clear.overlay { Image(uiImage: image).resizable().interpolation(.high).scaledToFill().saturation(1.15) }
         }
     }
 }

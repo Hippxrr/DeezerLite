@@ -1247,11 +1247,10 @@ impl Core {
         Ok(())
     }
 
-    /// Supprime un MP3 importé du compte.
-    pub async fn personal_delete(&self, id: i64) -> Result<(), CoreError> {
+    /// Supprime un MP3 importé du compte, et d'abord des titres aimés et des playlists où il est. Renvoie ces playlists.
+    pub async fn personal_delete(&self, id: i64) -> Result<Vec<u64>, CoreError> {
         let api = self.api.clone();
-        self.run(async move { api.delete_personal_song(id).await }).await??;
-        Ok(())
+        Ok(self.run(async move { api.delete_personal_song_everywhere(id).await }).await??)
     }
 
     pub async fn genius_lyrics(&self, title: String, artist: String) -> Result<Option<Lyrics>, CoreError> {

@@ -491,7 +491,7 @@ struct MainTabs: View {
                             titleVisibility: .visible, presenting: player.deletingMp3) { track in
             Button(tr("Supprimer"), role: .destructive) { Task { await player.deleteMp3(track) } }
         } message: { track in
-            Text(tr("« %@ » sera supprimé de ton compte Deezer (téléphone, ordinateur, site). Cette action est définitive.", track.title))
+            Text(tr("« %@ » sera supprimé de ton compte Deezer (téléphone, ordinateur, site), et retiré de tes titres aimés et de tes playlists. Cette action est définitive.", track.title))
         }
     }
 }

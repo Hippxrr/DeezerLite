@@ -80,6 +80,37 @@ impl DeezerClient {
         let _: Value = self.gw("personal_song.delete", &json!({ "upload_id": id })).await?;
         Ok(())
     }
+
+    /// Supprime un MP3 du compte et d'abord de partout où il est sur le compte : Deezer, lui, ne le retire que de la
+    /// liste des MP3 (il restait dans les titres aimés et les playlists). Retiré des titres aimés s'il y est, puis de
+    /// chaque playlist de l'utilisateur qui le contient (4 regardées à la fois). Renvoie ces playlists.
+    pub async fn delete_personal_song_everywhere(&self, id: i64) -> Result<Vec<u64>> {
+        use futures_util::{stream, StreamExt};
+        // Liste illisible : on tente quand même (sans effet s'il n'y est pas).
+        if self.loved_tracks().await.map_or(true, |loved| loved.iter().any(|t| t.id == id)) {
+            let _ = self.unlike_track(id).await;
+        }
+        let loved = self.session().await.map_or(0, |s| s.loved_playlist_id);
+        let mine: Vec<u64> = self
+            .user_playlists()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|c| c.kind == "playlist" && c.owned && c.id != loved)
+            .map(|c| c.id)
+            .collect();
+        let cleaned: Vec<u64> = stream::iter(mine)
+            .map(|pid| async move {
+                let has = self.collection("playlist", pid).await.is_ok_and(|c| c.tracks.iter().any(|t| t.id == id));
+                (has && self.playlist_remove(pid, id).await.is_ok()).then_some(pid)
+            })
+            .buffer_unordered(4)
+            .filter_map(|pid| async move { pid })
+            .collect()
+            .await;
+        self.delete_personal_song(id).await?;
+        Ok(cleaned)
+    }
 }
 
 /// MP3 prêt à envoyer : titre, artiste, album et pochette (JPEG) écrits dans son étiquette ID3 (v2.3, lue partout),

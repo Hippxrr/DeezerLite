@@ -2153,7 +2153,12 @@ final class Player {
     func deleteMp3(_ track: Track) async {
         guard let core else { return }
         do {
-            try await core.personalDelete(id: track.id)
+            showToast(tr("Suppression du MP3…"), seconds: 30)
+            let playlists = try await core.personalDelete(id: track.id)
+            // Retiré aussi des titres aimés et des playlists : leurs pages gardées en mémoire seront rechargées.
+            lovedIds.remove(track.id)
+            details[.loved] = nil
+            for id in playlists { forgetDetail(kind: "playlist", id: id) }
             // Plus sur le compte : la copie téléchargée part aussi.
             // Plus sur le compte : la copie téléchargée (ou en cours de téléchargement) part aussi.
             if downloadedIds.contains(track.id) || downloadStates[track.id] != nil { removeDownload(track.id) }
