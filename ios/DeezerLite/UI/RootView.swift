@@ -476,10 +476,8 @@ struct MainTabs: View {
         .sheet(isPresented: Binding(get: { player.importingMp3 }, set: { player.importingMp3 = $0 }), onDismiss: {
             guard let url = pickedMp3 else { return }
             pickedMp3 = nil
-            Task {
-                await player.importMp3(from: url)
-                try? FileManager.default.removeItem(at: url) // copie faite pour l'app, plus utile une fois lue
-            }
+            // La copie faite pour l'app est gardée par la fenêtre d'import (lue à l'envoi), qui la supprime en se fermant.
+            Task { await player.importMp3(from: url) }
         }) {
             Mp3FilePicker { pickedMp3 = $0 }.ignoresSafeArea()
         }

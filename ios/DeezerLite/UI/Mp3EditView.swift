@@ -34,8 +34,9 @@ struct Mp3Edit: Identifiable {
     let id = UUID()
     /// MP3 déjà envoyé (modification) ; `nil` : nouvel import.
     let track: Track?
-    /// Fichier à envoyer (import seulement).
-    let file: Data?
+    /// Copie du fichier à envoyer, faite pour l'app (import seulement) : lue seulement à l'envoi, supprimée quand la
+    /// fenêtre se ferme. Avant, tout le MP3 restait en mémoire plusieurs fois (gros mix : app fermée par iOS).
+    let file: URL?
     let fileName: String
     let title: String
     let artist: String
@@ -68,6 +69,8 @@ struct Mp3EditView: View {
     @State private var listening: Task<Void, Never>?
     /// Forme d'onde (une valeur de 0 à 1 par barre) et position de l'écoute en cours.
     @State private var peaks: [Float] = []
+    /// Poignée de la découpe tenue : la fenêtre ne défile pas et ne se ferme pas en même temps.
+    @State private var trimming = false
     @State private var playhead: Double?
 
     private struct CropRequest: Identifiable {
@@ -126,7 +129,7 @@ struct Mp3EditView: View {
                 if edit.file != nil, length >= 2 {
                     Section {
                         // Façon iPhone : forme d'onde, cadre avec une poignée de chaque côté, trait de lecture pendant l'écoute.
-                        TrimBar(peaks: peaks, length: length, from: $from, to: $to, playhead: playhead,
+                        TrimBar(peaks: peaks, length: length, from: $from, to: $to, playhead: playhead, dragging: $trimming,
                                 onRelease: { start in listen(at: start ? from : max(from, to - 3)) },
                                 onTap: { t in if t >= from && t < to { listen(at: t) } })
                             .frame(height: 56)
@@ -154,7 +157,14 @@ struct Mp3EditView: View {
             }
             .navigationTitle(edit.track == nil ? tr("Importer un MP3") : tr("Modifier le MP3"))
             .task { await prepareCut() }
-            .onDisappear { stopListening() }
+            .onDisappear {
+                stopListening()
+                if let file = edit.file { try? FileManager.default.removeItem(at: file) }
+            }
+            // Pendant l'envoi : pas de fermeture par glissement (le fichier serait supprimé).
+            .interactiveDismissDisabled(sending || trimming)
+            .scrollDisabled(trimming)
+            .sensoryFeedback(.selection, trigger: trimming)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button(tr("Annuler")) { dismiss() } }
@@ -163,8 +173,13 @@ struct Mp3EditView: View {
                         sending = true
                         Task {
                             stopListening()
-                            await player.saveMp3(edit, title: title, artist: artist, album: album, cover: cover, resetCover: resetCover, cut: cutRange)
-                            dismiss()
+                            // Échec (réseau…) : la fenêtre reste ouverte avec le fichier, la découpe et ce qui a été saisi.
+                            if await player.saveMp3(edit, title: title, artist: artist, album: album, cover: cover,
+                                                    resetCover: resetCover, cut: cutRange) {
+                                dismiss()
+                            } else {
+                                sending = false
+                            }
                         }
                     }
                     .disabled(title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || sending)
@@ -220,12 +235,21 @@ extension Mp3EditView {
 
     /// Durée et forme d'onde du fichier choisi (import seulement).
     fileprivate func prepareCut() async {
-        guard let file = edit.file, listener == nil, let audio = try? AVAudioPlayer(data: file) else { return }
+        guard let file = edit.file, listener == nil, let audio = try? AVAudioPlayer(contentsOf: file) else { return }
         listener = audio
         length = audio.duration
         to = audio.duration
-        let bars = TrimBar.bars
-        peaks = await Task.detached(priority: .userInitiated) { waveformPeaks(file, bars: bars) }.value
+        // Débit variable sans en-tête de durée : celle d'AVAudioPlayer n'est qu'une estimation, la coupe tombait à côté.
+        // Celle du son décodé est exacte (la même que pour la coupe).
+        let (bars, seconds) = await waveform(of: file, bars: TrimBar.bars)
+        guard !Task.isCancelled else { return }
+        peaks = bars
+        if seconds >= 2, abs(seconds - length) > 0.05 {
+            let atEnd = to >= length - 0.05
+            length = seconds
+            to = atEnd ? seconds : min(to, seconds)
+            from = min(from, max(0, to - 1))
+        }
     }
 
     /// Écoute de `at` jusqu'à la fin choisie ; la musique en cours s'arrête.
@@ -255,18 +279,18 @@ extension Mp3EditView {
     }
 }
 
-/// Forme d'onde d'un MP3 : le plus fort échantillon de chaque barre, de 0,12 à 1 (racine : les passages calmes restent
-/// visibles). Lu par morceaux depuis une copie temporaire, supprimée ensuite. Vide si le fichier est illisible.
-private func waveformPeaks(_ data: Data, bars: Int) -> [Float] {
-    let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mp3")
-    defer { try? FileManager.default.removeItem(at: url) }
-    guard (try? data.write(to: url)) != nil, let file = try? AVAudioFile(forReading: url),
+/// Forme d'onde d'un MP3 (le plus fort échantillon de chaque barre, de 0,12 à 1 ; racine : les passages calmes restent
+/// visibles) et sa durée exacte en secondes. Lu par morceaux, hors du fil principal ; arrêté si la fenêtre se ferme.
+/// Vide (et 0) si le fichier est illisible.
+private func waveform(of url: URL, bars: Int) async -> ([Float], Double) {
+    guard let file = try? AVAudioFile(forReading: url),
           file.length > 0,
-          let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 16_384) else { return [] }
+          let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 16_384) else { return ([], 0) }
     let total = file.length
+    let seconds = Double(total) / file.processingFormat.sampleRate
     var out = [Float](repeating: 0, count: bars)
     var position: AVAudioFramePosition = 0
-    while position < total, (try? file.read(into: buffer)) != nil, buffer.frameLength > 0 {
+    while position < total, !Task.isCancelled, (try? file.read(into: buffer)) != nil, buffer.frameLength > 0 {
         let n = Int(buffer.frameLength)
         if let samples = buffer.floatChannelData?[0] {
             for i in stride(from: 0, to: n, by: 8) {
@@ -276,8 +300,8 @@ private func waveformPeaks(_ data: Data, bars: Int) -> [Float] {
         }
         position += AVAudioFramePosition(n)
     }
-    guard let top = out.max(), top > 0 else { return [] }
-    return out.map { max(0.12, ($0 / top).squareRoot()) }
+    guard let top = out.max(), top > 0 else { return ([], seconds) }
+    return (out.map { max(0.12, ($0 / top).squareRoot()) }, seconds)
 }
 
 /// Découpe façon iPhone : barres de la forme d'onde, cadre clair entre deux poignées (début et fin, au moins 1 s
@@ -289,9 +313,15 @@ struct TrimBar: View {
     @Binding var from: Double
     @Binding var to: Double
     let playhead: Double?
+    /// Une poignée est tenue.
+    @Binding var dragging: Bool
     /// Poignée lâchée (`true` : celle du début).
     let onRelease: (Bool) -> Void
     let onTap: (Double) -> Void
+    /// Valeur de la poignée au début du glissement : elle suit le déplacement du doigt, sans sauter sous lui au toucher.
+    @State private var dragStart: Double?
+    /// Doigt posé sur une poignée : revient à `false` même si iOS interrompt le geste (sans `onEnded`).
+    @GestureState private var held = false
 
     var body: some View {
         GeometryReader { geo in
@@ -326,19 +356,39 @@ struct TrimBar: View {
                 }
                 handle(start: true, h: h)
                     .position(x: x(from), y: h / 2)
-                    .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("trim"))
-                        .onChanged { v in from = min(max(0, time(v.location.x)), to - 1) }
+                    // Prioritaire : le défilement de la fenêtre ne prend pas le geste.
+                    .highPriorityGesture(DragGesture(minimumDistance: 0)
+                        .updating($held) { _, state, _ in state = true }
+                        .onChanged { v in
+                            let start = begin(from)
+                            from = min(max(0, start + Double(v.translation.width / max(w, 1)) * length), to - 1)
+                        }
                         .onEnded { _ in onRelease(true) })
                 handle(start: false, h: h)
                     .position(x: x(to), y: h / 2)
-                    .gesture(DragGesture(minimumDistance: 0, coordinateSpace: .named("trim"))
-                        .onChanged { v in to = max(min(length, time(v.location.x)), from + 1) }
+                    .highPriorityGesture(DragGesture(minimumDistance: 0)
+                        .updating($held) { _, state, _ in state = true }
+                        .onChanged { v in
+                            let start = begin(to)
+                            to = max(min(length, start + Double(v.translation.width / max(w, 1)) * length), from + 1)
+                        }
                         .onEnded { _ in onRelease(false) })
             }
             .coordinateSpace(.named("trim"))
             .contentShape(Rectangle())
             .onTapGesture(coordinateSpace: .named("trim")) { p in onTap(time(p.x)) }
+            .onChange(of: held) { _, on in
+                dragging = on
+                if !on { dragStart = nil }
+            }
         }
+    }
+
+    /// Début d'un glissement : retient la valeur de départ (une seule fois par geste).
+    private func begin(_ value: Double) -> Double {
+        if let dragStart { return dragStart }
+        dragStart = value
+        return value
     }
 
     private func handle(start: Bool, h: CGFloat) -> some View {

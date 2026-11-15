@@ -607,8 +607,14 @@ final class Player {
     private(set) var libraryOrder: [String] = UserDefaults.standard.stringArray(forKey: "libraryOrder") ?? []
 
     func setLibraryOrder(_ ids: [String]) {
-        libraryOrder = ids
-        UserDefaults.standard.set(ids, forKey: "libraryOrder")
+        // Lignes cachées en ce moment (Flow ou Titres aimés sur l'accueil, page MP3 épinglée) : gardées à leur place,
+        // sinon elles revenaient en tête une fois de retour dans la Bibliothèque.
+        var merged = ids
+        for (i, id) in libraryOrder.enumerated() where !ids.contains(id) {
+            merged.insert(id, at: min(i, merged.count))
+        }
+        libraryOrder = merged
+        UserDefaults.standard.set(merged, forKey: "libraryOrder")
     }
 
     /// Titres aimés vus comme une carte (menus de pochette et de téléchargement).
@@ -1555,7 +1561,6 @@ final class Player {
                     forgetOfflineDetails()
                     refreshDownloads()
                 }
-                pruneDeletedMp3s(present: Set(result.tracks.map(\.id)))
             }
             if case .detail(let kind, let id, _) = route, !result.offline {
                 fillHistoryCover(kind: kind, id: id, cover: result.coverUrl)
@@ -2093,27 +2098,43 @@ final class Player {
     func cover(_ track: Track?) -> String? { mp3Cover(track) ?? track?.coverUrl }
 
     /// Fichier choisi : nom et artiste lus dans le fichier pour préremplir la fenêtre.
+    /// `url` : copie du fichier faite pour l'app ; la fenêtre la garde (lue à l'envoi) et la supprime en se fermant.
     func importMp3(from url: URL) async {
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        guard let data = try? Data(contentsOf: url) else { showToast(tr("Fichier illisible."), seconds: 4); return }
-        let tags = core?.mp3Tags(head: Data(data.prefix(1 << 20)))
-        mp3Editor = Mp3Edit(track: nil, file: data, fileName: url.lastPathComponent,
+        // Seul le début est lu ici (nom, artiste, album), hors du fil principal.
+        let head: Data? = await Task.detached(priority: .userInitiated) {
+            guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+            defer { try? handle.close() }
+            return try? handle.read(upToCount: 1 << 20)
+        }.value
+        guard let head, !head.isEmpty else {
+            try? FileManager.default.removeItem(at: url)
+            showToast(tr("Fichier illisible."), seconds: 4)
+            return
+        }
+        let tags = core?.mp3Tags(head: head)
+        mp3Editor = Mp3Edit(track: nil, file: url, fileName: url.lastPathComponent,
                             title: tags?.title ?? url.deletingPathExtension().lastPathComponent, artist: tags?.artist ?? "",
                             album: tags?.album ?? "")
     }
 
     /// Import (envoi sur le compte) ou modification d'un MP3.
     /// `cut` (import) : partie gardée en ms, `end` 0 = jusqu'à la fin ; `nil` = le fichier entier.
+    /// Renvoie `false` en cas d'échec (message affiché) : la fenêtre reste alors ouverte.
+    @discardableResult
     func saveMp3(_ edit: Mp3Edit, title: String, artist: String, album: String, cover: Data?, resetCover: Bool = false,
-                 cut: (start: UInt64, end: UInt64)? = nil) async {
-        guard let core else { return }
+                 cut: (start: UInt64, end: UInt64)? = nil) async -> Bool {
+        guard let core else { return false }
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
         let artist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
         let album = album.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
-            if let file = edit.file {
+            if let url = edit.file {
                 showToast(tr("Envoi du MP3…"), seconds: 30)
+                // Lu seulement maintenant, hors du fil principal.
+                guard let file = await Task.detached(priority: .userInitiated, operation: { try? Data(contentsOf: url, options: .alwaysMapped) }).value else {
+                    showToast(tr("Fichier illisible."), seconds: 4)
+                    return false
+                }
                 _ = try await core.personalUpload(fileName: edit.fileName, mp3: file, title: title, artist: artist, album: album, cover: cover,
                                                   startMs: cut?.start ?? 0, endMs: cut?.end ?? 0)
                 showToast(tr("« %@ » importé", title))
@@ -2145,8 +2166,10 @@ final class Player {
                 showToast(cover != nil ? tr("MP3 modifié · pochette changée sur ce téléphone seulement") : tr("MP3 modifié"), seconds: cover != nil ? 3 : 2)
                 refreshMp3s()
             }
+            return true
         } catch {
             showToast(describe(error), seconds: 4)
+            return false
         }
     }
 
@@ -2172,26 +2195,6 @@ final class Player {
             refreshMp3s()
         } catch {
             showToast(describe(error), seconds: 4)
-        }
-    }
-
-    /// MP3 téléchargés absents de la liste du compte au dernier chargement de la page MP3.
-    @ObservationIgnored private var mp3Missing: Set<Int64> = []
-
-    /// MP3 supprimés du compte ailleurs (ordinateur, site) mais encore téléchargés ici : retirés du téléphone. Deezer
-    /// renvoie parfois une liste en retard : un MP3 n'est retiré que s'il manque à deux chargements de suite.
-    private func pruneDeletedMp3s(present: Set<Int64>) {
-        let missing = Set((downloadedIds.union(downloadStates.keys)).filter { $0 < 0 && !present.contains($0) })
-        let gone = missing.intersection(mp3Missing)
-        mp3Missing = missing.subtracting(gone)
-        for id in gone {
-            removeDownload(id)
-            let key = "mp3\(id)"
-            if customCovers[key] != nil {
-                customCovers[key] = nil
-                CustomCovers.store(customCovers)
-                CustomCovers.remove(key: key)
-            }
         }
     }
 

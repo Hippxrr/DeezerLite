@@ -438,6 +438,9 @@ private struct TrackMenu: View, Equatable {
         let state: Int8
         let liked: Bool
         let canRemove: Bool
+        /// MP3 importé : nom, artiste et album (renommable, même numéro) ; sinon vide. Sans eux, le menu gardait l'ancien
+        /// nom après un renommage et « Modifier… » renvoyait l'ancien nom à Deezer.
+        let names: String
     }
 
     @Environment(Player.self) private var player
@@ -466,7 +469,8 @@ private struct TrackMenu: View, Equatable {
         case .failed: 2
         default: 0
         }
-        key = Key(trackId: track.id, albumId: track.albumId, downloaded: downloaded, state: state, liked: liked, canRemove: canRemove)
+        key = Key(trackId: track.id, albumId: track.albumId, downloaded: downloaded, state: state, liked: liked, canRemove: canRemove,
+                  names: track.id < 0 ? "\(track.title)|\(track.artist)|\(track.album)" : "")
     }
 
     nonisolated static func == (a: TrackMenu, b: TrackMenu) -> Bool {

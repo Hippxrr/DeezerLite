@@ -1218,6 +1218,10 @@ impl Core {
         end_ms: u64,
     ) -> Result<i64, CoreError> {
         let api = self.api.clone();
+        // Contenu vérifié : autre chose qu'un MP3, envoyé sous le nom « .mp3 », donnait un titre cassé chez Deezer.
+        if !dz_api::is_mp3(&mp3) {
+            return Err(CoreError::Api("Ce fichier n'est pas un MP3.".into()));
+        }
         let audio = if start_ms > 0 || end_ms > 0 {
             dz_api::cut_mp3(&mp3, start_ms, (end_ms > 0).then_some(end_ms))
                 .ok_or_else(|| CoreError::Api("Rien à garder dans la partie choisie.".into()))?

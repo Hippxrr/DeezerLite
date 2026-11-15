@@ -81,11 +81,14 @@ impl DeezerClient {
         Ok(())
     }
 
-    /// Supprime un MP3 du compte et d'abord de partout où il est sur le compte : Deezer, lui, ne le retire que de la
-    /// liste des MP3 (il restait dans les titres aimés et les playlists). Retiré des titres aimés s'il y est, puis de
-    /// chaque playlist de l'utilisateur qui le contient (4 regardées à la fois). Renvoie ces playlists.
+    /// Supprime un MP3 du compte, puis de partout où il est sur le compte : Deezer, lui, ne le retire que de la liste des
+    /// MP3 (il restait dans les titres aimés et les playlists). Supprimé d'abord : si Deezer refuse, rien d'autre n'a
+    /// changé (avant, il quittait les titres aimés et les playlists tout en restant sur le compte). Puis retiré des titres
+    /// aimés s'il y est, et de chaque playlist de l'utilisateur qui le contient (4 regardées à la fois). Renvoie ces
+    /// playlists.
     pub async fn delete_personal_song_everywhere(&self, id: i64) -> Result<Vec<u64>> {
         use futures_util::{stream, StreamExt};
+        self.delete_personal_song(id).await?;
         // Liste illisible : on tente quand même (sans effet s'il n'y est pas).
         if self.loved_tracks().await.map_or(true, |loved| loved.iter().any(|t| t.id == id)) {
             let _ = self.unlike_track(id).await;
@@ -108,9 +111,17 @@ impl DeezerClient {
             .filter_map(|pid| async move { pid })
             .collect()
             .await;
-        self.delete_personal_song(id).await?;
         Ok(cleaned)
     }
+}
+
+/// Vrai si le fichier contient du son MP3 (MPEG audio) : une trame valable suivie d'une autre du même genre, au début
+/// du son (après l'étiquette ID3). Un M4A, un WAV ou une image ne passent pas : envoyés sous le nom « .mp3 », ils
+/// donnaient un titre cassé chez Deezer.
+pub fn is_mp3(mp3: &[u8]) -> bool {
+    let start = id3_len(mp3).min(mp3.len());
+    let end = mp3.len().min(start + 64 * 1024);
+    (start..end.saturating_sub(3)).any(|at| frame_at(mp3, at, None).is_some())
 }
 
 /// MP3 prêt à envoyer : titre, artiste, album et pochette (JPEG) écrits dans son étiquette ID3 (v2.3, lue partout),
@@ -223,7 +234,7 @@ struct MpegFrame {
     samples: u64,
     rate: u64,
     /// Version, couche et fréquence : les mêmes pour toutes les trames d'un fichier (évite les faux débuts de trame).
-    kind: u8,
+    kind: u16,
     /// Taille des infos de côté (position d'un en-tête Xing / Info dans la première trame).
     side: usize,
 }
@@ -270,11 +281,11 @@ fn mpeg_frame(h: &[u8]) -> Option<MpegFrame> {
         (false, true) => 9,
         (false, false) => 17,
     };
-    Some(MpegFrame { len, samples, rate: rate as u64, kind: b & 0xFE | (c & 0x0C), side })
+    Some(MpegFrame { len, samples, rate: rate as u64, kind: u16::from(b & 0xFE) << 8 | u16::from(c & 0x0C), side })
 }
 
 /// Vraie trame à `at` : son en-tête est valable et la trame suivante (s'il y en a une) est du même genre.
-fn frame_at(data: &[u8], at: usize, kind: Option<u8>) -> Option<MpegFrame> {
+fn frame_at(data: &[u8], at: usize, kind: Option<u16>) -> Option<MpegFrame> {
     let f = mpeg_frame(data.get(at..)?)?;
     if kind.is_some_and(|k| k != f.kind) || at + f.len > data.len() {
         return None;
@@ -312,7 +323,7 @@ pub fn cut_mp3(mp3: &[u8], start_ms: u64, end_ms: Option<u64>) -> Option<Vec<u8>
     while at + 4 <= mp3.len() {
         let Some(f) = frame_at(mp3, at, Some(first.kind)) else {
             // Étiquette de fin (ID3v1 « TAG », APE…) ou octets abîmés : on cherche la trame suivante, sinon c'est fini.
-            match (at + 1..mp3.len().saturating_sub(3)).find(|&i| frame_at(mp3, i, Some(first.kind)).is_some()) {
+            match (at + 1..mp3.len().saturating_sub(3)).find(|&i| frame_at(mp3, i, None).is_some_and(|f| f.kind == first.kind)) {
                 Some(next) if !mp3[at..].starts_with(b"TAG") && !mp3[at..].starts_with(b"APETAGEX") => {
                     at = next;
                     continue;
@@ -411,6 +422,7 @@ mod tests {
         assert_eq!(cut_mp3(&fake_mp3(10, false), 0, None).unwrap().len(), 11 * 417);
         // Rien de lisible, ou rien dans la partie choisie.
         assert!(cut_mp3(b"pas un mp3", 0, None).is_none());
+        assert!(is_mp3(&mp3) && !is_mp3(b"RIFF....WAVEfmt ") && !is_mp3(b"    ftypM4A "));
         assert!(cut_mp3(&mp3, 10_000, None).is_none());
     }
 
