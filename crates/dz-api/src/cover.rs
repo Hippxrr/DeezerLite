@@ -471,7 +471,7 @@ fn reset_outcome(v: &Value) -> Result<()> {
 }
 
 /// `{}`, `[]`, `""` et `null` ne comptent pas comme une erreur ni comme un résultat.
-fn has_content(v: &Value) -> bool {
+pub(crate) fn has_content(v: &Value) -> bool {
     match v {
         Value::Null => false,
         Value::Object(o) => !o.is_empty(),
@@ -482,7 +482,7 @@ fn has_content(v: &Value) -> bool {
 }
 
 /// Corps multipart/form-data avec un seul fichier.
-fn multipart_body(boundary: &str, field: &str, filename: &str, mime: &str, data: &[u8]) -> Vec<u8> {
+pub(crate) fn multipart_body(boundary: &str, field: &str, filename: &str, mime: &str, data: &[u8]) -> Vec<u8> {
     let mut b = Vec::with_capacity(data.len() + 256);
     b.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"{field}\"; filename=\"{filename}\"\r\nContent-Type: {mime}\r\n\r\n").as_bytes());
     b.extend_from_slice(data);

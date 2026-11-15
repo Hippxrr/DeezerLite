@@ -393,7 +393,7 @@ private struct MiniInfo: View {
                     ProgressView().frame(width: side, height: side)
                 } else if let track {
                     // Identité liée à la pochette : jamais l'image du titre d'avant pendant une image.
-                    CoverView(url: track.coverUrl, side: side, radius: 8).id(track.coverUrl ?? "")
+                    CoverView(url: player.cover(track), side: side, radius: 8).id(player.cover(track) ?? "")
                 } else {
                     // Chargement : pas de pochette (ni celle de remplacement), juste sa place pour que le texte ne bouge pas.
                     Color.clear.frame(width: side, height: side)
@@ -666,13 +666,13 @@ struct NowPlayingView: View {
             }
             .animation(.easeInOut(duration: 0.3), value: panel)
             .background {
-                Backdrop(url: player.current?.coverUrl, open: player.showFullPlayer)
+                Backdrop(url: player.cover(player.current), open: player.showFullPlayer)
                 // Pochette pleine largeur (réglage activé seulement) : son fond, aligné sous elle (mesures de l'écran), par-dessus
                 // le fond habituel. Paroles ou file ouvertes : il s'efface, le fond flouté habituel revient (le sien est net sous
                 // le milieu de la pochette, normalement cachée par elle).
                 if fullBleed {
                     let screen = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
-                    Backdrop(url: player.current?.coverUrl, open: player.showFullPlayer,
+                    Backdrop(url: player.cover(player.current), open: player.showFullPlayer,
                              tall: screen / max(geo.size.width, 1),
                              inset: geo.safeAreaInsets.top * 0.7 / max(geo.size.width, 1))
                         .opacity(bleed ? 1 : 0)
@@ -746,6 +746,10 @@ struct NowPlayingView: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .contentShape(Rectangle())
                         }
+                        // Sans fond gris à l'ouverture et à la fermeture du menu : iOS surlignait toute la zone d'appui (un
+                        // rectangle visible une seconde en revenant des crédits). Zone d'aperçu nulle : rien n'est surligné.
+                        .buttonStyle(.plain)
+                        .contentShape(.contextMenuPreview, Rectangle().size(.zero))
                     }
                 } else if let t = player.current {
                     // Flow en chargement (« Chargement… ») : pas de menu, il n'y a ni artiste ni crédits à ouvrir.
@@ -776,7 +780,7 @@ struct NowPlayingView: View {
         HStack(spacing: 14) {
             Button { panel = .cover } label: {
                 HStack(spacing: 14) {
-                    CoverView(url: player.current?.coverUrl, side: 64, radius: 8)
+                    CoverView(url: player.cover(player.current), side: 64, radius: 8)
                         .shadow(color: .black.opacity(0.3), radius: 8, y: 4)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(player.current?.title ?? "").font(.headline).lineLimit(1).minimumScaleFactor(0.6)
@@ -1038,8 +1042,8 @@ private struct CoverCarousel: View {
         let open = player.showFullPlayer
         ZStack {
             // Chaque pochette a l'identité de son image : rien d'ancien ne s'affiche quand les voisines changent.
-            if let previous { CoverView(url: previous.coverUrl, side: side, radius: radius, load: open).id(previous.coverUrl ?? "").offset(x: -step) }
-            if let next { CoverView(url: next.coverUrl, side: side, radius: radius, load: open).id(next.coverUrl ?? "").offset(x: step) }
+            if let previous { CoverView(url: player.cover(previous), side: side, radius: radius, load: open).id(player.cover(previous) ?? "").offset(x: -step) }
+            if let next { CoverView(url: player.cover(next), side: side, radius: radius, load: open).id(player.cover(next) ?? "").offset(x: step) }
             // Lecteur fermé : pas de téléchargement de la grande pochette à chaque titre.
             Group {
                 if current?.id == 0 {
@@ -1048,10 +1052,10 @@ private struct CoverCarousel: View {
                         .frame(width: side, height: side)
                         .overlay { ProgressView().controlSize(.large).tint(.white) }
                 } else {
-                    CoverView(url: current?.coverUrl, side: side, radius: radius, load: open, large: bleed)
+                    CoverView(url: player.cover(current), side: side, radius: radius, load: open, large: bleed)
                 }
             }
-                .id(current?.coverUrl ?? "")
+                .id(player.cover(current) ?? "")
                 .shadow(color: .black.opacity(bleed ? 0 : 0.4), radius: active ? 24 : 12, y: active ? 14 : 6)
                 // Pochette réduite en pause, pleine taille en lecture (comme Apple Music). Pleine largeur : aucun effet.
                 .scaleEffect(active || bleed ? 1 : 0.8)

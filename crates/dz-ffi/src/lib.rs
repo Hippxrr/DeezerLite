@@ -304,6 +304,13 @@ pub struct LyricLine {
     pub text: String,
 }
 
+/// Titre et artiste écrits dans un MP3 (pour préremplir l'import).
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct Mp3Tags {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+}
+
 /// Paroles de Deezer (uniquement Deezer, pas de source de secours).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct Lyrics {
@@ -948,7 +955,14 @@ impl Core {
         let api = self.api.clone();
         let remote_kind = kind.clone();
         match self.run(async move { api.collection(&remote_kind, id).await }).await? {
-            Ok(collection) => Ok(self.detail(collection)),
+            Ok(collection) => {
+                // MP3 importés renommés ailleurs (ordinateur, site) : les copies téléchargées prennent le nouveau nom.
+                if kind == "mp3" {
+                    let names: Vec<_> = collection.tracks.iter().map(|t| (t.id, t.title.clone(), t.artist.clone(), t.album.clone())).collect();
+                    let _ = self.offline.rename(&names);
+                }
+                Ok(self.detail(collection))
+            }
             Err(error) => self.offline_detail(kind, id).ok_or_else(|| error.into()),
         }
     }
@@ -1181,6 +1195,44 @@ impl Core {
     /// réseau, ce qui est gardé.
     /// Paroles de secours sur Genius (texte simple), demandées par l'app seulement quand Deezer n'en a pas et si le réglage
     /// le permet. Jamais gardées avec les titres téléchargés : en ligne seulement. Genius injoignable : `None`.
+    /// MP3 importés : titre et artiste écrits dans le fichier (son début suffit).
+    pub fn mp3_tags(&self, head: Vec<u8>) -> Mp3Tags {
+        let (title, artist) = dz_api::read_mp3_tags(&head);
+        Mp3Tags { title, artist }
+    }
+
+    /// Envoie un MP3 sur le compte : nom, artiste et pochette (JPEG) écrits dans le fichier avant l'envoi (Deezer les
+    /// reprend, ils apparaissent partout). Renvoie l'identifiant du nouveau titre (négatif), 0 s'il n'est pas connu.
+    pub async fn personal_upload(&self, file_name: String, mp3: Vec<u8>, title: String, artist: String, cover: Option<Vec<u8>>) -> Result<i64, CoreError> {
+        let api = self.api.clone();
+        let tagged = dz_api::tag_mp3(&mp3, title.trim(), artist.trim(), "MP3", cover.as_deref());
+        let results = self.run(async move { api.upload_personal_song(&file_name, tagged).await }).await??;
+        let id = match &results {
+            dz_api::serde_json::Value::String(s) => s.trim().parse::<i64>().ok(),
+            dz_api::serde_json::Value::Number(n) => n.as_i64(),
+            _ => None,
+        };
+        Ok(id.map_or(0, |n| -n.abs()))
+    }
+
+    /// Change le nom, l'artiste et l'album d'un MP3 importé.
+    pub async fn personal_update(&self, id: i64, title: String, artist: String, album: String) -> Result<(), CoreError> {
+        let api = self.api.clone();
+        let (title, artist, album) = (title.trim().to_owned(), artist.trim().to_owned(), album.trim().to_owned());
+        let name = (id, title.clone(), artist.clone(), album.clone());
+        self.run(async move { api.update_personal_song(id, &title, &artist, &album).await }).await??;
+        // Copie téléchargée : nouveau nom tout de suite, même hors de la page MP3.
+        let _ = self.offline.rename(&[name]);
+        Ok(())
+    }
+
+    /// Supprime un MP3 importé du compte.
+    pub async fn personal_delete(&self, id: i64) -> Result<(), CoreError> {
+        let api = self.api.clone();
+        self.run(async move { api.delete_personal_song(id).await }).await??;
+        Ok(())
+    }
+
     pub async fn genius_lyrics(&self, title: String, artist: String) -> Result<Option<Lyrics>, CoreError> {
         let api = self.api.clone();
         let q = dz_api::LyricsQuery { title, artist };

@@ -766,6 +766,23 @@ impl DeezerClient {
     async fn collection_raw(&self, kind: &str, id: u64) -> Result<Collection> {
         let sid = id.to_string();
         match kind {
+            // MP3 importés sur le compte (Bibliothèque › MP3).
+            "mp3" => {
+                let t = self.personal_songs().await?;
+                Ok(Collection {
+                    owned: false,
+                    kind: kind.into(),
+                    id: 0,
+                    title: "MP3".into(),
+                    subtitle: format!("Tes MP3 importés · {} titres", t.len()),
+                    cover_url: None,
+                    tracks: t,
+                    albums: Vec::new(),
+                    latest: None,
+                    related: Vec::new(),
+                    appears_on: Vec::new(),
+                })
+            }
             "loved" => {
                 let t = self.loved_tracks().await?;
                 Ok(Collection {

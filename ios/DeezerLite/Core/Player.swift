@@ -1506,7 +1506,8 @@ final class Player {
         }
         // Copie hors ligne gardée pendant une coupure (ou avant l'ouverture de la session) : plus resservie une fois
         // Deezer joignable, sinon la page restait limitée aux titres du téléphone jusqu'à un rafraîchissement manuel.
-        if !force, let hit = details[route], !hit.offline, !hasNewReleases(hit, route: route) { return hit }
+        // Page MP3 : toujours redemandée (un MP3 importé ou renommé sur l'ordinateur doit y apparaître).
+        if !force, let hit = details[route], !hit.offline, !hasNewReleases(hit, route: route), !route.isMp3 { return hit }
         let gen = profileGeneration
         let result: Detail? = await load(nil as Detail?) { core in
             switch route {
@@ -1521,6 +1522,11 @@ final class Player {
             cacheDetail(result, for: route)
             // Copie hors ligne : seulement les titres du téléphone, pas la liste complète des aimés.
             if case .loved = route, !result.offline { lovedIds = Set(result.tracks.map(\.id)) }
+            // MP3 téléchargés : le cœur leur a donné le nom actuel, la liste des téléchargements suit.
+            if route.isMp3, !result.offline, result.tracks.contains(where: { downloadedIds.contains($0.id) }) {
+                forgetOfflineDetails()
+                refreshDownloads()
+            }
             if case .detail(let kind, let id, _) = route, !result.offline {
                 fillHistoryCover(kind: kind, id: id, cover: result.coverUrl)
                 refreshPins([Card(kind: kind, id: id, title: result.title, subtitle: result.subtitle, coverUrl: result.coverUrl,
@@ -2034,6 +2040,101 @@ final class Player {
         CustomCovers.store(customCovers)
         CustomCovers.remove(key: key)
         showToast(tr("Pochette d'origine rétablie"))
+    }
+
+    // MARK: MP3 importés (Bibliothèque › MP3), comme sur le site de Deezer.
+
+    /// Sélecteur de fichier ouvert (import d'un MP3).
+    var importingMp3 = false
+    /// Fenêtre nom / artiste / pochette ouverte.
+    var mp3Editor: Mp3Edit?
+    /// MP3 dont la suppression attend la confirmation.
+    var deletingMp3: Track?
+    /// Augmente après un import, une modification ou une suppression : la page MP3 se recharge.
+    private(set) var mp3Revision = 0
+
+    /// Pochette choisie sur ce téléphone pour un MP3 importé (Deezer ne permet pas de la changer une fois envoyé).
+    func mp3Cover(_ track: Track?) -> String? {
+        guard let track, track.id < 0 else { return nil }
+        return customCovers["mp3\(track.id)"]
+    }
+
+    /// Pochette d'un titre à afficher : celle choisie ici pour un MP3 importé, sinon celle de Deezer.
+    func cover(_ track: Track?) -> String? { mp3Cover(track) ?? track?.coverUrl }
+
+    /// Fichier choisi : nom et artiste lus dans le fichier pour préremplir la fenêtre.
+    func importMp3(from url: URL) async {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        guard let data = try? Data(contentsOf: url) else { showToast(tr("Fichier illisible."), seconds: 4); return }
+        let tags = core?.mp3Tags(head: Data(data.prefix(1 << 20)))
+        mp3Editor = Mp3Edit(track: nil, file: data, fileName: url.lastPathComponent,
+                            title: tags?.title ?? url.deletingPathExtension().lastPathComponent, artist: tags?.artist ?? "")
+    }
+
+    /// Import (envoi sur le compte) ou modification d'un MP3.
+    func saveMp3(_ edit: Mp3Edit, title: String, artist: String, cover: Data?) async {
+        guard let core else { return }
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let artist = artist.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            if let file = edit.file {
+                showToast(tr("Envoi du MP3…"), seconds: 30)
+                _ = try await core.personalUpload(fileName: edit.fileName, mp3: file, title: title, artist: artist, cover: cover)
+                showToast(tr("« %@ » importé", title))
+                refreshMp3s(again: true)
+            } else if let track = edit.track {
+                if title != track.title || (!artist.isEmpty && artist != track.artist) {
+                    try await core.personalUpdate(id: track.id, title: title, artist: artist.isEmpty ? track.artist : artist,
+                                                  album: track.album.isEmpty ? "MP3" : track.album)
+                    // Copie téléchargée renommée par le cœur : la liste des téléchargements suit.
+                    if downloadedIds.contains(track.id) {
+                        forgetOfflineDetails()
+                        refreshDownloads()
+                    }
+                }
+                if let cover {
+                    let key = "mp3\(track.id)"
+                    if let url = await Task.detached(priority: .userInitiated, operation: { CustomCovers.save(cover, key: key) }).value {
+                        customCovers[key] = url
+                        CustomCovers.store(customCovers)
+                    }
+                }
+                showToast(tr("MP3 modifié"))
+                refreshMp3s()
+            }
+        } catch {
+            showToast(describe(error), seconds: 4)
+        }
+    }
+
+    func deleteMp3(_ track: Track) async {
+        guard let core else { return }
+        do {
+            try await core.personalDelete(id: track.id)
+            // Plus sur le compte : la copie téléchargée part aussi.
+            if downloadedIds.contains(track.id) { removeDownload(track.id) }
+            let key = "mp3\(track.id)"
+            if customCovers[key] != nil {
+                customCovers[key] = nil
+                CustomCovers.store(customCovers)
+                CustomCovers.remove(key: key)
+            }
+            showToast(tr("MP3 supprimé"))
+            refreshMp3s()
+        } catch {
+            showToast(describe(error), seconds: 4)
+        }
+    }
+
+    /// Page MP3 rechargée ; après un envoi, encore une fois quelques secondes plus tard (le titre peut tarder à y apparaître).
+    private func refreshMp3s(again: Bool = false) {
+        mp3Revision += 1
+        guard again else { return }
+        Task {
+            try? await Task.sleep(for: .seconds(4))
+            mp3Revision += 1
+        }
     }
 
     /// Appui long sur un titre > « Ajouter à une playlist » : titre pour lequel la fenêtre des playlists est ouverte.

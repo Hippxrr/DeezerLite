@@ -13,6 +13,8 @@ use url::Url;
 
 mod catalog;
 mod genius;
+mod personal;
+pub use personal::{read_mp3_tags, tag_mp3};
 mod cover;
 mod listen;
 /// Pour les crates qui lisent ou écrivent du JSON sans en dépendre elles-mêmes.

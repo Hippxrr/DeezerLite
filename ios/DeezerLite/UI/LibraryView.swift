@@ -129,6 +129,11 @@ struct LibraryView: View {
                     CoverMenu(card: player.lovedMenuCard)
                 }
             }
+            // MP3 importés sur le compte : la page permet d'en importer, de les modifier et de les supprimer.
+            Button { openRoute(.detail(kind: "mp3", id: 0, title: "MP3")) } label: {
+                ItemRow(title: "MP3", subtitle: tr("Tes MP3 importés")) { Mp3Art(side: 64, radius: 10) }
+            }
+            .buttonStyle(.pressable)
             if let playlists {
                 ForEach(playlists.indices, id: \.self) { i in CardRow(card: playlists[i]) }
                 if playlists.isEmpty && player.flowOnHome && player.lovedOnHome {

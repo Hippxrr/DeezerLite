@@ -419,6 +419,32 @@ impl OfflineStore {
         self.local(id).is_some()
     }
 
+    /// Nom, artiste et album à jour pour des titres téléchargés (MP3 importés renommés ici ou ailleurs) :
+    /// `(id, titre, artiste, album)`. Les autres infos (pochette, fichier) restent. Renvoie le nombre de titres changés.
+    pub fn rename(&self, names: &[(i64, String, String, String)]) -> io::Result<usize> {
+        let _guard = self.persist_lock.lock().map_err(|_| io::Error::other("écriture des manifests verrouillée"))?;
+        let changed = {
+            let mut entries = self.entries.write().map_err(|_| io::Error::other("index verrouillé"))?;
+            let mut changed = 0;
+            for (id, title, artist, album) in names {
+                let Some(entry) = entries.get_mut(id) else { continue };
+                let info = &mut entry.info;
+                if title.trim().is_empty() || (info.title == *title && info.artist == *artist && info.album == *album) {
+                    continue;
+                }
+                info.title.clone_from(title);
+                info.artist.clone_from(artist);
+                info.album.clone_from(album);
+                changed += 1;
+            }
+            changed
+        };
+        if changed > 0 {
+            self.persist_entries_locked()?;
+        }
+        Ok(changed)
+    }
+
     pub fn list(&self) -> Vec<OfflineTrack> {
         let mut list: Vec<_> = self.entries.read().map(|e| e.values().cloned().collect()).unwrap_or_default();
         list.sort_by_key(|e| std::cmp::Reverse(e.downloaded_at));
@@ -1788,6 +1814,22 @@ mod tests {
         for name in names {
             std::fs::remove_dir_all(root.join(format!("{name}.tmp"))).unwrap();
         }
+    }
+
+    #[test]
+    fn renamed_downloads_keep_their_file_and_survive_a_restart() {
+        let root = root("rename");
+        let store = OfflineStore::open(root.clone()).unwrap();
+        insert_file(&store, -42);
+        let names = vec![(-42, "Nouveau".to_owned(), "Moi".to_owned(), "MP3".to_owned()), (-7, "Absent".into(), String::new(), String::new())];
+        assert_eq!(store.rename(&names).unwrap(), 1, "seul le titre téléchargé change");
+        assert_eq!(store.rename(&names).unwrap(), 0, "déjà à jour : rien n'est réécrit");
+        assert_eq!(store.rename(&[(-42, " ".into(), "X".into(), "Y".into())]).unwrap(), 0, "nom vide ignoré");
+        drop(store);
+        let reopened = OfflineStore::open(root.clone()).unwrap();
+        let local = reopened.local(-42).expect("le fichier reste lisible");
+        assert_eq!((local.info.title.as_str(), local.info.artist.as_str(), local.info.album.as_str()), ("Nouveau", "Moi", "MP3"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

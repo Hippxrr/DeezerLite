@@ -196,6 +196,9 @@ struct DetailView: View {
                         header(d, tracks: ordered)
                         if tracks.isEmpty && !query.isEmpty {
                             Text(tr("Aucun titre ne correspond à « %@ ».", query)).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.top, 20)
+                        } else if d.kind == "mp3", d.tracks.isEmpty {
+                            Text(tr("Aucun MP3 pour l'instant : appuie sur + pour en importer un.")).foregroundStyle(.secondary)
+                                .multilineTextAlignment(.center).frame(maxWidth: .infinity).padding(.top, 20)
                         }
                         // Numéros de piste seulement dans l'ordre de l'album.
                         trackList(tracks, in: ordered, numbered: d.kind == "album" && sort == .standard && !sortReversed && query.isEmpty,
@@ -222,6 +225,12 @@ struct DetailView: View {
 
     @ToolbarContentBuilder
     private var pageToolbar: some ToolbarContent {
+        if detail?.kind == "mp3" {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { player.importingMp3 = true } label: { Image(systemName: "plus") }
+                    .accessibilityLabel(tr("Importer un MP3"))
+            }
+        }
         if let d = detail, !d.offline, hasRest(d) {
             ToolbarItem(placement: .topBarTrailing) {
                 Button { player.download(d) } label: { Image(systemName: "arrow.down.circle") }
@@ -348,6 +357,10 @@ struct DetailView: View {
             Text(tr("Les titres de « %@ » seront supprimés de ce téléphone, sauf ceux qui font aussi partie d'une autre playlist ou d'un autre album téléchargé.", pageTitle))
         }
         .task { await load(force: false) }
+        // Page MP3 : rechargée après un import, une modification ou une suppression.
+        .task(id: player.mp3Revision) {
+            if detail?.kind == "mp3", player.mp3Revision > 0 { await load(force: true) }
+        }
         // Copie hors ligne : un titre supprimé de ce téléphone disparaît aussi de la page.
         .onChange(of: player.downloadedIds) { _, ids in
             guard detail?.offline == true else { return }
@@ -393,6 +406,8 @@ struct DetailView: View {
                     CoverView(url: url, side: 220, radius: 20, round: d.kind == "artist")
                 } else if d.kind == "loved" {
                     LovedArt(side: 220, radius: 20)
+                } else if d.kind == "mp3" {
+                    Mp3Art(side: 220, radius: 20)
                 } else {
                     CoverView(url: nil, side: 220, radius: 20, round: d.kind == "artist")
                 }

@@ -43,10 +43,13 @@ enum Route: Hashable {
     case mix(key: String, title: String)
     case loved
 
+    /// Page des MP3 importés (Bibliothèque › MP3).
+    var isMp3: Bool { if case .detail("mp3", _, _) = self { true } else { false } }
+
     init?(_ card: Card) {
         switch card.kind {
         case "loved": self = .loved
-        case "playlist", "album", "artist": self = .detail(kind: card.kind, id: card.id, title: card.title)
+        case "playlist", "album", "artist", "mp3": self = .detail(kind: card.kind, id: card.id, title: card.title)
         default:
             guard !card.key.isEmpty else { return nil }
             self = .mix(key: card.key, title: card.title)
@@ -342,7 +345,7 @@ struct TrackRow: View {
                     // téléchargé (pochette enregistrée sur le téléphone, déjà réparée au téléchargement) : la sienne
                     // d'abord, sinon une adresse Internet la remplacerait et resterait vide hors ligne.
                     let saved = track.coverUrl.flatMap { $0.hasPrefix("http") ? nil : $0 }
-                    CoverView(url: saved ?? player.coverFixes[track.id] ?? (isCurrent ? player.current?.coverUrl : nil) ?? track.coverUrl, side: 48, radius: 8)
+                    CoverView(url: player.mp3Cover(track) ?? saved ?? player.coverFixes[track.id] ?? (isCurrent ? player.current?.coverUrl : nil) ?? track.coverUrl, side: 48, radius: 8)
                         .overlay {
                             if isCurrent {
                                 RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.black.opacity(0.5))
@@ -491,6 +494,13 @@ private struct TrackMenu: View, Equatable {
         }
         if canRemove {
             Button(role: .destructive, action: onRemove) { Label(tr("Retirer de la playlist"), systemImage: "minus.circle") }
+        }
+        if track.id < 0 {
+            // MP3 importé sur le compte.
+            Button {
+                player.mp3Editor = Mp3Edit(track: track, file: nil, fileName: "", title: track.title, artist: track.artist)
+            } label: { Label(tr("Modifier…"), systemImage: "pencil") }
+            Button(role: .destructive) { player.deletingMp3 = track } label: { Label(tr("Supprimer du compte…"), systemImage: "trash") }
         }
         Button { player.creditsTrack = track } label: { Label(tr("Voir les crédits"), systemImage: "person.2") }
         ShareTrackButton(track: track)

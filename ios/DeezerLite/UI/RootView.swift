@@ -1,5 +1,6 @@
 import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Pose le mode choisi sur la fenêtre dès qu'elle existe, avant le premier affichage.
 private struct WindowStyle: UIViewRepresentable {
@@ -458,6 +459,20 @@ struct MainTabs: View {
             Button(tr("Supprimer"), role: .destructive) { Task { await player.deletePlaylist(card) } }
         } message: { card in
             Text(tr("« %@ » sera supprimée de ton compte Deezer. Cette action est définitive.", card.title))
+        }
+        // MP3 importés : choix du fichier, fenêtre nom / artiste / pochette, confirmation avant suppression.
+        .fileImporter(isPresented: Binding(get: { player.importingMp3 }, set: { player.importingMp3 = $0 }), allowedContentTypes: [.mp3]) { result in
+            if case .success(let url) = result { Task { await player.importMp3(from: url) } }
+        }
+        .sheet(item: Binding(get: { player.mp3Editor }, set: { player.mp3Editor = $0 })) { edit in
+            Mp3EditView(edit: edit).environment(player)
+        }
+        .confirmationDialog(tr("Supprimer ce MP3 ?"),
+                            isPresented: Binding(get: { player.deletingMp3 != nil }, set: { if !$0 { player.deletingMp3 = nil } }),
+                            titleVisibility: .visible, presenting: player.deletingMp3) { track in
+            Button(tr("Supprimer"), role: .destructive) { Task { await player.deleteMp3(track) } }
+        } message: { track in
+            Text(tr("« %@ » sera supprimé de ton compte Deezer (téléphone, ordinateur, site). Cette action est définitive.", track.title))
         }
     }
 }
