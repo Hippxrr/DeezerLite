@@ -451,6 +451,11 @@ impl OfflineStore {
         list
     }
 
+    /// Numéros des titres téléchargés : sans copier les fiches ni regarder les fichiers (lancement plus rapide).
+    pub fn ids(&self) -> Vec<i64> {
+        self.entries.read().map(|e| e.keys().copied().collect()).unwrap_or_default()
+    }
+
     pub fn infos(&self) -> Vec<TrackInfo> {
         self.list().iter().map(|e| self.display_info(e)).collect()
     }

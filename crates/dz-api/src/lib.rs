@@ -225,6 +225,8 @@ pub struct DeezerClient {
     refresh_lock: Mutex<()>,
     /// Titres aimés déjà chargés : (utilisateur, instant du chargement, titres).
     loved_cache: std::sync::Mutex<Option<(u64, std::time::Instant, Vec<TrackInfo>)>>,
+    /// Un seul chargement des titres aimés à la fois (voir `loved_tracks`).
+    loved_fetch: Mutex<()>,
     /// Dates de sortie déjà connues (une date de sortie ne change pas) : évite de les redemander.
     date_cache: std::sync::Mutex<std::collections::HashMap<i64, String>>,
     /// Recommandations d'accueil déjà chargées (5 min).
@@ -250,7 +252,7 @@ impl DeezerClient {
     pub fn new() -> Result<Self> {
         let jar = Arc::new(CookieStoreMutex::default());
         let http = std::sync::RwLock::new(Self::build_http(jar.clone())?);
-        Ok(Self { http, jar, session: RwLock::new(None), refresh_lock: Mutex::new(()), loved_cache: std::sync::Mutex::new(None), date_cache: std::sync::Mutex::new(std::collections::HashMap::new()), home_cache: std::sync::Mutex::new(None), profile: std::sync::Mutex::new(None), family: std::sync::Mutex::new(None), jwt: std::sync::Mutex::new(None), cover_fixes: std::sync::Mutex::new(std::collections::HashMap::new()), cover_fixes_file: std::sync::Mutex::new(None), cover_misses: std::sync::Mutex::new(std::collections::HashMap::new()) })
+        Ok(Self { http, jar, session: RwLock::new(None), refresh_lock: Mutex::new(()), loved_cache: std::sync::Mutex::new(None), loved_fetch: Mutex::new(()), date_cache: std::sync::Mutex::new(std::collections::HashMap::new()), home_cache: std::sync::Mutex::new(None), profile: std::sync::Mutex::new(None), family: std::sync::Mutex::new(None), jwt: std::sync::Mutex::new(None), cover_fixes: std::sync::Mutex::new(std::collections::HashMap::new()), cover_fixes_file: std::sync::Mutex::new(None), cover_misses: std::sync::Mutex::new(std::collections::HashMap::new()) })
     }
 
     fn build_http(jar: Arc<CookieStoreMutex>) -> Result<Client> {
@@ -1106,9 +1108,11 @@ fn flex_i64<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<i64, D::Erro
         I(i64),
         S(String),
     }
-    match N::deserialize(d)? {
-        N::I(n) => Ok(n),
-        N::S(s) => Ok(s.trim().parse().unwrap_or(0)),
+    // `null` : 0, comme une chaîne vide.
+    match Option::<N>::deserialize(d)? {
+        Some(N::I(n)) => Ok(n),
+        Some(N::S(s)) => Ok(s.trim().parse().unwrap_or(0)),
+        None => Ok(0),
     }
 }
 
@@ -1118,11 +1122,16 @@ fn flex_u64<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<u64, D::Erro
     #[serde(untagged)]
     enum N {
         U(u64),
+        I(i64),
         S(String),
     }
-    match N::deserialize(d)? {
-        N::U(n) => Ok(n),
-        N::S(s) => s.trim().parse().map_err(serde::de::Error::custom),
+    // Valeur vide, négative, illisible ou `null` : 0. Avant, une erreur : le titre disparaissait des listes (ligne
+    // ignorée) ou ne se lisait plus (fiche refusée), pour un seul champ (durée, artiste, album) mal rempli chez Deezer.
+    match Option::<N>::deserialize(d)? {
+        Some(N::U(n)) => Ok(n),
+        Some(N::I(n)) => Ok(n.max(0) as u64),
+        Some(N::S(s)) => Ok(s.trim().parse().unwrap_or(0)),
+        None => Ok(0),
     }
 }
 
@@ -1249,6 +1258,12 @@ fn is_token_error(e: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn odd_numbers_from_deezer_keep_the_track() {
+        let t: RawTrack = serde_json::from_value(serde_json::json!({ "SNG_ID": "42", "SNG_TITLE": "T", "DURATION": "", "ART_ID": null, "ALB_ID": -3 })).unwrap();
+        assert_eq!((t.id, t.duration, t.artist_id, t.album_id), (42, 0, 0, 0));
+    }
     #[test]
     fn writes_are_never_sent_twice_after_a_timeout() {
         for m in ["log.listen", "playlist.create", "playlist.addSongs", "playlist.deleteSongs", "favorite_song.add", "favorite_song.remove", "playlist.delete"] {

@@ -16,6 +16,8 @@ pub const BANDS: usize = 5;
 pub const BANDS_HZ: [f32; BANDS] = [60.0, 230.0, 910.0, 3_600.0, 14_000.0];
 /// Largeur des cloches : une bande déborde un peu sur ses voisines, la courbe reste douce.
 const PEAK_Q: f32 = 1.0;
+/// Changement de gain le plus grand par bloc audio (dixièmes de dB) : 0,5 dB environ toutes les 10 ms.
+const RAMP: i32 = 5;
 
 /// Coefficients normalisés (a0 = 1) d'un filtre biquad.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -111,7 +113,10 @@ impl EqState {
     }
 
     /// Prend en compte un nouveau réglage (dixièmes de dB, une valeur par bande) ; ne recalcule que s'il a changé.
-    pub fn set(&mut self, gains: [i32; BANDS]) {
+    /// Appelé à chaque bloc audio : chaque bande avance vers le réglage d'au plus `RAMP`. Avant, les coefficients
+    /// sautaient d'un coup alors que le filtre gardait sa mémoire : un curseur bougé faisait des clics.
+    pub fn set(&mut self, target: [i32; BANDS]) {
+        let gains: [i32; BANDS] = std::array::from_fn(|i| self.applied[i] + (target[i] - self.applied[i]).clamp(-RAMP, RAMP));
         if gains == self.applied {
             return;
         }
@@ -171,10 +176,17 @@ impl EqState {
 mod tests {
     use super::*;
 
+    /// Réglage atteint (le gain avance par petits pas, un par bloc audio).
+    fn settle(st: &mut EqState, gains: [i32; BANDS]) {
+        for _ in 0..1000 {
+            st.set(gains);
+        }
+    }
+
     /// Gain mesuré (en dB) d'un réglage sur une sinusoïde de fréquence `hz`.
     fn gain_at(rate: u32, gains: [i32; BANDS], hz: f32) -> f32 {
         let mut st = EqState::new(rate, 2);
-        st.set(gains);
+        settle(&mut st, gains);
         let fs = rate as f32;
         let n = (fs as usize) / 2;
         let (mut sum_in, mut sum_out) = (0.0f64, 0.0f64);
@@ -230,12 +242,21 @@ mod tests {
     #[test]
     fn returning_to_flat_clears_the_filter_memory() {
         let mut st = EqState::new(44_100, 2);
-        st.set([100; BANDS]);
+        settle(&mut st, [100; BANDS]);
         for i in 0..1000 {
             st.process(0, (i as f32 * 0.1).sin());
         }
-        st.set([0; BANDS]);
+        settle(&mut st, [0; BANDS]);
         assert!(!st.active());
         assert_eq!(st.process(0, 0.25), 0.25);
+    }
+
+    #[test]
+    fn gain_changes_are_ramped() {
+        let mut st = EqState::new(44_100, 2);
+        st.set([120, 0, 0, 0, -120]);
+        assert_eq!(st.applied, [RAMP, 0, 0, 0, -RAMP], "un petit pas par bloc");
+        settle(&mut st, [120, 0, 0, 0, -120]);
+        assert_eq!(st.applied, [120, 0, 0, 0, -120]);
     }
 }

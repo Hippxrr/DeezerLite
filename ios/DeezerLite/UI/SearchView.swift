@@ -282,6 +282,7 @@ private struct TopArtist: View {
         .task(id: card.id) {
             latest = nil
             let page = await player.detail(.detail(kind: "artist", id: card.id, title: card.title), force: false)
+            guard !Task.isCancelled else { return } // un autre artiste entre-temps
             withAnimation(.easeOut(duration: 0.2)) { latest = page?.latest }
         }
     }

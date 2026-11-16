@@ -371,7 +371,7 @@ struct DetailView: View {
                 if detail?.kind == "loved" { tint = Theme.accent }
                 return
             }
-            if let c = await CoverLoader.shared.color(url: url) { tint = Color(uiColor: c) }
+            if let c = await CoverLoader.shared.color(url: url), !Task.isCancelled { tint = Color(uiColor: c) }
         }
         .refreshable { await load(force: true) }
     }

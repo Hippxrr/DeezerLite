@@ -62,6 +62,9 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
     /// Nouvel essai des titres arrêtés quand le réseau semble là mais que Deezer ne répond pas (portail Wi-Fi…).
     private var networkRetry: Task<Void, Never>?
     private static let networkRetryDelay: Duration = .seconds(30)
+    /// Essais d'affilée sans réussite : l'attente double à chaque fois (30 s, 1 min, 2 min… jusqu'à 15 min). Avant, un
+    /// Wi-Fi sans Internet (hôtel, partage de connexion sans données) relançait tout toutes les 30 s, sans fin.
+    private var networkRetryCount = 0
     private var backgroundCompletion: (() -> Void)?
     private var backgroundEventsFinished = false
     /// Dernière progression envoyée par titre, filtrée sur le thread de la session : le thread principal ne reçoit plus
@@ -126,6 +129,7 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
     func networkChanged(up: Bool) {
         let wasUp = networkUp
         networkUp = up
+        if up, !wasUp { networkRetryCount = 0 } // nouveau réseau : on repart d'une attente courte
         if up, !wasUp || !waitingNetwork.isEmpty {
             resumeWaitingForNetwork()
         }
@@ -195,8 +199,10 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         requeue(id)
         // Réseau présent mais Deezer injoignable : nouvel essai plus tard (pas en boucle).
         if networkRetry == nil {
+            let delay = min(Self.networkRetryDelay * (1 << min(networkRetryCount, 5)), .seconds(900))
+            networkRetryCount += 1
             networkRetry = Task { [weak self] in
-                try? await Task.sleep(for: Self.networkRetryDelay)
+                try? await Task.sleep(for: delay)
                 guard !Task.isCancelled, let self else { return }
                 self.networkRetry = nil
                 if self.networkUp { self.resumeWaitingForNetwork() }
@@ -454,11 +460,16 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
     }
 
     private func finish(_ job: Job) {
+        networkRetryCount = 0 // un téléchargement a abouti : le réseau marche
         guard let core, let path = job.incomingPath else { return }
         let id = job.id
         finishing.insert(id)
         player?.downloadUpdated(DownloadUpdate(id: id, state: .downloading, progress: 1, error: nil))
+        // Rangement du titre : iOS laisse le temps de le finir si l'app passe en arrière-plan juste à ce moment (sinon il
+        // attendait le prochain réveil de l'app).
+        let background = UIApplication.shared.beginBackgroundTask(withName: "download-finish")
         Task { [weak self] in
+            defer { if background != .invalid { UIApplication.shared.endBackgroundTask(background) } }
             do {
                 let track = try await core.finishDownload(id: id, path: path)
                 guard let self else { return }

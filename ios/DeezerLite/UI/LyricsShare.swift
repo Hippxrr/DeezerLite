@@ -10,7 +10,7 @@ struct LyricsShareRequest: Identifiable {
 }
 
 /// Choix des lignes (jusqu'à `maxLines`) avec l'aperçu de la carte, puis partage de l'image (Messages, Instagram,
-/// Photos…). L'image est refaite seulement quand le choix change.
+/// Photos…). L'image est faite au moment du partage.
 struct LyricsShareSheet: View {
     @Environment(Player.self) private var player
     @Environment(\.dismiss) private var dismiss
@@ -18,7 +18,8 @@ struct LyricsShareSheet: View {
     @State private var picked: Set<Int>
     @State private var cover: UIImage?
     @State private var backdrop: UIImage?
-    @State private var image: UIImage?
+    /// Pochette et fond chargés : le partage est possible.
+    @State private var ready = false
     @State private var refused = 0
 
     private static let maxLines = 6
@@ -81,8 +82,10 @@ struct LyricsShareSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button(tr("Annuler")) { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    if let image, !picked.isEmpty {
-                        Button { share(image) } label: { Text(tr("Partager")).bold() }
+                    if ready, !picked.isEmpty {
+                        // Image faite au moment du partage seulement : avant, à chaque ligne cochée (1080 × 1920 à refaire,
+                        // une fraction de seconde sur le fil principal à chaque appui). L'aperçu, lui, est la carte en direct.
+                        Button { if let image = render() { share(image) } } label: { Text(tr("Partager")).bold() }
                     } else {
                         ProgressView()
                     }
@@ -98,9 +101,8 @@ struct LyricsShareSheet: View {
                 async let b = CoverLoader.shared.backdrop(url: url)
                 (cover, backdrop) = await (c, b)
             }
-            render()
+            ready = true
         }
-        .onChange(of: picked) { render() }
     }
 
     private func toggle(_ i: Int) {
@@ -131,10 +133,10 @@ struct LyricsShareSheet: View {
     }
 
     /// Image de 1080 × 1920 (format story d'Instagram).
-    private func render() {
+    private func render() -> UIImage? {
         let renderer = ImageRenderer(content: LyricsCard(track: request.track, lines: chosen, cover: cover, backdrop: backdrop))
         renderer.scale = 3
-        image = renderer.uiImage
+        return renderer.uiImage
     }
 }
 

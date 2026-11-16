@@ -479,7 +479,17 @@ struct MainTabs: View {
             // La copie faite pour l'app est gardée par la fenêtre d'import (lue à l'envoi), qui la supprime en se fermant.
             Task { await player.importMp3(from: url) }
         }) {
-            Mp3FilePicker { pickedMp3 = $0 }.ignoresSafeArea()
+            // Le sélecteur se ferme tout seul et peut annoncer le fichier choisi APRÈS sa fermeture : la fenêtre d'import ne
+            // s'ouvrait alors pas (rien de choisi au moment de la fermeture), et le fichier était pris à l'essai suivant.
+            // Choisi avant la fermeture : importé à la fermeture ; après : importé tout de suite.
+            Mp3FilePicker { url in
+                if player.importingMp3 {
+                    pickedMp3 = url
+                } else {
+                    Task { await player.importMp3(from: url) }
+                }
+            }
+            .ignoresSafeArea()
         }
         .sheet(item: Binding(get: { player.mp3Editor }, set: { player.mp3Editor = $0 })) { edit in
             Mp3EditView(edit: edit).environment(player)

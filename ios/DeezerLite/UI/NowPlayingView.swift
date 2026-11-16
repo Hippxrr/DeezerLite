@@ -601,6 +601,8 @@ struct NowPlayingView: View {
     @GestureState private var pulling = false
     /// Réglages › Apparence : pochette en haut de l'écran sur toute la largeur, fondue dans le fond.
     @AppStorage("fullBleedCover") private var fullBleed = false
+    /// Réglages : un appui long sur la pochette l'enregistre dans Photos, au lieu du mode épuré (désactivé par défaut).
+    @AppStorage("saveCoverOnLongPress") private var saveCoverOnLongPress = false
     var body: some View {
         GeometryReader { geo in
             let side = min(geo.size.width - 48, geo.size.height * 0.42)
@@ -611,10 +613,12 @@ struct NowPlayingView: View {
             ZStack(alignment: .top) {
             if bleed {
                 VStack(spacing: 0) {
-                    CoverCarousel(side: geo.size.width, width: geo.size.width, pull: pull, bleed: true, onPullEnd: pullEnded) { clean.toggle() }
+                    CoverCarousel(side: geo.size.width, width: geo.size.width, pull: pull, bleed: true, onPullEnd: pullEnded) { coverLongPress() }
                         .mask {
                             // Bas fondu en courbe douce (pas de départ visible du fondu, comme une ligne).
-                            LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.04),
+                            // Haut fondu un peu plus long (7 %) : la jonction avec le fond se fait en douceur, les logos
+                            // tout en haut restent lisibles.
+                            LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.07),
                                                    .init(color: .black, location: 0.7), .init(color: .black.opacity(0.74), location: 0.8),
                                                    .init(color: .black.opacity(0.35), location: 0.88), .init(color: .black.opacity(0.07), location: 0.95),
                                                    .init(color: .clear, location: 1)],
@@ -640,7 +644,7 @@ struct NowPlayingView: View {
                     if bleed {
                         Color.clear.frame(width: side, height: side)
                     } else {
-                        CoverCarousel(side: side, width: geo.size.width, pull: pull, onPullEnd: pullEnded) { clean.toggle() }
+                        CoverCarousel(side: side, width: geo.size.width, pull: pull, onPullEnd: pullEnded) { coverLongPress() }
                             .transition(.opacity)
                     }
                     Spacer(minLength: 8)
@@ -723,6 +727,16 @@ struct NowPlayingView: View {
             }
         } else {
             pull.settle(open: true, velocity: v.velocity.height)
+        }
+    }
+
+    /// Appui long sur la pochette : mode épuré ; avec le réglage, pochette enregistrée dans Photos (et plus de mode épuré).
+    private func coverLongPress() {
+        if saveCoverOnLongPress {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            player.saveCurrentCoverToPhotos()
+        } else {
+            clean.toggle()
         }
     }
 
@@ -969,6 +983,8 @@ private struct Backdrop: View {
             } else {
                 image = await CoverLoader.shared.backdrop(url: url, download: open)
             }
+            // Titre changé pendant la préparation : le fond de l'ancien ne s'affiche pas sous le nouveau.
+            guard !Task.isCancelled else { return }
             guard let img = image else {
                 // Lecteur fermé et pochette pas encore en mémoire : le fond sera fait à l'ouverture. Pleine largeur : celui de
                 // l'ancien titre est oublié (il se voyait sous la nouvelle pochette en rouvrant le lecteur) ; le fond flouté
@@ -1134,7 +1150,8 @@ struct ScrubBar: View {
                         Color.white.opacity(0.22)
                         Color.white.opacity(dragging == nil ? 0.85 : 1)
                             .scaleEffect(x: fraction, anchor: .leading)
-                            .animation(dragging == nil && player.status.playing ? .linear(duration: 0.5) : nil, value: fraction)
+                            // Sans animation (comme la barre du mini-lecteur) : elle avance de moins d'un point par relevé, et
+                            // l'animation la faisait redessiner à chaque image de l'écran tant que le lecteur était ouvert.
                     }
                     .frame(height: dragging == nil ? 6 : 11)
                     .clipShape(Capsule())
@@ -1393,7 +1410,7 @@ private struct QueuePanel: View {
                         let t = player.queue[i]
                         Button { player.queuePlay(i) } label: {
                             HStack(spacing: 12) {
-                                CoverView(url: t.coverUrl, side: 44, radius: 6)
+                                CoverView(url: player.mp3Cover(t) ?? player.coverFixes[t.id] ?? t.coverUrl, side: 44, radius: 6)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(t.title).font(.subheadline.weight(.medium)).lineLimit(1)
                                     Text(t.artist).font(.caption).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
@@ -1520,9 +1537,16 @@ private struct LyricsPanel: View {
             active = -1
             lyrics = nil
             if player.showFullPlayer, let track = player.current, track.id != 0 {
-                do { lyrics = try await player.lyrics(track) } catch { failed = true }
-                // Interrompu (arrière-plan, autre titre) : refait au prochain affichage.
-                if Task.isCancelled { shownFor = nil; return }
+                // Interrompu (arrière-plan, autre titre) : rien n'est affiché (les paroles de l'ancien titre remplaçaient
+                // celles du nouveau), refait au prochain affichage.
+                do {
+                    let found = try await player.lyrics(track)
+                    if Task.isCancelled { shownFor = nil; return }
+                    lyrics = found
+                } catch {
+                    if Task.isCancelled { shownFor = nil; return }
+                    failed = true
+                }
             }
             loaded = true
         }
@@ -1628,7 +1652,7 @@ struct CreditsView: View {
 
     private var header: some View {
         VStack(spacing: 12) {
-            CoverView(url: track.coverUrl, side: 150, radius: 14)
+            CoverView(url: player.mp3Cover(track) ?? player.coverFixes[track.id] ?? track.coverUrl, side: 150, radius: 14)
                 .shadow(color: .black.opacity(0.4), radius: 16, y: 8)
             VStack(spacing: 4) {
                 Text(track.title).font(.title3.bold()).multilineTextAlignment(.center)

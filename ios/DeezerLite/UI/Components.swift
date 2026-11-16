@@ -164,7 +164,15 @@ struct CoverView: View {
                 return
             }
             if image == nil { preview = loader.anyCached(url: url) }
+            // Rien en mémoire : une courte attente avant de télécharger. Une ligne qui passe vite (défilement rapide) est
+            // déjà sortie de l'écran, et sa pochette n'est plus téléchargée pour rien.
+            if preview == nil {
+                try? await Task.sleep(for: .milliseconds(60))
+                guard !Task.isCancelled else { return }
+            }
             guard load, phase != .background, let sharp = await loader.image(url: url, pixels: pixels) else { return }
+            // Ligne passée à un autre titre pendant le téléchargement (tri, recherche) : l'ancienne image ne l'écrase pas.
+            guard !Task.isCancelled else { return }
             image = sharp
             imageURL = url
         }

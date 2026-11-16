@@ -339,6 +339,7 @@ struct SettingsView: View {
     @AppStorage("tabBarFull") private var tabBarFull = true
     @AppStorage("miniProgress") private var miniProgress = true
     @AppStorage("fullBleedCover") private var fullBleedCover = false
+    @AppStorage("saveCoverOnLongPress") private var saveCoverOnLongPress = false
 
     enum SettingsTab: String, CaseIterable {
         case general, look, sound, quality
@@ -530,6 +531,18 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(tr("Pochette pleine largeur"))
                         Text(tr("Grand lecteur : la pochette en haut, sur toute la largeur, fondue dans le fond")).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .tint(Theme.accent)
+            .padding(14)
+            divider
+            Toggle(isOn: $saveCoverOnLongPress) {
+                HStack(spacing: 12) {
+                    Image(systemName: "square.and.arrow.down").foregroundStyle(Theme.accent).frame(width: 26)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(tr("Appui long : enregistrer la pochette"))
+                        Text(tr("Grand lecteur : un appui long sur la pochette l'enregistre dans Photos (au lieu du mode épuré)")).font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }

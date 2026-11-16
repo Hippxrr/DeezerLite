@@ -1176,6 +1176,11 @@ impl Core {
         self.offline.clear_downloads().map_err(|e| CoreError::Api(e.to_string()))
     }
 
+    /// Numéros des titres téléchargés seulement (l'app n'utilisait que ça de `downloads`, qui convertit toutes les fiches).
+    pub fn downloaded_ids(&self) -> Vec<i64> {
+        self.offline.ids()
+    }
+
     pub fn downloads(&self) -> Vec<Track> {
         tracks(&self.offline.infos())
     }

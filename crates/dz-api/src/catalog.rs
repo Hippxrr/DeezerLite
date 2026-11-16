@@ -469,11 +469,28 @@ impl DeezerClient {
     }
 
     async fn profile_tab(&self, tab: &str) -> Result<Value> {
+        const PAGE: usize = 500;
         let uid = self.user_id().await?;
-        let r: Value = self
-            .gw("deezer.pageProfile", &json!({ "user_id": uid.to_string(), "tab": tab, "nb": 500 }))
-            .await?;
-        Ok(r.get("TAB").and_then(|t| t.get(tab)).cloned().unwrap_or(Value::Null))
+        let page = |start: usize| {
+            let body = json!({ "user_id": uid.to_string(), "tab": tab, "nb": PAGE, "start": start });
+            async move { self.gw::<Value>("deezer.pageProfile", &body).await }
+        };
+        let r: Value = page(0).await?;
+        let mut t = r.get("TAB").and_then(|t| t.get(tab)).cloned().unwrap_or(Value::Null);
+        // Plus de 500 éléments : les pages suivantes (avant, la bibliothèque s'arrêtait à 500 sans prévenir).
+        let total = t.get("total").and_then(|v| v.as_u64().or_else(|| v.as_str()?.trim().parse().ok())).unwrap_or(0) as usize;
+        if let Some(list) = t.get_mut("data").and_then(Value::as_array_mut) {
+            while list.len() < total && list.len() < 20_000 {
+                let Ok(more) = page(list.len()).await else { break };
+                let rows = more.get("TAB").and_then(|t| t.get(tab)).and_then(|t| t.get("data")).and_then(Value::as_array).cloned().unwrap_or_default();
+                // Page vide, ou la même que la première (serveur qui ignore `start`) : on garde ce qu'on a.
+                if rows.is_empty() || rows.first() == list.first() {
+                    break;
+                }
+                list.extend(rows);
+            }
+        }
+        Ok(t)
     }
 
     pub async fn user_playlists(&self) -> Result<Vec<Card>> {
@@ -633,14 +650,21 @@ impl DeezerClient {
     pub async fn loved_tracks(&self) -> Result<Vec<TrackInfo>> {
         const TTL: std::time::Duration = std::time::Duration::from_secs(300);
         let uid = self.user_id().await?;
-        if let Ok(g) = self.loved_cache.lock() {
-            if let Some((u, at, v)) = g.as_ref() {
-                if *u == uid && at.elapsed() < TTL {
-                    let mut v = v.clone();
-                    self.apply_cover_fixes(&mut v);
-                    return Ok(v);
-                }
-            }
+        let cached = || {
+            let g = self.loved_cache.lock().ok()?;
+            let (u, at, v) = g.as_ref()?;
+            (*u == uid && at.elapsed() < TTL).then(|| v.clone())
+        };
+        if let Some(mut v) = cached() {
+            self.apply_cover_fixes(&mut v);
+            return Ok(v);
+        }
+        // Un seul chargement à la fois : deux demandes simultanées (au lancement, la liste et la copie hors ligne des
+        // titres aimés) en faisaient deux complets. La seconde attend puis reprend le résultat de la première.
+        let _one = self.loved_fetch.lock().await;
+        if let Some(mut v) = cached() {
+            self.apply_cover_fixes(&mut v);
+            return Ok(v);
         }
         let mut fresh = self.fetch_loved().await?;
         self.apply_cover_fixes(&mut fresh);

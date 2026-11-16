@@ -201,7 +201,14 @@ final class CoverLoader: @unchecked Sendable {
             // donnaient un flou « d'un coup », sans dégradé visible. Au-delà du reflet, sa dernière ligne (déjà très floue).
             let mirrored = placed.transformed(by: CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: 2 * bottom))
             let belowArea = CGRect(x: -width, y: -canvas.height, width: width * 3, height: canvas.height + bottom)
-            let extendedCover = mirrored.clampedToExtent().cropped(to: belowArea).composited(over: placed.clampedToExtent())
+            // Au-dessus (derrière l'heure) : aussi un reflet, du haut de la pochette. Avant, sa première ligne était étirée vers
+            // le haut : des traînées, et une limite visible quand cette ligne ne ressemblait pas à la suite (bord, cadre).
+            let top = bottom + side
+            let mirroredTop = placed.transformed(by: CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: 2 * top))
+            let aboveArea = CGRect(x: -width, y: top, width: width * 3, height: canvas.height)
+            let extendedCover = mirroredTop.clampedToExtent().cropped(to: aboveArea)
+                .composited(over: mirrored.clampedToExtent().cropped(to: belowArea))
+                .composited(over: placed.clampedToExtent())
             // Force du flou, ligne par ligne (0 : net ; 1 : rayon maximal). Derrière l'heure, comme le fond flouté habituel ;
             // nul sous la pochette (cachée ou en train de s'effacer), à peine au bas de celle-ci ; puis sous elle, il part de
             // presque rien et augmente de plus en plus vite jusqu'à la moitié de la hauteur restante.

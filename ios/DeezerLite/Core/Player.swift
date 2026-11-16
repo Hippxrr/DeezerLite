@@ -89,6 +89,9 @@ final class Player {
     /// Changé à chaque mise à jour immédiate des listes : un rafraîchissement en arrière-plan commencé avant ne les
     /// écrase pas avec un état plus ancien (titre supprimé entre-temps, déconnexion).
     @ObservationIgnored private var downloadsVersion = 0
+    /// Modifications des téléchargements faites hors du fil principal, l'une après l'autre (aimer puis retirer vite :
+    /// toujours dans cet ordre).
+    @ObservationIgnored private var downloadEdits: Task<Void, Never>?
     @ObservationIgnored private var bytesTask: Task<Void, Never>?
     /// Réseau du moment : données mobiles (4G / 5G) ou non.
     private(set) var onCellular = false
@@ -246,25 +249,44 @@ final class Player {
     }
 
     /// Ajoute un titre à une collection téléchargée et lance son téléchargement, sans recharger toute la collection.
+    /// Hors du fil principal : avec des milliers de titres téléchargés, l'écriture sur le disque et la relecture des
+    /// listes figeaient l'écran à chaque cœur (0,05 à 0,3 s).
     private func addDownloadedTrack(kind: String, id: UInt64, track: Track) {
         guard let core, downloadedCollection(kind: kind, id: id) != nil else { return }
-        do {
-            _ = try core.addDownloadTrackToCollection(kind: kind, id: Self.downloadId(kind: kind, id: id), trackId: track.id)
-            refreshDownloads()
-            if !downloadedIds.contains(track.id), downloadStates[track.id] == nil { download([track]) }
-        } catch {
-            showToast(tr("La copie hors ligne n'a pas pu être actualisée"), seconds: 4)
+        let (did, tid) = (Self.downloadId(kind: kind, id: id), track.id)
+        editDownloads {
+            do {
+                _ = try await Task.detached(priority: .userInitiated) { try core.addDownloadTrackToCollection(kind: kind, id: did, trackId: tid) }.value
+                await self.refreshDownloadsInBackground()
+                if !self.downloadedIds.contains(tid), self.downloadStates[tid] == nil { self.download([track]) }
+            } catch {
+                self.showToast(tr("La copie hors ligne n'a pas pu être actualisée"), seconds: 4)
+            }
         }
     }
 
     private func removeDownloadedTrack(kind: String, id: UInt64, trackId: Int64) {
         guard let core, downloadedCollection(kind: kind, id: id) != nil else { return }
-        do {
-            let removed = try core.removeDownloadTrackFromCollection(kind: kind, id: Self.downloadId(kind: kind, id: id), trackId: trackId)
-            if !removed.isEmpty { BackgroundDownloadManager.shared.cancel(removed) }
-            refreshDownloads()
-        } catch {
-            showToast(tr("La copie hors ligne n'a pas pu être actualisée"), seconds: 4)
+        let did = Self.downloadId(kind: kind, id: id)
+        editDownloads {
+            do {
+                let removed = try await Task.detached(priority: .userInitiated) {
+                    try core.removeDownloadTrackFromCollection(kind: kind, id: did, trackId: trackId)
+                }.value
+                if !removed.isEmpty { BackgroundDownloadManager.shared.cancel(removed) }
+                await self.refreshDownloadsInBackground()
+            } catch {
+                self.showToast(tr("La copie hors ligne n'a pas pu être actualisée"), seconds: 4)
+            }
+        }
+    }
+
+    /// Lance une modification des téléchargements après celles en cours.
+    private func editDownloads(_ work: @escaping @MainActor () async -> Void) {
+        let previous = downloadEdits
+        downloadEdits = Task { @MainActor in
+            await previous?.value
+            await work()
         }
     }
 
@@ -378,11 +400,14 @@ final class Player {
         guard let core else { return }
         skipDownloads([id]) // supprimé à la main : pas retéléchargé par la synchro de sa playlist ou de son album
         BackgroundDownloadManager.shared.cancel(id)
-        do {
-            try core.removeDownload(id: id)
-            forgetOfflineDetails()
-            refreshDownloads()
-        } catch { message = describe(error) }
+        // Hors du fil principal (fichiers supprimés, liste réécrite sur le disque) : plus de gel.
+        editDownloads {
+            do {
+                try await Task.detached(priority: .userInitiated) { try core.removeDownload(id: id) }.value
+                self.forgetOfflineDetails()
+                await self.refreshDownloadsInBackground()
+            } catch { self.message = self.describe(error) }
+        }
     }
 
     /// Fichiers supprimés hors du thread principal : des centaines de titres figeaient l'app quelques secondes.
@@ -507,7 +532,7 @@ final class Player {
             // était ignoré, et cette lecture plus ancienne le faisait disparaître de la liste).
             self?.downloadsRefreshTask = nil
             let lists = await Task.detached(priority: .utility) {
-                (Set(core.downloads().map(\.id)), core.standaloneDownloads(), core.downloadCollections())
+                (Set(core.downloadedIds()), core.standaloneDownloads(), core.downloadCollections())
             }.value
             guard !Task.isCancelled, let self, version == self.downloadsVersion else { return }
             if self.downloadedIds != lists.0 { self.downloadedIds = lists.0 }
@@ -518,12 +543,27 @@ final class Player {
         }
     }
 
+    /// Comme `refreshDownloads`, avec les listes lues hors du fil principal.
+    private func refreshDownloadsInBackground() async {
+        guard let core else { return }
+        cancelBackgroundDownloadsRefresh()
+        let version = downloadsVersion
+        let lists = await Task.detached(priority: .userInitiated) {
+            (Set(core.downloadedIds()), core.standaloneDownloads(), core.downloadCollections())
+        }.value
+        guard version == downloadsVersion else { return } // une lecture plus récente a eu lieu entre-temps
+        if downloadedIds != lists.0 { downloadedIds = lists.0 }
+        downloads = lists.1
+        downloadCollections = lists.2
+        refreshDownloadBytes()
+        syncDownloadRows()
+    }
+
     /// Mise à jour immédiate (après une action de l'utilisateur, dont la suite lit les listes tout de suite).
     private func refreshDownloads() {
         guard let core else { return }
         cancelBackgroundDownloadsRefresh()
-        let all = core.downloads()
-        downloadedIds = Set(all.map(\.id))
+        downloadedIds = Set(core.downloadedIds())
         downloads = core.standaloneDownloads()
         downloadCollections = core.downloadCollections()
         refreshDownloadBytes()
@@ -673,6 +713,8 @@ final class Player {
         }
         guard let lyrics = found else {
             noLyrics[id] = Date()
+            // Gardés 30 min seulement : les plus anciens sont oubliés plutôt que de s'accumuler.
+            if noLyrics.count > 500 { noLyrics = noLyrics.filter { Date().timeIntervalSince($0.value) < 30 * 60 } }
             return nil
         }
         if lyricsCache.count >= 30 { lyricsCache.removeAll() }
@@ -892,9 +934,9 @@ final class Player {
             // Compte Famille : le profil choisi la dernière fois est rouvert dès la connexion.
             core.setProfile(id: Self.savedProfile)
             core.setDownloadQuality(quality: downloadQuality)
-            let all = core.downloads()
-            downloadedIds = Set(all.map(\.id))
-            downloads = core.standaloneDownloads()
+            // Au lancement, seulement ce qui sert tout de suite : la liste des titres téléchargés seuls (avec un regard sur
+            // chaque fichier) est lue juste après, hors du fil principal (voir plus bas).
+            downloadedIds = Set(core.downloadedIds())
             downloadCollections = core.downloadCollections()
         } catch {
             core = nil
@@ -902,6 +944,7 @@ final class Player {
         }
         message = startError
         events.player = self
+        if core != nil { scheduleDownloadsRefresh() }
         refreshDownloadBytes()
         // Pas de volume dans l'app : c'est celui de l'iPhone qui compte. Le moteur joue à 100 % : même niveau que les
         // autres apps, et le son sort sans retouche quand l'égaliseur est désactivé (il démarrait à 50 %, réglage de la
@@ -1520,10 +1563,17 @@ final class Player {
         detailDay[route] = Self.day()
         detailOrder.removeAll { $0 == route }
         detailOrder.append(route)
-        if detailOrder.count > maxDetails { details[detailOrder.removeFirst()] = nil }
+        if detailOrder.count > maxDetails {
+            let old = detailOrder.removeFirst()
+            details[old] = nil
+            detailDay[old] = nil
+        }
     }
 
     func cachedDetail(_ route: Route) -> Detail? {
+        // Hors ligne, une copie hors ligne déjà en mémoire suffit : relue sur le disque à chaque fois, elle ralentissait
+        // l'ouverture des pages (des milliers de titres convertis sur le fil principal).
+        if let hit = details[route], hit.offline || networkSignature != "none" { return hit }
         if networkSignature == "none", let saved = localDetail(route) {
             cacheDetail(saved, for: route)
             return saved
@@ -1633,6 +1683,11 @@ final class Player {
                 guard gen == profileGeneration else { return }
                 if liked { lovedIds.remove(track.id) } else { lovedIds.insert(track.id) }
                 showToast(describe(error), seconds: 4)
+            }
+            // Dernier envoi pour ce titre terminé : plus rien à attendre, il n'est plus gardé.
+            if likeGeneration[track.id] == mine {
+                likeTasks[track.id] = nil
+                likeGeneration[track.id] = nil
             }
         }
     }
@@ -1995,6 +2050,7 @@ final class Player {
     private func trimMemory() {
         details = [:]
         detailOrder = []
+        detailDay = [:]
         lyricsCache = [:]
     }
 
@@ -2554,8 +2610,15 @@ final class Player {
             // jouait), sinon elle restait « en cours » et bloquait les reprises automatiques. Valeur 1 = `.appWasSuspended`
             // (nom déclaré dépassé par Apple, valeur encore envoyée par certaines versions d'iOS).
             let suspended = (info[AVAudioSessionInterruptionReasonKey] as? UInt) == 1
-            if type == .began && suspended { return }
-            Task { @MainActor in
+            if type == .began && suspended {
+                // iOS a coupé la session : marquée inactive, la prochaine lecture (écran verrouillé, CarPlay) la réactive
+                // tout de suite au lieu d'attendre un nouvel essai.
+                MainActor.assumeIsolated { AudioSession.invalidate() }
+                return
+            }
+            // Traité tout de suite (file principale), comme les changements de sortie : avec un `Task`, une fin d'appel
+            // pouvait passer après le changement de sortie qui l'accompagne, et la reprise était perdue.
+            MainActor.assumeIsolated {
                 guard let self, let core = self.core else { return }
                 switch type {
                 case .began:
@@ -2580,12 +2643,17 @@ final class Player {
         }
         center.addObserver(forName: AVAudioSession.routeChangeNotification, object: session, queue: .main) { [weak self] n in
             let reason = (n.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt).flatMap(AVAudioSession.RouteChangeReason.init)
-            let previous = (n.userInfo?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription)?
-                .outputs.first { Self.earPorts.contains($0.portType) }?.uid
+            let before = (n.userInfo?[AVAudioSessionRouteChangePreviousRouteKey] as? AVAudioSessionRouteDescription)?.outputs ?? []
+            let previous = before.first { Self.earPorts.contains($0.portType) }?.uid
+            // Sortie « mains libres » (casque, voiture) qui disparaît : c'est la fin d'un appel, pas des écouteurs retirés.
+            let handsFree = before.contains { $0.portType == .bluetoothHFP }
             let current = AVAudioSession.sharedInstance().currentRoute.outputs.map(\.uid)
             MainActor.assumeIsolated {
                 guard let self else { return }
                 if reason == .oldDeviceUnavailable {
+                    // Fin d'appel en Bluetooth : la coupure en cours décide de la reprise. Avant, cette pause comptait comme
+                    // un choix de l'utilisateur et la musique ne reprenait pas après l'appel.
+                    if handsFree && self.resumePolicy.interrupted { return }
                     // Écouteurs débranchés, AirPods retirés des oreilles : pause (jamais de bascule sur le haut-parleur),
                     // et reprise s'ils reviennent.
                     let wasPlaying = self.core?.status().playing ?? false
