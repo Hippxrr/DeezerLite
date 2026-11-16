@@ -417,6 +417,23 @@ struct SettingsView: View {
                 row("square.grid.2x2", tr("Personnaliser l'accueil")) { chevron }
             }
             .buttonStyle(.plain)
+            divider
+            HStack(spacing: 12) {
+                Image(systemName: "globe").foregroundStyle(Theme.accent).frame(width: 26)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(tr("Tops d'un pays"))
+                    Text(player.region.isEmpty ? tr("Désactivé : rien n'est demandé à Deezer") : tr("Top du pays sur l'accueil, avec ses nouveautés quand il y en a"))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Picker(tr("Tops d'un pays"), selection: Binding(get: { player.region }, set: { player.setRegion($0) })) {
+                    Text(tr("Désactivé")).tag("")
+                    ForEach(player.regionChoices, id: \.self) { Text(player.regionName($0)).tag($0) }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+            }
+            .padding(14)
         }
         lecture
         account

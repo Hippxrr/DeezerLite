@@ -68,6 +68,11 @@ final class Player {
     var requestedRoute: Route?
     /// Pages déjà chargées : affichées tout de suite en revenant dessus (tirer vers le bas pour actualiser).
     private(set) var home: [Shelf]?
+    /// Réglage « Tops d'un pays » : code ISO du pays, vide (par défaut) = désactivé, rien n'est demandé à Deezer.
+    private(set) var region = UserDefaults.standard.string(forKey: "region") ?? ""
+    /// Top du pays (et ses nouveautés) affiché sur l'accueil.
+    private(set) var regionCards: [Card]?
+    @ObservationIgnored private var regionLoadedAt: Date?
     private(set) var library: [Int: [Card]] = [:]
     @ObservationIgnored private var details: [Route: Detail] = [:]
     @ObservationIgnored private var detailOrder: [Route] = []
@@ -1486,6 +1491,38 @@ final class Player {
         if reco.anyVisible && home == nil { Task { await loadHome(force: true) } }
         // Désactivées : rien n'est gardé en mémoire ni redemandé à Deezer (aucun appel tant qu'elles restent coupées).
         if !reco.anyVisible { home = nil }
+    }
+
+    /// Pays proposés : le monde d'abord, puis par nom dans la langue de l'app.
+    var regionChoices: [String] {
+        let codes = core?.regionCodes() ?? []
+        return codes.sorted { a, b in
+            if a == "001" || b == "001" { return a == "001" }
+            return regionName(a).localizedCompare(regionName(b)) == .orderedAscending
+        }
+    }
+
+    func regionName(_ code: String) -> String {
+        Locale(identifier: LanguageStore.shared.current.rawValue).localizedString(forRegionCode: code) ?? code
+    }
+
+    func setRegion(_ code: String) {
+        region = code
+        UserDefaults.standard.set(code, forKey: "region")
+        regionCards = nil
+        regionLoadedAt = nil
+        Task { await loadRegion(force: true) }
+    }
+
+    /// Les tops changent une fois par jour : redemandés au plus toutes les 30 min (ou en tirant l'accueil vers le bas).
+    func loadRegion(force: Bool) async {
+        guard let core, !region.isEmpty else { return }
+        if !force, let at = regionLoadedAt, Date().timeIntervalSince(at) < 1800 { return }
+        let code = region
+        // Raté (pas de réseau…) : la copie affichée reste, sans message à chaque passage sur l'accueil.
+        guard let fresh = try? await core.regionCards(code: code), code == region else { return }
+        regionCards = fresh
+        regionLoadedAt = Date()
     }
 
     func loadHome(force: Bool) async {

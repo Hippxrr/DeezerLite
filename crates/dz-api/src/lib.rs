@@ -22,7 +22,7 @@ pub use serde_json;
 mod stats;
 pub use stats::{MonthStats, RecentListen, StatArtist, StatGenre, StatTrack};
 pub use genius::LyricsQuery;
-pub use catalog::{drain_notes, Card, Collection, LyricLine, Lyrics, PageView, SearchResults, Section};
+pub use catalog::{drain_notes, Card, Collection, LyricLine, Lyrics, PageView, SearchResults, Section, REGIONS};
 
 const GW_URL: &str = "https://www.deezer.com/ajax/gw-light.php";
 const MEDIA_URL: &str = "https://media.deezer.com/v1/get_url";

@@ -447,6 +447,31 @@ fn search_artists(items: &[Value]) -> Vec<Card> {
     found.into_iter().map(|(_, c)| c).collect()
 }
 
+/// Tops par pays : (code ISO du pays, « 001 » pour le monde ; top du pays, publié par le compte « Deezer Charts » ;
+/// nouveautés de la semaine tenues par la rédaction de Deezer, 0 s'il n'y en a pas). Relevé sur api.deezer.com le
+/// 16/11/2026 : seuls la France, l'Allemagne, le Brésil et l'Amérique latine hispanophone ont leurs propres nouveautés ;
+/// les pays anglophones et le monde reçoivent « Radar Weekly » (nouveautés internationales).
+pub const REGIONS: &[(&str, u64, u64)] = &[
+    ("001", 3155776842, 1282495565), ("DZ", 1362501015, 0), ("AR", 1279119721, 6556887484),
+    ("AU", 1313616925, 1282495565), ("AT", 1313615765, 1043463931), ("BE", 1266968331, 0),
+    ("BO", 1362495515, 6556887484), ("BR", 1111141961, 1250202481), ("BG", 1362494565, 0),
+    ("CA", 1652248171, 1282495565), ("CL", 1279119121, 6556887484), ("CO", 1116188451, 6556887484),
+    ("CR", 1313618455, 6556887484), ("HR", 1266971131, 0), ("CZ", 1266969571, 0), ("DK", 1313618905, 0),
+    ("EC", 1362501235, 6556887484), ("EG", 1362501615, 0), ("SV", 1362523615, 6556887484), ("EE", 1221037201, 0),
+    ("FI", 1221034071, 0), ("FR", 1109890291, 1478649355), ("DE", 1111143121, 1043463931),
+    ("GT", 1279118671, 6556887484), ("HN", 1116190301, 6556887484), ("HU", 1362506695, 0), ("ID", 1116188761, 0),
+    ("IE", 1313619455, 1282495565), ("IL", 1362507345, 0), ("IT", 1116187241, 0), ("CI", 1362497945, 0),
+    ("JM", 1362508575, 0), ("JP", 1362508955, 0), ("JO", 1362508765, 0), ("KE", 1362509215, 0), ("LV", 1221037511, 0),
+    ("LB", 1362511155, 0), ("LT", 1221037371, 0), ("MY", 1362515675, 0), ("MX", 1111142361, 6556887484),
+    ("MA", 1362512715, 0), ("NL", 1266971851, 0), ("NG", 1362516565, 0), ("NO", 1313619885, 0),
+    ("PY", 1362520135, 6556887484), ("PE", 1362518525, 6556887484), ("PH", 1362518895, 0), ("PL", 1266972311, 0),
+    ("PT", 1362519755, 0), ("RO", 1279117071, 0), ("SA", 1362521285, 0), ("SN", 1362523075, 0), ("RS", 1266972981, 0),
+    ("SG", 1313620765, 0), ("SK", 1266973701, 0), ("SI", 1362522355, 0), ("ZA", 1362528775, 0), ("KR", 1362510315, 0),
+    ("ES", 1116190041, 0), ("SE", 1313620305, 0), ("CH", 1313617925, 0), ("TH", 1362524475, 0), ("TN", 1362525375, 0),
+    ("TR", 1116189071, 0), ("GB", 1111142221, 1282495565), ("UA", 1362526495, 0), ("AE", 1362491345, 0),
+    ("US", 1313621735, 1282495565), ("VE", 1362527605, 6556887484),
+];
+
 impl DeezerClient {
     async fn user_id(&self) -> Result<u64> {
         // Session déjà ouverte, ou ouverte une seule fois même si plusieurs chargements la demandent en même temps.
@@ -982,6 +1007,17 @@ impl DeezerClient {
         }
     }
 
+    /// Réglage « Tops d'un pays » : le top du pays (code ISO, « 001 » : le monde) et sa playlist de nouveautés quand il y
+    /// en a une. Erreur si le top est introuvable ; les nouveautés, elles, sont simplement omises.
+    pub async fn region_cards(&self, code: &str) -> Result<Vec<Card>> {
+        let &(_, top, news) = REGIONS.iter().find(|r| r.0 == code).ok_or(DeezerError::EmptyResults)?;
+        let (top, news) = futures_util::future::join(self.playlist_card(top), async {
+            if news == 0 { None } else { self.playlist_card(news).await.ok() }
+        })
+        .await;
+        Ok(std::iter::once(top?).chain(news).collect())
+    }
+
     /// Carte d'une playlist publique (titre, pochette, taille) via l'API publique, sans authentification.
     pub async fn playlist_card(&self, id: u64) -> Result<Card> {
         let v: Value = self
@@ -1280,5 +1316,19 @@ mod reco_tests {
         // une section qui ne contient que des éléments non gérés disparaît
         let v = json!({ "sections": [ { "title": "Podcasts", "section_id": "module_type=podcast,content_source=none", "items": [show] } ] });
         assert!(parse_sections(&v, 0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod region_tests {
+    use super::REGIONS;
+
+    #[test]
+    fn each_country_once_with_a_top() {
+        let mut codes: Vec<_> = REGIONS.iter().map(|r| r.0).collect();
+        codes.sort_unstable();
+        codes.dedup();
+        assert_eq!(codes.len(), REGIONS.len());
+        assert!(REGIONS.iter().all(|r| r.1 != 0));
     }
 }

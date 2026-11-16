@@ -1009,6 +1009,18 @@ impl Core {
         Ok(c.into())
     }
 
+    /// Pays proposés dans le réglage « Tops d'un pays » (code ISO ; « 001 » : le monde).
+    pub fn region_codes(&self) -> Vec<String> {
+        dz_api::REGIONS.iter().map(|r| r.0.to_owned()).collect()
+    }
+
+    /// Top du pays choisi, et ses nouveautés de la semaine quand Deezer en publie.
+    pub async fn region_cards(&self, code: String) -> Result<Vec<Card>, CoreError> {
+        let api = self.api.clone();
+        let c = self.run(async move { api.region_cards(&code).await }).await??;
+        Ok(cards(c))
+    }
+
     /// Crédits du titre selon Deezer (artistes, composition, paroles, production…).
     pub async fn credits(&self, id: i64) -> Result<Credits, CoreError> {
         let api = self.api.clone();

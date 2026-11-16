@@ -17,6 +17,11 @@ struct HomeView: View {
                 }
                 .padding(.horizontal, 16)
                 .animation(.snappy(duration: 0.3), value: player.homeItems.map(\.id))
+                // Réglages › « Tops d'un pays » : le top du pays choisi, et ses nouveautés quand il y en a.
+                if !player.region.isEmpty, let cards = player.regionCards, !cards.isEmpty {
+                    let name = player.regionName(player.region)
+                    ShelfRow(title: cards.count > 1 ? tr("%@ : top et nouveautés", name) : tr("%@ : top", name), cards: cards)
+                }
                 if !player.reco.anyVisible {
                     // Recommandations désactivées dans Réglages : rien n'est demandé à Deezer.
                     EmptyView()
@@ -48,8 +53,16 @@ struct HomeView: View {
         .sheet(isPresented: $reordering) {
             HomeOrderView().environment(player).presentationDetents([.medium, .large])
         }
-        .refreshable { await player.loadHome(force: true) }
-        .task { await player.loadHome(force: false) }
+        .refreshable {
+            async let region: Void = player.loadRegion(force: true)
+            await player.loadHome(force: true)
+            await region
+        }
+        .task {
+            async let region: Void = player.loadRegion(force: false)
+            await player.loadHome(force: false)
+            await region
+        }
     }
 
     @ViewBuilder
