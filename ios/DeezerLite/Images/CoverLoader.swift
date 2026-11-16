@@ -209,17 +209,19 @@ final class CoverLoader: @unchecked Sendable {
             let extendedCover = mirroredTop.clampedToExtent().cropped(to: aboveArea)
                 .composited(over: mirrored.clampedToExtent().cropped(to: belowArea))
                 .composited(over: placed.clampedToExtent())
-            // Force du flou, ligne par ligne (0 : net ; 1 : rayon maximal). Derrière l'heure, comme le fond flouté habituel ;
-            // nul sous la pochette (cachée ou en train de s'effacer), à peine au bas de celle-ci ; puis sous elle, il part de
-            // presque rien et augmente de plus en plus vite jusqu'à la moitié de la hauteur restante.
-            let base: CGFloat = 0.27
+            // Force du flou, ligne par ligne (0 : net ; 1 : rayon maximal). Derrière l'heure, léger (le reflet du haut ressemble
+            // au début de la pochette : plus de limite visible, avant il était aussi flou que le fond habituel) ; nul sous la
+            // pochette (cachée ou en train de s'effacer), à peine au bas de celle-ci ; puis sous elle, il part de presque rien
+            // et monte doucement sur les trois quarts de la hauteur restante (avant : la moitié, plus vite au départ, le flou
+            // arrivait « d'un coup »).
+            let base: CGFloat = 0.13
             func eased(_ t: CGFloat) -> CGFloat { let t = min(max(t, 0), 1); return t * t * (3 - 2 * t) }
             func amount(_ row: CGFloat) -> CGFloat { // `row` : depuis le haut de l'écran
                 if row < gap { return base }
                 if row < gap + side * 0.1 { return base * (1 - eased((row - gap) / (side * 0.1))) }
                 if row < gap + side * 0.7 { return 0 }
                 if row < gap + side { return 0.04 * pow((row - gap - side * 0.7) / (side * 0.3), 2) }
-                return 0.05 + 0.95 * pow(min((row - gap - side) / (bottom * 0.52), 1), 1.45)
+                return 0.04 + 0.96 * pow(min((row - gap - side) / (bottom * 0.75), 1), 1.8)
             }
             let rows = Int(canvas.height)
             let column = (0..<rows).map { UInt8((amount(CGFloat($0)) * 255).rounded()) }
@@ -252,7 +254,7 @@ final class CoverLoader: @unchecked Sendable {
             let mix = CIFilter.blendWithMask()
             mix.inputImage = average.outputImage?.clampedToExtent()
             mix.backgroundImage = blur.outputImage
-            mix.maskImage = ramp(0, 0.8)
+            mix.maskImage = ramp(0.1, 0.9) // la couleur unique arrive un peu plus tard : le reflet reste visible plus longtemps
             guard let smooth = mix.outputImage?.cropped(to: canvas),
                   let out = context.createCGImage(smooth, from: canvas) else { return nil }
             return UIImage(cgImage: out)
