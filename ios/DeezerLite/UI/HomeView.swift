@@ -17,11 +17,8 @@ struct HomeView: View {
                 }
                 .padding(.horizontal, 16)
                 .animation(.snappy(duration: 0.3), value: player.homeItems.map(\.id))
-                // Réglages › « Tops d'un pays » : le top du pays choisi, et ses nouveautés quand il y en a.
-                if !player.region.isEmpty, let cards = player.regionCards, !cards.isEmpty {
-                    let name = player.regionName(player.region)
-                    ShelfRow(title: cards.count > 1 ? tr("%@ : top et nouveautés", name) : tr("%@ : top", name), cards: cards)
-                }
+                // Réglages › « Tops d'un pays » (désactivé : rien d'affiché ni de demandé).
+                if !player.region.isEmpty { RegionShelf() }
                 if !player.reco.anyVisible {
                     // Recommandations désactivées dans Réglages : rien n'est demandé à Deezer.
                     EmptyView()
@@ -53,16 +50,8 @@ struct HomeView: View {
         .sheet(isPresented: $reordering) {
             HomeOrderView().environment(player).presentationDetents([.medium, .large])
         }
-        .refreshable {
-            async let region: Void = player.loadRegion(force: true)
-            await player.loadHome(force: true)
-            await region
-        }
-        .task {
-            async let region: Void = player.loadRegion(force: false)
-            await player.loadHome(force: false)
-            await region
-        }
+        .refreshable { await player.loadHome(force: true) }
+        .task { await player.loadHome(force: false) }
     }
 
     @ViewBuilder
@@ -101,6 +90,22 @@ struct HomeView: View {
         if player.homeItems.count > 1 {
             Button { reordering = true } label: { Label(tr("Réorganiser l'accueil"), systemImage: "arrow.up.arrow.down") }
         }
+    }
+}
+
+/// Top du pays choisi, et ses nouveautés quand il y en a. Vue à part, avec son propre chargement : l'accueil se charge
+/// exactement comme avant ce réglage.
+private struct RegionShelf: View {
+    @Environment(Player.self) private var player
+
+    var body: some View {
+        VStack(spacing: 0) {
+            if let cards = player.regionCards, !cards.isEmpty {
+                let name = player.regionName(player.region)
+                ShelfRow(title: cards.count > 1 ? tr("%@ : top et nouveautés", name) : tr("%@ : top", name), cards: cards)
+            }
+        }
+        .task(id: player.region) { await player.loadRegion(force: false) }
     }
 }
 
