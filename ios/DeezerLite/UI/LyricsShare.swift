@@ -82,10 +82,12 @@ struct LyricsShareSheet: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button(tr("Annuler")) { dismiss() } }
                 ToolbarItem(placement: .confirmationAction) {
-                    if ready, !picked.isEmpty {
+                    if ready {
                         // Image faite au moment du partage seulement : avant, à chaque ligne cochée (1080 × 1920 à refaire,
                         // une fraction de seconde sur le fil principal à chaque appui). L'aperçu, lui, est la carte en direct.
+                        // Aucune ligne cochée : bouton grisé (avant, un chargement sans fin à la place).
                         Button { if let image = render() { share(image) } } label: { Text(tr("Partager")).bold() }
+                            .disabled(picked.isEmpty)
                     } else {
                         ProgressView()
                     }

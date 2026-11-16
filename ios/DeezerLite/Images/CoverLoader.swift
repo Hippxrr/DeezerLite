@@ -206,8 +206,13 @@ final class CoverLoader: @unchecked Sendable {
             let top = bottom + side
             let mirroredTop = placed.transformed(by: CGAffineTransform(a: 1, b: 0, c: 0, d: -1, tx: 0, ty: 2 * top))
             let aboveArea = CGRect(x: -width, y: top, width: width * 3, height: canvas.height)
-            let extendedCover = mirroredTop.clampedToExtent().cropped(to: aboveArea)
-                .composited(over: mirrored.clampedToExtent().cropped(to: belowArea))
+            // Seule une bande au ras de la pochette est reflétée, puis sa dernière ligne est prolongée : un texte près du
+            // bord ne se retrouve plus écrit à l'envers sur toute la hauteur du reflet.
+            let band = (side * 0.12).rounded()
+            let extendedCover = mirroredTop.cropped(to: CGRect(x: 0, y: top, width: width, height: band))
+                .clampedToExtent().cropped(to: aboveArea)
+                .composited(over: mirrored.cropped(to: CGRect(x: 0, y: bottom - band, width: width, height: band))
+                    .clampedToExtent().cropped(to: belowArea))
                 .composited(over: placed.clampedToExtent())
             // Force du flou, ligne par ligne (0 : net ; 1 : rayon maximal). Derrière l'heure, léger (le reflet du haut ressemble
             // au début de la pochette : plus de limite visible, avant il était aussi flou que le fond habituel) ; nul sous la
