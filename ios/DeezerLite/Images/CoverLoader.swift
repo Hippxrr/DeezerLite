@@ -208,8 +208,9 @@ final class CoverLoader: @unchecked Sendable {
             let aboveArea = CGRect(x: -width, y: top, width: width * 3, height: canvas.height)
             // Seule une bande au ras de la pochette est reflétée, puis sa dernière ligne est prolongée : un texte près du
             // bord ne se retrouve plus écrit à l'envers sur toute la hauteur du reflet.
-            let band = (side * 0.04).rounded()
-            let extendedCover = mirroredTop.cropped(to: CGRect(x: 0, y: top, width: width, height: band))
+            let band = (side * 0.03).rounded()
+            let topBand = max((side * 0.015).rounded(), 1) // en haut, encore plus fin (derrière l'heure)
+            let extendedCover = mirroredTop.cropped(to: CGRect(x: 0, y: top, width: width, height: topBand))
                 .clampedToExtent().cropped(to: aboveArea)
                 .composited(over: mirrored.cropped(to: CGRect(x: 0, y: bottom - band, width: width, height: band))
                     .clampedToExtent().cropped(to: belowArea))
