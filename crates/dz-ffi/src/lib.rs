@@ -1239,15 +1239,20 @@ impl Core {
         if !dz_api::is_mp3(&mp3) {
             return Err(CoreError::Api("Ce fichier n'est pas un MP3.".into()));
         }
+        // Chaque copie est libérée dès que la suivante est faite : avant, le fichier d'origine, la partie coupée et la
+        // version avec les infos restaient tous en mémoire pendant l'envoi (3 à 4 fois un gros MP3 : iOS fermait l'app).
         let audio = if start_ms > 0 || end_ms > 0 {
-            dz_api::cut_mp3(&mp3, start_ms, (end_ms > 0).then_some(end_ms))
-                .ok_or_else(|| CoreError::Api("Rien à garder dans la partie choisie.".into()))?
+            let part = dz_api::cut_mp3(&mp3, start_ms, (end_ms > 0).then_some(end_ms))
+                .ok_or_else(|| CoreError::Api("Rien à garder dans la partie choisie.".into()))?;
+            drop(mp3);
+            part
         } else {
             mp3
         };
         // Album facultatif : « MP3 » sinon (Deezer refuse ensuite toute modification sans album).
         let album = if album.trim().is_empty() { "MP3" } else { album.trim() };
         let tagged = dz_api::tag_mp3(&audio, title.trim(), artist.trim(), album, cover.as_deref());
+        drop(audio);
         let results = self.run(async move { api.upload_personal_song(&file_name, tagged).await }).await??;
         let id = match &results {
             dz_api::serde_json::Value::String(s) => s.trim().parse::<i64>().ok(),

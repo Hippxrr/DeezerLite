@@ -31,8 +31,9 @@ impl DeezerClient {
     pub async fn upload_personal_song(&self, file_name: &str, mp3: Vec<u8>) -> Result<Value> {
         let session = self.session().await.ok_or_else(|| DeezerError::Gateway("session Deezer fermée".into()))?;
         let sid = session.sid.ok_or_else(|| DeezerError::Gateway("session Deezer sans identifiant".into()))?;
-        // Nom du fichier : sans « & » (le site les retire), et toujours en .mp3.
-        let name: String = file_name.chars().filter(|c| *c != '&' && !c.is_control()).collect();
+        // Nom du fichier : sans « & » (le site les retire) ni guillemet (il cassait l'en-tête du formulaire), et
+        // toujours en .mp3.
+        let name: String = file_name.chars().filter(|c| *c != '&' && *c != '"' && !c.is_control()).collect();
         let name = if name.to_lowercase().ends_with(".mp3") { name } else { format!("{name}.mp3") };
         let mut url = url::Url::parse("https://upload.deezer.com/").expect("adresse fixe");
         url.query_pairs_mut()
@@ -48,6 +49,7 @@ impl DeezerClient {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0)
         );
         let body = crate::cover::multipart_body(&boundary, "file", &name, "audio/mpeg", &mp3);
+        drop(mp3); // déjà copié dans le formulaire : une copie de moins en mémoire pendant l'envoi
         let answer: Value = self
             .http()
             .post(url)

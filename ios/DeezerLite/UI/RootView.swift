@@ -47,7 +47,9 @@ private struct LaunchCover: View {
             let start = Date()
             // Copies lues, et au moins un court instant pour que l'animation ne paraisse pas saccadée. Au plus 1 s.
             while Date().timeIntervalSince(start) < 1, !player.launchReady || Date().timeIntervalSince(start) < 0.15 {
-                try? await Task.sleep(for: .milliseconds(30))
+                // Annulée : l'écran de lancement est retiré tout de suite (jamais laissé par-dessus l'app). Avant, l'erreur
+                // était ignorée et la boucle tournait à vide jusqu'à 1 s.
+                guard (try? await Task.sleep(for: .milliseconds(30))) != nil else { done(); return }
             }
             leaving = true
             if reduceMotion {

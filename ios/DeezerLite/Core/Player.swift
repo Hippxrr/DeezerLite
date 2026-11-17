@@ -98,6 +98,8 @@ final class Player {
     /// toujours dans cet ordre).
     @ObservationIgnored private var downloadEdits: Task<Void, Never>?
     @ObservationIgnored private var bytesTask: Task<Void, Never>?
+    /// Taille redemandée pendant un parcours : refaite à la fin de celui-ci.
+    @ObservationIgnored private var bytesAgain = false
     /// Réseau du moment : données mobiles (4G / 5G) ou non.
     private(set) var onCellular = false
     /// Qualité réellement demandée au cœur (pour ne recharger le titre que si elle change).
@@ -152,7 +154,7 @@ final class Player {
     private func networkChanged(signature: String, cellular: Bool) {
         defer { networkSignature = signature }
         // Sans réseau, les téléchargements attendent au lieu d'échouer ; ils repartent à son retour.
-        BackgroundDownloadManager.shared.networkChanged(up: signature != "none")
+        BackgroundDownloadManager.shared.networkChanged(up: signature != "none", newNetwork: networkSignature != signature)
         // Premier relevé au lancement : rien à réinitialiser.
         guard let previous = networkSignature, previous != signature else {
             if onCellular != cellular { onCellular = cellular; applyQuality() }
@@ -261,8 +263,10 @@ final class Player {
         let (did, tid) = (Self.downloadId(kind: kind, id: id), track.id)
         editDownloads {
             do {
-                _ = try await Task.detached(priority: .userInitiated) { try core.addDownloadTrackToCollection(kind: kind, id: did, trackId: tid) }.value
+                let added = try await Task.detached(priority: .userInitiated) { try core.addDownloadTrackToCollection(kind: kind, id: did, trackId: tid) }.value
                 await self.refreshDownloadsInBackground()
+                // Collection retirée entre-temps : le titre n'y est pas, il ne doit pas devenir un téléchargement seul.
+                guard added else { return }
                 if !self.downloadedIds.contains(tid), self.downloadStates[tid] == nil { self.download([track]) }
             } catch {
                 self.showToast(tr("La copie hors ligne n'a pas pu être actualisée"), seconds: 4)
@@ -419,30 +423,31 @@ final class Player {
     func removeDownloadCollection(_ collection: DownloadCollection) {
         guard let core else { return }
         let (kind, id) = (collection.kind, collection.id)
-        Task {
+        // Dans la file des modifications : un titre aimé juste avant n'y est plus ajouté après coup.
+        editDownloads {
             do {
                 let ids = try await Task.detached(priority: .userInitiated) { try core.removeDownloadCollection(kind: kind, id: id) }.value
                 BackgroundDownloadManager.shared.cancel(ids)
                 // Copies hors ligne gardées en mémoire : elles montraient encore la collection supprimée.
-                forgetOfflineDetails()
-                refreshDownloads()
-                showToast(tr("%@ supprimé des téléchargements", collection.title))
-            } catch { message = describe(error) }
+                self.forgetOfflineDetails()
+                await self.refreshDownloadsInBackground()
+                self.showToast(tr("%@ supprimé des téléchargements", collection.title))
+            } catch { self.message = self.describe(error) }
         }
     }
 
     func clearDownloads() {
         guard let core else { return }
         BackgroundDownloadManager.shared.stopAll()
-        Task {
+        editDownloads {
             do {
                 // Tous les fichiers supprimés : hors du thread principal (l'app restait figée avec une grosse bibliothèque).
                 try await Task.detached(priority: .userInitiated) { try core.clearDownloads() }.value
-                downloadStates = [:]
-                downloadTracks = [:]
-                refreshDownloads()
-                showToast(tr("Téléchargements effacés"))
-            } catch { message = describe(error) }
+                self.downloadStates = [:]
+                self.downloadTracks = [:]
+                await self.refreshDownloadsInBackground()
+                self.showToast(tr("Téléchargements effacés"))
+            } catch { self.message = self.describe(error) }
         }
     }
 
@@ -582,13 +587,20 @@ final class Player {
     }
 
     /// Taille occupée : calculée hors du thread principal (le cœur parcourt tout le dossier des téléchargements).
+    /// Un seul parcours à la fois : demandé pendant un parcours, il est refait une fois celui-ci fini (avant, chaque
+    /// titre terminé lançait un parcours complet de plus, en parallèle des précédents).
     private func refreshDownloadBytes() {
         guard let core else { return }
-        bytesTask?.cancel()
+        guard bytesTask == nil else { bytesAgain = true; return }
         bytesTask = Task { [weak self] in
             let bytes = await Task.detached(priority: .utility) { core.downloadBytes() }.value
-            guard !Task.isCancelled, let self else { return }
+            guard !Task.isCancelled, let self else { return } // annulé (déconnexion) : `bytesTask` déjà remis à zéro
+            self.bytesTask = nil
             if self.downloadBytes != bytes { self.downloadBytes = bytes }
+            if self.bytesAgain {
+                self.bytesAgain = false
+                self.refreshDownloadBytes()
+            }
         }
     }
 
@@ -1201,8 +1213,9 @@ final class Player {
             guard loggedIn == true else { return } // déconnecté pendant ce temps
             profiles = fresh ?? marked
             showToast(tr("Profil : %@", p.name))
-            // Titres aimés téléchargés : ceux de ce profil (le cœur garde ceux de chaque profil à part).
-            refreshDownloads()
+            // Titres aimés téléchargés : ceux de ce profil (le cœur garde ceux de chaque profil à part). Relus hors du fil
+            // principal : avec des milliers de titres, l'écran se figeait.
+            await refreshDownloadsInBackground()
             prefetch()
             for tab in openTabs { Task { await loadLibrary(tab, force: false) } }
         } catch {
@@ -1265,8 +1278,9 @@ final class Player {
                 sessionRetryTask = nil
                 sessionReady = true
                 forgetOfflineDetails()
-                // Profil ouvert maintenant connu : la liste des téléchargements montre ses Titres aimés à lui.
-                refreshDownloads()
+                // Profil ouvert maintenant connu : la liste des téléchargements montre ses Titres aimés à lui. Relue hors du
+                // fil principal (avant : l'app se figeait juste après l'animation de lancement avec une grosse bibliothèque).
+                await refreshDownloadsInBackground()
                 BackgroundDownloadManager.shared.deezerSessionIsReady()
                 prefetch()
                 await loadProfiles()
@@ -1381,6 +1395,7 @@ final class Player {
         // Plus rien du compte en mémoire ni sur le téléphone (le cœur a déjà effacé session, cookies, trousseau et copies).
         bytesTask?.cancel()
         bytesTask = nil
+        bytesAgain = false
         cancelBackgroundDownloadsRefresh()
         downloads = []
         downloadCollections = []
@@ -1493,14 +1508,23 @@ final class Player {
         if !reco.anyVisible { home = nil }
     }
 
-    /// Pays proposés : le monde d'abord, puis par nom dans la langue de l'app.
-    var regionChoices: [String] {
-        let codes = core?.regionCodes() ?? []
-        return codes.sorted { a, b in
-            if a == "001" || b == "001" { return a == "001" }
-            return regionName(a).localizedCompare(regionName(b)) == .orderedAscending
-        }
+    /// Pays proposés : le monde d'abord, puis par nom dans la langue de l'app. Calculés une fois par langue : avant, à
+    /// chaque rafraîchissement des Réglages (même à chaque progression d'un téléchargement), avec des centaines de noms.
+    var regionChoices: [RegionChoice] {
+        let language = LanguageStore.shared.current
+        if let cached = regionChoicesCache, cached.language == language { return cached.list }
+        let locale = Locale(identifier: language.rawValue)
+        let list = (core?.regionCodes() ?? [])
+            .map { RegionChoice(code: $0, name: locale.localizedString(forRegionCode: $0) ?? $0) }
+            .sorted { a, b in
+                if (a.code == "001") != (b.code == "001") { return a.code == "001" }
+                return a.name.localizedCompare(b.name) == .orderedAscending
+            }
+        if !list.isEmpty { regionChoicesCache = (language, list) }
+        return list
     }
+
+    @ObservationIgnored private var regionChoicesCache: (language: AppLanguage, list: [RegionChoice])?
 
     func regionName(_ code: String) -> String {
         Locale(identifier: LanguageStore.shared.current.rawValue).localizedString(forRegionCode: code) ?? code
@@ -1511,7 +1535,7 @@ final class Player {
         UserDefaults.standard.set(code, forKey: "region")
         regionCards = nil
         regionLoadedAt = nil
-        Task { await loadRegion(force: true) }
+        // Chargé par l'accueil (`.task(id: region)`) : une seule requête (avant, deux à chaque changement de pays).
     }
 
     /// Les tops changent une fois par jour : redemandés au plus toutes les 30 min (ou en tirant l'accueil vers le bas).
@@ -1646,7 +1670,7 @@ final class Player {
             if route.isMp3, !result.offline {
                 if result.tracks.contains(where: { downloadedIds.contains($0.id) }) {
                     forgetOfflineDetails()
-                    refreshDownloads()
+                    await refreshDownloadsInBackground()
                 }
             }
             if case .detail(let kind, let id, _) = route, !result.offline {
@@ -2240,7 +2264,7 @@ final class Player {
                     // Copie téléchargée renommée par le cœur : la liste des téléchargements suit.
                     if downloadedIds.contains(track.id) {
                         forgetOfflineDetails()
-                        refreshDownloads()
+                        await refreshDownloadsInBackground()
                     }
                 }
                 if resetCover, cover == nil {
@@ -2715,6 +2739,12 @@ final class Player {
 }
 
 /// Élément du haut de l'accueil, déplaçable par appui long.
+/// Pays du réglage « Tops d'un pays » : code ISO (« 001 » : le monde) et nom dans la langue de l'app.
+struct RegionChoice: Hashable {
+    let code: String
+    let name: String
+}
+
 enum HomeItem: Hashable {
     case flow, loved
     case pin(Pin)

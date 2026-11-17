@@ -428,7 +428,7 @@ struct SettingsView: View {
                 Spacer(minLength: 8)
                 Picker(tr("Tops d'un pays"), selection: Binding(get: { player.region }, set: { player.setRegion($0) })) {
                     Text(tr("Désactivé")).tag("")
-                    ForEach(player.regionChoices, id: \.self) { Text(player.regionName($0)).tag($0) }
+                    ForEach(player.regionChoices, id: \.code) { Text($0.name).tag($0.code) }
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)

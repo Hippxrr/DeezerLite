@@ -126,13 +126,16 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
     }
 
     /// Changement de réseau (appelé à chaque relevé du système).
-    func networkChanged(up: Bool) {
+    /// `newNetwork` : un autre réseau qu'avant (Wi-Fi <-> données mobiles, retour du réseau). Seulement alors les titres
+    /// en attente repartent tout de suite ; sur le même réseau (iOS en redonne des nouvelles souvent), c'est la minuterie
+    /// qui décide. Avant, chaque nouvelle relançait toute la file : sur un Wi-Fi sans Internet, l'attente grandissante
+    /// entre deux essais ne servait à rien.
+    func networkChanged(up: Bool, newNetwork: Bool) {
         let wasUp = networkUp
         networkUp = up
-        if up, !wasUp { networkRetryCount = 0 } // nouveau réseau : on repart d'une attente courte
-        if up, !wasUp || !waitingNetwork.isEmpty {
-            resumeWaitingForNetwork()
-        }
+        guard up, !wasUp || (newNetwork && !waitingNetwork.isEmpty) else { return }
+        networkRetryCount = 0 // nouveau réseau : on repart d'une attente courte
+        resumeWaitingForNetwork()
     }
 
     private func resumeWaitingForNetwork() {
@@ -213,6 +216,9 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
     }
 
     func handleBackgroundSession(completionHandler: @escaping () -> Void) {
+        // Cœur pas démarré (disque plein, fichiers protégés…) : rien ne peut être livré. iOS est prévenu tout de suite ;
+        // avant, il attendait une fin qui ne venait jamais et finissait par limiter les relances de l'app.
+        guard core != nil else { completionHandler(); return }
         backgroundCompletion = completionHandler
         backgroundEventsFinished = false
         _ = session

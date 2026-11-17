@@ -6,6 +6,8 @@ struct HomeView: View {
     @State private var reordering = false
 
     var body: some View {
+        // Calculé une fois par affichage (avant : retrié à chaque lecture, une fois par élément épinglé).
+        let items = player.homeItems
         ScrollView {
             VStack(alignment: .leading, spacing: 28) {
                 PageTitleBar(title: tr("Accueil"))
@@ -13,12 +15,13 @@ struct HomeView: View {
                     .padding(.bottom, -12)
                 // Flow, titres aimés, épinglés : appui long puis « Réorganiser l'accueil » pour changer l'ordre.
                 VStack(spacing: 12) {
-                    ForEach(player.homeItems, id: \.id) { item in row(item) }
+                    ForEach(items, id: \.id) { item in row(item, count: items.count) }
                 }
                 .padding(.horizontal, 16)
-                .animation(.snappy(duration: 0.3), value: player.homeItems.map(\.id))
-                // Réglages › « Tops d'un pays » (désactivé : rien d'affiché ni de demandé).
-                if !player.region.isEmpty { RegionShelf() }
+                .animation(.snappy(duration: 0.3), value: items.map(\.id))
+                // Réglages › « Tops d'un pays » (désactivé : rien d'affiché ni de demandé). Affiché seulement une fois
+                // chargé : pas d'espace vide pendant le chargement.
+                if !player.region.isEmpty, let cards = player.regionCards, !cards.isEmpty { RegionShelf(cards: cards) }
                 if !player.reco.anyVisible {
                     // Recommandations désactivées dans Réglages : rien n'est demandé à Deezer.
                     EmptyView()
@@ -50,12 +53,17 @@ struct HomeView: View {
         .sheet(isPresented: $reordering) {
             HomeOrderView().environment(player).presentationDetents([.medium, .large])
         }
-        .refreshable { await player.loadHome(force: true) }
+        .refreshable {
+            await player.loadHome(force: true)
+            await player.loadRegion(force: true) // désactivé : ne fait rien
+        }
         .task { await player.loadHome(force: false) }
+        // Top du pays : chargé à l'ouverture et à chaque changement de pays (une seule requête).
+        .task(id: player.region) { await player.loadRegion(force: false) }
     }
 
     @ViewBuilder
-    private func row(_ item: HomeItem) -> some View {
+    private func row(_ item: HomeItem, count: Int) -> some View {
         switch item {
         case .flow:
             Button { player.playFlow() } label: {
@@ -67,7 +75,7 @@ struct HomeView: View {
                     Label(tr("Retirer de l'accueil"), systemImage: "rectangle.stack.badge.minus")
                 }
                 CoverMenu(card: Player.flowCard)
-                reorderButton
+                reorderButton(count)
             }
         case .loved:
             LovedRow { openRoute(.loved) }
@@ -78,34 +86,29 @@ struct HomeView: View {
                     }
                     RenameLovedMenu()
                     CoverMenu(card: player.lovedMenuCard)
-                    reorderButton
+                    reorderButton(count)
                 }
         case .pin(let pin):
-            CardRow(card: pin.card, onReorder: player.homeItems.count > 1 ? { reordering = true } : nil)
+            CardRow(card: pin.card, onReorder: count > 1 ? { reordering = true } : nil)
         }
     }
 
     @ViewBuilder
-    private var reorderButton: some View {
-        if player.homeItems.count > 1 {
+    private func reorderButton(_ count: Int) -> some View {
+        if count > 1 {
             Button { reordering = true } label: { Label(tr("Réorganiser l'accueil"), systemImage: "arrow.up.arrow.down") }
         }
     }
 }
 
-/// Top du pays choisi, et ses nouveautés quand il y en a. Vue à part, avec son propre chargement : l'accueil se charge
-/// exactement comme avant ce réglage.
+/// Top du pays choisi, et ses nouveautés quand il y en a.
 private struct RegionShelf: View {
     @Environment(Player.self) private var player
+    let cards: [Card]
 
     var body: some View {
-        VStack(spacing: 0) {
-            if let cards = player.regionCards, !cards.isEmpty {
-                let name = player.regionName(player.region)
-                ShelfRow(title: cards.count > 1 ? tr("%@ : top et nouveautés", name) : tr("%@ : top", name), cards: cards)
-            }
-        }
-        .task(id: player.region) { await player.loadRegion(force: false) }
+        let name = player.regionName(player.region)
+        ShelfRow(title: cards.count > 1 ? tr("%@ : top et nouveautés", name) : tr("%@ : top", name), cards: cards)
     }
 }
 
