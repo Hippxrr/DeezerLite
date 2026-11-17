@@ -347,9 +347,13 @@ final class CarouselSteps {
     /// Prévient le lecteur, sauf si un nouveau glissement a commencé (sa fin s'en chargera).
     @MainActor private func schedule(slide: SlideState, player: Player, after delay: Duration) {
         flush?.cancel()
+        let queue = player.queueGeneration
         flush = Task { @MainActor [weak self] in
             try? await Task.sleep(for: delay)
             guard let self, !Task.isCancelled, self.pending != 0, slide.axis == nil else { return }
+            // Autre liste lancée entre-temps : les pas comptés concernaient l'ancienne (avant, ils faisaient sauter les
+            // premiers titres de la nouvelle).
+            guard player.queueGeneration == queue else { self.pending = 0; return }
             let k = self.pending
             var t = Transaction()
             t.disablesAnimations = true
@@ -565,6 +569,9 @@ struct FullPlayerContainer: View {
                 NowPlayingView(pull: pull)
                     // Toujours en sombre, quel que soit le mode : son fond est la pochette assombrie (comme Apple Music).
                     .environment(\.colorScheme, .dark)
+                    // Très grandes tailles de texte : bornées (comme le mini-lecteur), sinon sur un petit iPhone (SE) le
+                    // bas du lecteur passait sous la barre du bas.
+                    .dynamicTypeSize(...DynamicTypeSize.accessibility1)
                     .offset(y: pull.y)
                     .allowsHitTesting(player.showFullPlayer)
                     .accessibilityHidden(!player.showFullPlayer)
@@ -676,10 +683,12 @@ struct NowPlayingView: View {
             // posés ensemble, il prenait la largeur de celui-ci (bien plus large que l'écran) et son image était étirée en
             // largeur, d'où une copie de la pochette décalée qui se voyait sous son fondu (pattes d'un cheval en double).
             .background {
-                if fullBleed {
+                // Largeur pas encore connue (première mise en page) : rien. Hauteur bornée à 3 fois la largeur : une mesure
+                // à 0 donnait une image de centaines de milliers de pixels de haut (des centaines de Mo, l'app fermée par iOS).
+                if fullBleed, geo.size.width >= 1 {
                     let screen = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
                     Backdrop(url: player.cover(player.current), open: player.showFullPlayer,
-                             tall: screen / max(geo.size.width, 1),
+                             tall: min(max(screen / geo.size.width, 1), 3),
                              inset: geo.safeAreaInsets.top * 0.7 / max(geo.size.width, 1))
                         .opacity(bleed ? 1 : 0)
                         .animation(.easeInOut(duration: 0.3), value: bleed)
@@ -973,7 +982,8 @@ private struct Backdrop: View {
             }
         }
         .ignoresSafeArea()
-        .task(id: "\(url ?? "")|\(phase == .background)|\(open)") {
+        // Avec les mesures : un fond fait avec d'autres mesures (rotation, première mise en page) est refait.
+        .task(id: "\(url ?? "")|\(phase == .background)|\(open)|\(tall ?? 0)|\(inset)") {
             guard phase != .background else { return }
             // Titre sans pochette (image de secours) : fondu vers le noir.
             guard let url else { fadeToBlack(); return }
@@ -1640,7 +1650,8 @@ struct CreditsView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { Button("OK") { dismiss() }.fontWeight(.semibold) }
             .task {
-                if let url = track.coverUrl, let c = await CoverLoader.shared.color(url: url) { tint = Color(uiColor: c) }
+                let url = player.mp3Cover(track) ?? player.coverFixes[track.id] ?? track.coverUrl
+                if let url, let c = await CoverLoader.shared.color(url: url) { tint = Color(uiColor: c) }
             }
             .task {
                 credits = await player.credits(track.id)

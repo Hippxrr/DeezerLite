@@ -8,6 +8,9 @@ import UIKit
 @MainActor
 final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegate, CPNowPlayingTemplateObserver {
     private var interface: CPInterfaceController?
+    /// Change à chaque connexion : les suivis d'une connexion précédente s'arrêtent (avant, celui des boutons, sans
+    /// modèle, continuait à côté du nouveau : un de plus à chaque reconnexion à la voiture).
+    private var connection = 0
     private let player = Player.shared
     private let nowPlaying = CPNowPlayingTemplate.shared
 
@@ -27,6 +30,7 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
 
     private func connect(_ interfaceController: CPInterfaceController) {
         interface = interfaceController
+        connection &+= 1
 
         let home = CPListTemplate(title: tr("Accueil"), sections: [])
         home.tabTitle = tr("Accueil")
@@ -62,11 +66,15 @@ final class CarPlaySceneDelegate: UIResponder, CPTemplateApplicationSceneDelegat
     /// Exécute `body` et le relance à chaque changement des valeurs du lecteur qu'il a lues,
     /// tant que CarPlay est connecté et que `template` (s'il y en a un) est encore affiché.
     private func observe(while template: CPTemplate?, _ body: @escaping () -> Void) {
+        observe(while: template, connection: connection, body)
+    }
+
+    private func observe(while template: CPTemplate?, connection: Int, _ body: @escaping () -> Void) {
         withObservationTracking(body, onChange: {
             Task { @MainActor [weak self, weak template] in
-                guard let self, let interface = self.interface else { return }
+                guard let self, self.connection == connection, let interface = self.interface else { return }
                 if let template, !self.isShown(template, in: interface) { return }
-                self.observe(while: template, body)
+                self.observe(while: template, connection: connection, body)
             }
         })
     }

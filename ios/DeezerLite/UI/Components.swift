@@ -154,6 +154,9 @@ struct CoverView: View {
         // En arrière-plan : seulement ce qui est en mémoire ; la version nette est chargée au retour dans l'app.
         .task(id: "\(url ?? "")|\(load)|\(phase == .background)") {
             guard let url else { image = nil; imageURL = nil; preview = nil; return }
+            // Déjà affichée nette (retour dans l'app, par exemple) : rien à relire ni à décoder. Avant, chaque pochette
+            // à l'écran était relue et redécodée à chaque retour dans l'app.
+            if imageURL == url, image != nil { return }
             if imageURL != url { image = nil; imageURL = nil }
             let loader = CoverLoader.shared
             let pixels = large ? CoverLoader.large : Int(side * scale)
@@ -229,6 +232,7 @@ struct FallbackArt: View {
 }
 
 /// Barres animées du titre en cours (animation système, arrêtée pendant la pause).
+/// `playing` : faux aussi sous le grand lecteur (opaque) : l'animation ne tourne pas pour rien.
 struct PlayingBars: View {
     let playing: Bool
 
@@ -357,13 +361,13 @@ struct TrackRow: View {
                         .overlay {
                             if isCurrent {
                                 RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.black.opacity(0.5))
-                                PlayingBars(playing: player.status.playing)
+                                PlayingBars(playing: player.status.playing && !player.showFullPlayer)
                             }
                         }
                 } else {
                     ZStack {
                         if isCurrent {
-                            PlayingBars(playing: player.status.playing)
+                            PlayingBars(playing: player.status.playing && !player.showFullPlayer)
                         } else {
                             Text("\(index + 1)").font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
                         }

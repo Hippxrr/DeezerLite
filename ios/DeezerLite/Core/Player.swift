@@ -68,11 +68,8 @@ final class Player {
     var requestedRoute: Route?
     /// Pages déjà chargées : affichées tout de suite en revenant dessus (tirer vers le bas pour actualiser).
     private(set) var home: [Shelf]?
-    /// Réglage « Tops d'un pays » : code ISO du pays, vide (par défaut) = désactivé, rien n'est demandé à Deezer.
-    private(set) var region = UserDefaults.standard.string(forKey: "region") ?? ""
-    /// Top du pays (et ses nouveautés) affiché sur l'accueil.
-    private(set) var regionCards: [Card]?
-    @ObservationIgnored private var regionLoadedAt: Date?
+    /// Change à chaque nouvelle file (autre album, playlist, Flow…).
+    @ObservationIgnored private(set) var queueGeneration = 0
     private(set) var library: [Int: [Card]] = [:]
     @ObservationIgnored private var details: [Route: Detail] = [:]
     @ObservationIgnored private var detailOrder: [Route] = []
@@ -1080,10 +1077,11 @@ final class Player {
     }
 
     /// Garde la dernière écoute (passage en arrière-plan, fermeture) ; rien à garder si aucun titre.
-    private func saveLastSession() {
+    private func saveLastSession(atStart: Bool = false) {
         guard resumeOnLaunch else { LastSession.clear(); return }
         if pendingRestore != nil { return } // déjà gardée, pas encore relancée
-        guard current != nil, let last = LastSession(queue: queue, index: queueIndex, positionMs: UInt64(max(0, position(at: Date())) * 1000)) else {
+        let positionMs = atStart ? 0 : UInt64(max(0, position(at: Date())) * 1000)
+        guard current != nil, let last = LastSession(queue: queue, index: queueIndex, positionMs: positionMs) else {
             LastSession.clear()
             return
         }
@@ -1508,47 +1506,6 @@ final class Player {
         if !reco.anyVisible { home = nil }
     }
 
-    /// Pays proposés : le monde d'abord, puis par nom dans la langue de l'app. Calculés une fois par langue : avant, à
-    /// chaque rafraîchissement des Réglages (même à chaque progression d'un téléchargement), avec des centaines de noms.
-    var regionChoices: [RegionChoice] {
-        let language = LanguageStore.shared.current
-        if let cached = regionChoicesCache, cached.language == language { return cached.list }
-        let locale = Locale(identifier: language.rawValue)
-        let list = (core?.regionCodes() ?? [])
-            .map { RegionChoice(code: $0, name: locale.localizedString(forRegionCode: $0) ?? $0) }
-            .sorted { a, b in
-                if (a.code == "001") != (b.code == "001") { return a.code == "001" }
-                return a.name.localizedCompare(b.name) == .orderedAscending
-            }
-        if !list.isEmpty { regionChoicesCache = (language, list) }
-        return list
-    }
-
-    @ObservationIgnored private var regionChoicesCache: (language: AppLanguage, list: [RegionChoice])?
-
-    func regionName(_ code: String) -> String {
-        Locale(identifier: LanguageStore.shared.current.rawValue).localizedString(forRegionCode: code) ?? code
-    }
-
-    func setRegion(_ code: String) {
-        region = code
-        UserDefaults.standard.set(code, forKey: "region")
-        regionCards = nil
-        regionLoadedAt = nil
-        // Chargé par l'accueil (`.task(id: region)`) : une seule requête (avant, deux à chaque changement de pays).
-    }
-
-    /// Les tops changent une fois par jour : redemandés au plus toutes les 30 min (ou en tirant l'accueil vers le bas).
-    func loadRegion(force: Bool) async {
-        guard let core, !region.isEmpty else { return }
-        if !force, let at = regionLoadedAt, Date().timeIntervalSince(at) < 1800 { return }
-        let code = region
-        // Raté (pas de réseau…) : la copie affichée reste, sans message à chaque passage sur l'accueil.
-        guard let fresh = try? await core.regionCards(code: code), code == region else { return }
-        regionCards = fresh
-        regionLoadedAt = Date()
-    }
-
     func loadHome(force: Bool) async {
         guard sessionReady, reco.anyVisible, force || !refreshed.contains("home") else { return }
         let gen = profileGeneration
@@ -1588,12 +1545,21 @@ final class Player {
 
     private func localDetail(_ route: Route) -> Detail? {
         guard let core else { return nil }
-        return switch route {
+        // Pas de copie sur le téléphone il y a moins de 10 s : pas relue. Une page en cours de chargement est recréée
+        // plusieurs fois, et chaque lecture passait par le disque, sur le fil principal.
+        let now = Date()
+        if let at = noLocalDetail[route], now.timeIntervalSince(at) < 10 { return nil }
+        let found: Detail? = switch route {
         case .detail(let kind, let id, _): core.offlineDetail(kind: kind, id: id)
         case .loved: core.offlineDetail(kind: "loved", id: 0)
         case .mix: nil
         }
+        if noLocalDetail.count > 40 { noLocalDetail = noLocalDetail.filter { now.timeIntervalSince($0.value) < 10 } }
+        noLocalDetail[route] = found == nil ? now : nil
+        return found
     }
+
+    @ObservationIgnored private var noLocalDetail: [Route: Date] = [:]
 
     /// Petit cache : les 12 dernières pages ouvertes (copies hors ligne comprises).
     /// Jour (« AAAA-MM-JJ », heure du téléphone) où chaque page gardée en mémoire a été chargée.
@@ -1805,7 +1771,9 @@ final class Player {
             current = before.current
             isFlow = before.isFlow
             pendingRestore = before.restore
-            NowPlaying.update(track: current, status: status)
+            // État réel du moteur relu (l'état gardé pouvait dater de plusieurs minutes : la barre de l'écran
+            // verrouillé reculait).
+            refreshStatus()
         }
         showToast(describe(error), seconds: 4)
     }
@@ -2035,6 +2003,10 @@ final class Player {
             // continuaient à jouer sans le son.
             if sleepTask != nil, let plan = sleepPlan, plan.id == id, abs(plan.end.timeIntervalSince(end)) < 1 { return }
             sleepPlan = (id, end)
+            // Nouvelle échéance (déplacement dans le titre pendant le fondu…) : le son revient d'abord à la normale,
+            // sinon le nouveau fondu partait du volume déjà baissé et la suite jouait à 20 %.
+            sleepTask?.cancel()
+            restoreSleepVolume()
         case nil:
             cancelSleepTask()
             restoreSleepVolume()
@@ -2092,6 +2064,7 @@ final class Player {
 
     /// Oublie les copies hors ligne gardées en mémoire (session rouverte, réseau revenu).
     private func forgetOfflineDetails() {
+        noLocalDetail = [:] // téléchargements changés : une page sans copie peut en avoir une maintenant
         let stale = details.filter { $0.value.offline }.map(\.key)
         guard !stale.isEmpty else { return }
         for route in stale { details[route] = nil }
@@ -2564,7 +2537,15 @@ final class Player {
     func handle(_ event: Event) {
         // Dernière écoute pas encore relancée : le premier état envoyé par le moteur (« en pause, 0:00 ») est ignoré,
         // sinon la reprise partirait du début.
-        if pendingRestore != nil, case .state = event { return }
+        if pendingRestore != nil {
+            switch event {
+            case .state: return
+            // Moteur encore vide : la file vide qu'il renvoie (aléatoire activé avant de relancer) effaçait la file
+            // gardée, et lecture, suivant, précédent ne faisaient plus rien.
+            case .queue(let tracks, _) where tracks.isEmpty: return
+            default: break
+            }
+        }
         switch event {
         case .track(var track):
             // Même titre que celui déjà affiché (passage au suivant) : sa pochette reste la même adresse.
@@ -2610,17 +2591,20 @@ final class Player {
             isFlow = false
             status = Status(playing: false, positionMs: 0, durationMs: 0)
         case .queue(let tracks, let index):
+            queueGeneration &+= 1
             queue = tracks
             queueIndex = Int(index)
             // Nouvelle file (autre album, playlist…) : un titre demandé dans l'ancienne n'est plus attendu (sinon le
             // « suivant » d'après partait de son index, dans la nouvelle file, pendant 20 s).
             awaiting = nil
         case .queueIndex(let index):
-            if queueIndex != Int(index) { queueIndex = Int(index) }
+            let changed = queueIndex != Int(index)
+            if changed { queueIndex = Int(index) }
             if awaiting?.index == Int(index) { awaiting = nil } // titre demandé confirmé
             // Dernière écoute gardée à chaque changement de titre : iOS peut fermer l'app suspendue sans prévenir
-            // (et ne prévient pas non plus quand CarPlay l'a lancée en arrière-plan).
-            saveLastSession()
+            // (et ne prévient pas non plus quand CarPlay l'a lancée en arrière-plan). Nouveau titre : gardé à son
+            // début ; l'état du moteur peut encore être celui du précédent (fin du titre), qui arrive séparément.
+            saveLastSession(atStart: changed)
         case .queueInsert(let at, let tracks, let index):
             queue.insert(contentsOf: tracks, at: min(Int(at), queue.count))
             queueIndex = Int(index)
@@ -2639,7 +2623,9 @@ final class Player {
         }
         switch event {
         case .track, .started, .state, .stopped, .closed:
-            NowPlaying.update(track: current, status: status)
+            // Titre demandé en chargement : position et durée à zéro (les états reçus sont encore ceux de l'ancien titre,
+            // affichés avec le nouveau nom sur l'écran verrouillé).
+            NowPlaying.update(track: current, status: loading ? Status(playing: false, positionMs: 0, durationMs: 0) : status)
             // Minuterie « fin du titre » : échéance recalculée (autre titre, pause, reprise).
             if sleepTimer == .trackEnd { scheduleSleep() }
         default: break
@@ -2739,12 +2725,6 @@ final class Player {
 }
 
 /// Élément du haut de l'accueil, déplaçable par appui long.
-/// Pays du réglage « Tops d'un pays » : code ISO (« 001 » : le monde) et nom dans la langue de l'app.
-struct RegionChoice: Hashable {
-    let code: String
-    let name: String
-}
-
 enum HomeItem: Hashable {
     case flow, loved
     case pin(Pin)

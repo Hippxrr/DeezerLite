@@ -480,9 +480,14 @@ where
     .map_err(|e| AudioError::Device(e.to_string()))
 }
 
-/// Attente quand le tampon de sortie est plein.
-/// (Même valeur que les versions Windows et Mac.)
+/// Attente quand le tampon de sortie (une demi-seconde de son) est plein. Une commande (pause, saut…) réveille tout de
+/// suite, l'attente ne retarde donc rien.
+#[cfg(not(target_os = "ios"))]
 const FULL_BUFFER_WAIT_MS: u64 = 100;
+/// iPhone : 4 réveils par seconde au lieu de 10 pendant la lecture, téléphone verrouillé compris (batterie) ; il reste
+/// toujours au moins 0,25 s de son d'avance.
+#[cfg(target_os = "ios")]
+const FULL_BUFFER_WAIT_MS: u64 = 250;
 
 /// Délai avant d'arrêter la sortie quand plus rien ne joue (voir `Worker::idle_stop_at`).
 const IDLE_STOP: Duration = Duration::from_secs(30);
@@ -1045,9 +1050,7 @@ impl Worker {
             let pushed = if paused { false } else { self.pump() };
             self.update_position();
             if self.cur.is_some() && !paused && !pushed {
-                // Tampon plein (une demi-seconde de son) : inutile de tourner à vide. iPhone : un réveil toutes les 100 ms
-                // au lieu de 66 par seconde (le processeur reste au repos, téléphone verrouillé compris) ; il reste toujours
-                // au moins 0,4 s de son d'avance.
+                // Tampon plein (une demi-seconde de son) : inutile de tourner à vide (voir `FULL_BUFFER_WAIT_MS`).
                 match self.rx.recv_timeout(Duration::from_millis(FULL_BUFFER_WAIT_MS)) {
                     Ok(c) => self.handle(c),
                     Err(mpsc::RecvTimeoutError::Timeout) => {}

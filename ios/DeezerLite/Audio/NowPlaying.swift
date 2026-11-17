@@ -17,9 +17,17 @@ enum NowPlaying {
         func on(_ command: MPRemoteCommand, _ action: @escaping @MainActor (MPRemoteCommandEvent) -> MPRemoteCommandHandlerStatus) {
             command.addTarget { event in MainActor.assumeIsolated { action(event) } }
         }
-        on(cc.playCommand) { _ in player.resume(); return .success }
+        // Rien à jouer (file vidée, lancement sans dernière écoute) : la commande est refusée. Avant, la session audio
+        // était activée pour rien et coupait l'app qui jouait (podcast…).
+        on(cc.playCommand) { _ in
+            guard player.current != nil else { return .noActionableNowPlayingItem }
+            player.resume(); return .success
+        }
         on(cc.pauseCommand) { _ in player.pause(); return .success }
-        on(cc.togglePlayPauseCommand) { _ in player.toggle(); return .success }
+        on(cc.togglePlayPauseCommand) { _ in
+            guard player.current != nil else { return .noActionableNowPlayingItem }
+            player.toggle(); return .success
+        }
         on(cc.nextTrackCommand) { _ in player.next(); return .success }
         on(cc.previousTrackCommand) { _ in player.previous(); return .success }
         on(cc.changePlaybackPositionCommand) { e in

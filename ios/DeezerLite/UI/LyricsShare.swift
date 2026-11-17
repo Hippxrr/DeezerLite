@@ -97,7 +97,8 @@ struct LyricsShareSheet: View {
         .sensoryFeedback(.selection, trigger: picked)
         .sensoryFeedback(.warning, trigger: refused)
         .task {
-            let url = player.coverFixes[request.track.id] ?? request.track.coverUrl
+            // MP3 importé : la pochette choisie sur ce téléphone, comme partout ailleurs.
+            let url = player.mp3Cover(request.track) ?? player.coverFixes[request.track.id] ?? request.track.coverUrl
             if let url {
                 async let c = CoverLoader.shared.image(url: url, pixels: 300)
                 async let b = CoverLoader.shared.backdrop(url: url)

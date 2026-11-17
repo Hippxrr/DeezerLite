@@ -159,6 +159,9 @@ struct Mp3EditView: View {
             .task { await prepareCut() }
             .onDisappear {
                 stopListening()
+                // Cadrage de la pochette ouvert par-dessus : la fenêtre n'est que cachée, le fichier sert encore (avant, il
+                // était supprimé ici et « Importer » échouait ensuite).
+                guard crop == nil else { return }
                 if let file = edit.file { try? FileManager.default.removeItem(at: file) }
             }
             // Pendant l'envoi : pas de fermeture par glissement (le fichier serait supprimé).
@@ -235,10 +238,14 @@ extension Mp3EditView {
 
     /// Durée et forme d'onde du fichier choisi (import seulement).
     fileprivate func prepareCut() async {
-        guard let file = edit.file, listener == nil, let audio = try? AVAudioPlayer(contentsOf: file) else { return }
-        listener = audio
-        length = audio.duration
-        to = audio.duration
+        // Relancé au retour du cadrage de la pochette : refait seulement si la forme d'onde n'était pas finie.
+        guard let file = edit.file, peaks.isEmpty else { return }
+        if listener == nil {
+            guard let audio = try? AVAudioPlayer(contentsOf: file) else { return }
+            listener = audio
+            length = audio.duration
+            to = audio.duration
+        }
         // Débit variable sans en-tête de durée : celle d'AVAudioPlayer n'est qu'une estimation, la coupe tombait à côté.
         // Celle du son décodé est exacte (la même que pour la coupe).
         let (bars, seconds) = await waveform(of: file, bars: TrimBar.bars)
@@ -262,7 +269,8 @@ extension Mp3EditView {
         listening = Task { @MainActor in
             while !Task.isCancelled, listener.isPlaying, listener.currentTime < to {
                 playhead = listener.currentTime
-                try? await Task.sleep(for: .milliseconds(40))
+                // 10 fois par seconde : assez pour suivre l'écoute, sans redessiner toute la fenêtre 25 fois par seconde.
+                try? await Task.sleep(for: .milliseconds(100))
             }
             guard !Task.isCancelled else { return }
             listener.pause()
@@ -401,7 +409,9 @@ struct TrimBar: View {
                 }
             }
             .shadow(color: .black.opacity(0.45), radius: 2, y: 1)
-            .contentShape(Rectangle().inset(by: -10))
+            // Zone d'appui élargie vers l'extérieur seulement (début vers la gauche, fin vers la droite) : poignées
+            // l'une sur l'autre (long fichier, 1 s d'écart), chacune reste attrapable de son côté.
+            .contentShape(Path(CGRect(x: start ? -24 : 0, y: -10, width: 42, height: h + 32)))
             .accessibilityElement()
             .accessibilityLabel(start ? tr("Début") : tr("Fin"))
             .accessibilityValue(Mp3EditView.time(start ? from : to))

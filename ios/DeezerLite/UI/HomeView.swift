@@ -19,9 +19,6 @@ struct HomeView: View {
                 }
                 .padding(.horizontal, 16)
                 .animation(.snappy(duration: 0.3), value: items.map(\.id))
-                // Réglages › « Tops d'un pays » (désactivé : rien d'affiché ni de demandé). Affiché seulement une fois
-                // chargé : pas d'espace vide pendant le chargement.
-                if !player.region.isEmpty, let cards = player.regionCards, !cards.isEmpty { RegionShelf(cards: cards) }
                 if !player.reco.anyVisible {
                     // Recommandations désactivées dans Réglages : rien n'est demandé à Deezer.
                     EmptyView()
@@ -53,13 +50,8 @@ struct HomeView: View {
         .sheet(isPresented: $reordering) {
             HomeOrderView().environment(player).presentationDetents([.medium, .large])
         }
-        .refreshable {
-            await player.loadHome(force: true)
-            await player.loadRegion(force: true) // désactivé : ne fait rien
-        }
+        .refreshable { await player.loadHome(force: true) }
         .task { await player.loadHome(force: false) }
-        // Top du pays : chargé à l'ouverture et à chaque changement de pays (une seule requête).
-        .task(id: player.region) { await player.loadRegion(force: false) }
     }
 
     @ViewBuilder
@@ -98,17 +90,6 @@ struct HomeView: View {
         if count > 1 {
             Button { reordering = true } label: { Label(tr("Réorganiser l'accueil"), systemImage: "arrow.up.arrow.down") }
         }
-    }
-}
-
-/// Top du pays choisi, et ses nouveautés quand il y en a.
-private struct RegionShelf: View {
-    @Environment(Player.self) private var player
-    let cards: [Card]
-
-    var body: some View {
-        let name = player.regionName(player.region)
-        ShelfRow(title: cards.count > 1 ? tr("%@ : top et nouveautés", name) : tr("%@ : top", name), cards: cards)
     }
 }
 

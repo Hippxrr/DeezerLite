@@ -504,6 +504,8 @@ pub struct Core {
     listener: Arc<dyn Listener>,
     /// Dernier compte ou profil ouvert connu (voir `loved_owner`).
     last_user: AtomicU64,
+    /// Numéro de la dernière demande de lecture (voir `new_play` / `still_wanted`).
+    play_gen: AtomicU64,
 }
 
 #[uniffi::export]
@@ -649,6 +651,7 @@ impl Core {
         Ok(Arc::new(Self {
             rt, api, player, known, start, force_state, cache_dir, offline, download_quality, listener: kept_listener,
             last_user: AtomicU64::new(0),
+            play_gen: AtomicU64::new(0),
         }))
     }
 
@@ -1009,18 +1012,6 @@ impl Core {
         Ok(c.into())
     }
 
-    /// Pays proposés dans le réglage « Tops d'un pays » (code ISO ; « 001 » : le monde).
-    pub fn region_codes(&self) -> Vec<String> {
-        dz_api::REGIONS.iter().map(|r| r.0.to_owned()).collect()
-    }
-
-    /// Top du pays choisi, et ses nouveautés de la semaine quand Deezer en publie.
-    pub async fn region_cards(&self, code: String) -> Result<Vec<Card>, CoreError> {
-        let api = self.api.clone();
-        let c = self.run(async move { api.region_cards(&code).await }).await??;
-        Ok(cards(c))
-    }
-
     /// Crédits du titre selon Deezer (artistes, composition, paroles, production…).
     pub async fn credits(&self, id: i64) -> Result<Credits, CoreError> {
         let api = self.api.clone();
@@ -1328,6 +1319,7 @@ impl Core {
 
     /// Lance une file à partir d'identifiants déjà reçus (recherche, playlist...).
     pub fn play(&self, ids: Vec<i64>, index: u32) -> Result<(), CoreError> {
+        self.new_play();
         let tracks = self.lookup(&ids)?;
         self.mark_play();
         self.send(PlayerCmd::PlayQueue { tracks, index: index as usize })
@@ -1337,6 +1329,7 @@ impl Core {
     /// par paquets si le cœur ne les connaît plus, lecture du titre `index` à `position_ms`. Les titres devenus
     /// introuvables sont sautés ; l'index suit le titre visé.
     pub async fn restore_queue(&self, ids: Vec<i64>, index: u32, position_ms: u64) -> Result<(), CoreError> {
+        let play = self.new_play();
         let target = ids.get(index as usize).copied();
         let missing: Vec<i64> = {
             let known = self.known.lock().map_err(|_| CoreError::Player)?;
@@ -1369,6 +1362,9 @@ impl Core {
         }
         let start = target.and_then(|t| tracks.iter().position(|x| x.id == t)).unwrap_or(0);
         let same_track = target == Some(tracks[start].id);
+        if !self.still_wanted(play) {
+            return Ok(());
+        }
         self.mark_play();
         self.send(PlayerCmd::PlayQueue { tracks, index: start })?;
         // Saut envoyé juste après : le lecteur le traite une fois le titre chargé (les commandes passent dans l'ordre).
@@ -1381,6 +1377,7 @@ impl Core {
     /// Lance un seul titre à partir de son identifiant, même inconnu de cette session (historique de recherche) :
     /// sa fiche est redemandée à Deezer si besoin.
     pub async fn play_by_id(&self, id: i64) -> Result<(), CoreError> {
+        let play = self.new_play();
         let known = self.known.lock().ok().and_then(|k| k.get(&id).cloned()).or_else(|| self.offline.local(id).map(|local| local.info));
         let info = match known {
             Some(t) => t,
@@ -1391,15 +1388,22 @@ impl Core {
                 t
             }
         };
+        if !self.still_wanted(play) {
+            return Ok(());
+        }
         self.mark_play();
         self.send(PlayerCmd::PlayQueue { tracks: vec![info], index: 0 })
     }
 
     pub async fn play_flow(&self) -> Result<(), CoreError> {
+        let play = self.new_play();
         let api = self.api.clone();
         let tracks = self.run(async move { api.flow().await }).await??;
         if tracks.is_empty() {
             return Err(CoreError::Api("Flow est vide pour le moment, réessaie dans un instant.".into()));
+        }
+        if !self.still_wanted(play) {
+            return Ok(());
         }
         // Seulement une fois Flow reçu : si la requête échoue, aucun `Started` parasite au titre suivant.
         self.mark_play();
@@ -1408,12 +1412,16 @@ impl Core {
 
     /// Lance le mix inspiré d'un titre (« Mixes inspirés par » de l'accueil).
     pub async fn play_track_mix(&self, id: i64) -> Result<(), CoreError> {
+        let play = self.new_play();
         let api = self.api.clone();
         let list = self.run(async move { api.track_mix(id).await }).await??;
         if list.is_empty() {
             return Err(CoreError::Api("Deezer n'a pas de mix pour ce titre".into()));
         }
         remember(&self.known, list.clone());
+        if !self.still_wanted(play) {
+            return Ok(());
+        }
         self.mark_play();
         self.send(PlayerCmd::PlayQueue { tracks: list, index: 0 })
     }
@@ -1607,6 +1615,16 @@ impl Core {
     fn restore<T: DeserializeOwned>(&self, name: &str) -> Option<T> {
         let bytes = std::fs::read(self.cache_dir.join(name)).ok()?;
         serde_json::from_slice(&bytes).ok()
+    }
+
+    /// Nouvelle demande de lecture : son numéro. Une demande plus ancienne encore en attente de Deezer (Flow, mix,
+    /// reprise sur un réseau lent) ne lance plus rien à son arrivée : avant, elle remplaçait la lecture choisie après.
+    fn new_play(&self) -> u64 {
+        self.play_gen.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn still_wanted(&self, play: u64) -> bool {
+        self.play_gen.load(Ordering::SeqCst) == play
     }
 
     fn mark_play(&self) {
