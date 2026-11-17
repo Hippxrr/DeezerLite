@@ -1050,8 +1050,12 @@ impl Worker {
             let pushed = if paused { false } else { self.pump() };
             self.update_position();
             if self.cur.is_some() && !paused && !pushed {
-                // Tampon plein (une demi-seconde de son) : inutile de tourner à vide (voir `FULL_BUFFER_WAIT_MS`).
-                match self.rx.recv_timeout(Duration::from_millis(FULL_BUFFER_WAIT_MS)) {
+                // Tampon plein (une demi-seconde de son) : inutile de tourner à vide (voir `FULL_BUFFER_WAIT_MS`). Rien
+                // poussé pour une autre raison (son pas encore arrivé, réseau lent) : nouvel essai plus tôt, le tampon
+                // peut déjà être bas.
+                let full = self.out.as_ref().is_some_and(|o| o.producer.slots() == 0);
+                let wait = if full { FULL_BUFFER_WAIT_MS } else { FULL_BUFFER_WAIT_MS.min(100) };
+                match self.rx.recv_timeout(Duration::from_millis(wait)) {
                     Ok(c) => self.handle(c),
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                     Err(mpsc::RecvTimeoutError::Disconnected) => return,

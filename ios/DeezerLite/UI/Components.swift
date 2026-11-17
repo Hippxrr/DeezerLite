@@ -178,6 +178,12 @@ struct CoverView: View {
             guard !Task.isCancelled else { return }
             image = sharp
             imageURL = url
+            // Aperçu flou retiré une fois la version nette apparue (fondu de 0,25 s) : avant, il restait dessiné dessous,
+            // deux images par pochette.
+            guard preview != nil else { return }
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled, imageURL == url else { return }
+            preview = nil
         }
     }
 }

@@ -1432,6 +1432,7 @@ impl Core {
     }
 
     pub fn queue_play(&self, index: u32) -> Result<(), CoreError> {
+        self.new_play(); // un Flow encore en attente ne remplace pas le titre choisi dans la file
         self.mark_play();
         self.send(PlayerCmd::QueuePlay { index: index as usize })
     }

@@ -1606,7 +1606,12 @@ final class Player {
             return saved
         }
         if let hit = details[route] { return hit }
-        return localDetail(route)
+        // Copie du téléphone gardée en mémoire : la page est recréée souvent pendant son chargement, et une playlist
+        // téléchargée de milliers de titres était relue et convertie à chaque fois. La version de Deezer la remplace
+        // dès son arrivée (`detail` ne ressert jamais une copie hors ligne quand Deezer répond).
+        guard let saved = localDetail(route) else { return nil }
+        cacheDetail(saved, for: route)
+        return saved
     }
 
     func detail(_ route: Route, force: Bool) async -> Detail? {
@@ -1760,8 +1765,13 @@ final class Player {
 
     /// État d'avant une lecture demandée, remis par `playFailed` si rien n'a démarré.
     private func beforePlay() -> (current: Track?, isFlow: Bool, restore: LastSession?) {
-        (current, isFlow, pendingRestore)
+        // Flow encore en chargement (titre provisoire) : c'est ce qui jouait avant lui qui revient si la lecture suivante
+        // échoue. Avant, le titre provisoire revenait, et le mini-lecteur restait bloqué sur « Flow – Chargement… ».
+        if current?.id == 0, let saved = beforeFlow { return saved }
+        return (current, isFlow, pendingRestore)
     }
+
+    @ObservationIgnored private var beforeFlow: (current: Track?, isFlow: Bool, restore: LastSession?)?
 
     /// Rien n'a démarré : le titre qui joue reste affiché (écran verrouillé aussi), le Flow reste marqué, et une
     /// dernière écoute en attente reste reprenable (avant : le bouton lecture ne faisait plus rien).
@@ -1781,6 +1791,7 @@ final class Player {
     func playFlow() {
         guard let core else { return }
         let before = beforePlay()
+        beforeFlow = before
         pendingRestore = nil
         activateOutput()
         isFlow = true
@@ -2002,6 +2013,13 @@ final class Player {
             // lecture la relançait : le fondu recommençait sans fin, la pause n'arrivait jamais, et les titres suivants
             // continuaient à jouer sans le son.
             if sleepTask != nil, let plan = sleepPlan, plan.id == id, abs(plan.end.timeIntervalSince(end)) < 1 { return }
+            // Titre fini pendant le fondu (durée annoncée un peu plus longue que le son) : c'était la fin demandée, la
+            // musique s'arrête maintenant. Avant, le titre suivant jouait en entier à plein volume.
+            if let plan = sleepPlan, plan.id != id, sleepVolume < 1 {
+                cancelSleepTask()
+                finishSleep()
+                return
+            }
             sleepPlan = (id, end)
             // Nouvelle échéance (déplacement dans le titre pendant le fondu…) : le son revient d'abord à la normale,
             // sinon le nouveau fondu partait du volume déjà baissé et la suite jouait à 20 %.
@@ -2496,8 +2514,12 @@ final class Player {
 
     private func refreshStatus() {
         syncStatus()
-        NowPlaying.update(track: current, status: status)
+        NowPlaying.update(track: current, status: lockScreenStatus)
     }
+
+    /// État montré sur l'écran verrouillé : à zéro pendant le chargement d'un titre (l'état du moteur est encore celui
+    /// du précédent, affiché avec le nouveau nom).
+    private var lockScreenStatus: Status { loading ? Status(playing: false, positionMs: 0, durationMs: 0) : status }
 
     /// Lit l'état du moteur pour un affichage immédiat, et demande au cœur de renvoyer l'état réel juste après :
     /// une lecture faite pendant un chargement (état de transition) est ainsi corrigée aussitôt, dans l'app comme
@@ -2625,7 +2647,7 @@ final class Player {
         case .track, .started, .state, .stopped, .closed:
             // Titre demandé en chargement : position et durée à zéro (les états reçus sont encore ceux de l'ancien titre,
             // affichés avec le nouveau nom sur l'écran verrouillé).
-            NowPlaying.update(track: current, status: loading ? Status(playing: false, positionMs: 0, durationMs: 0) : status)
+            NowPlaying.update(track: current, status: lockScreenStatus)
             // Minuterie « fin du titre » : échéance recalculée (autre titre, pause, reprise).
             if sleepTimer == .trackEnd { scheduleSleep() }
         default: break

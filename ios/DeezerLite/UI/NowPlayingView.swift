@@ -283,6 +283,8 @@ final class CarouselSteps {
     @ObservationIgnored private var landing = 0
     /// Change à chaque arrivée : la fin d'une ancienne animation (interrompue) ne valide pas la nouvelle.
     @ObservationIgnored private var landingID = 0
+    /// File en cours au premier pas de la série (voir `land`).
+    @ObservationIgnored private var pendingQueue = 0
 
     /// Au lâcher : le carrousel glisse jusqu'au titre voisin (`delta` = ±1) ou revient en place (0), à la vitesse du doigt.
     /// Les titres affichés ne changent qu'une fois arrivé, d'un coup et sans animation (à cet instant, l'image est
@@ -293,6 +295,8 @@ final class CarouselSteps {
     /// l'attente avant le son se sentait).
     @MainActor func land(delta: Int, distance: CGFloat, velocity: CGFloat, bounce: Bool = true, headStart: TimeInterval = 0,
                          waitFullStop: Bool = false, slide: SlideState, player: Player) {
+        // Premier pas d'une série : la file à laquelle les pas s'appliquent (voir `schedule`).
+        if pending == 0, landing == 0 { pendingQueue = player.queueGeneration }
         landingID += 1
         let id = landingID
         landing = delta
@@ -347,7 +351,7 @@ final class CarouselSteps {
     /// Prévient le lecteur, sauf si un nouveau glissement a commencé (sa fin s'en chargera).
     @MainActor private func schedule(slide: SlideState, player: Player, after delay: Duration) {
         flush?.cancel()
-        let queue = player.queueGeneration
+        let queue = pendingQueue
         flush = Task { @MainActor [weak self] in
             try? await Task.sleep(for: delay)
             guard let self, !Task.isCancelled, self.pending != 0, slide.axis == nil else { return }
