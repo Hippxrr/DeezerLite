@@ -103,6 +103,8 @@ enum Translations {
         "Lecture aléatoire": ("Shuffle", "Aleatorio"),
         "File d'attente vide": ("Queue is empty", "La cola está vacía"),
         "Désactivé": ("Off", "Desactivado"),
+        "Plus d'actions": ("More actions", "Más acciones"),
+        "Actualiser": ("Refresh", "Actualizar"),
         "Amplificateur de basses": ("Bass booster", "Refuerzo de graves"),
         "Réducteur de basses": ("Bass reducer", "Reductor de graves"),
         "Amplificateur d'aigus": ("Treble booster", "Refuerzo de agudos"),

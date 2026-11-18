@@ -282,16 +282,18 @@ pub fn drain_notes() -> Vec<String> {
 
 /// Complète `songs` page après page : `fetch(début)` renvoie la page suivante (`None` = indisponible).
 /// Total connu : on va jusqu'à lui. Total inconnu (0) : on continue tant qu'une page n'est pas vide. `max` borne le tout.
-async fn collect_pages<'a, F>(songs: &mut Vec<Value>, total: usize, max: usize, mut fetch: F)
+/// `false` : une page n'a pas pu être lue (réseau…) ; la liste peut être incomplète.
+async fn collect_pages<'a, F>(songs: &mut Vec<Value>, total: usize, max: usize, mut fetch: F) -> bool
 where
     F: FnMut(usize) -> BoxFuture<'a, Option<Vec<Value>>>,
 {
     let mut last = songs.len();
     while last > 0 && songs.len() < max && (total == 0 || songs.len() < total) {
-        let Some(more) = fetch(songs.len()).await else { break }; // la suite est indisponible : on garde ce qui est déjà là
+        let Some(more) = fetch(songs.len()).await else { return false }; // la suite est indisponible : on garde ce qui est déjà là
         last = more.len();
         songs.extend(more);
     }
+    true
 }
 
 /// Lignes d'une réponse paginée : `{ "data": [...] }` ou directement un tableau.
@@ -481,7 +483,9 @@ impl DeezerClient {
         let total = t.get("total").and_then(|v| v.as_u64().or_else(|| v.as_str()?.trim().parse().ok())).unwrap_or(0) as usize;
         if let Some(list) = t.get_mut("data").and_then(Value::as_array_mut) {
             while list.len() < total && list.len() < 20_000 {
-                let Ok(more) = page(list.len()).await else { break };
+                // Page en échec : erreur plutôt qu'une liste coupée (une synchro aurait pris les éléments manquants
+                // pour des éléments retirés, et supprimé leurs téléchargements).
+                let more = page(list.len()).await?;
                 let rows = more.get("TAB").and_then(|t| t.get(tab)).and_then(|t| t.get("data")).and_then(Value::as_array).cloned().unwrap_or_default();
                 // Page vide, ou la même que la première (serveur qui ignore `start`) : on garde ce qu'on a.
                 if rows.is_empty() || rows.first() == list.first() {
@@ -838,7 +842,10 @@ impl DeezerClient {
                     n(v.pointer("/SONGS/total")).max(n(v.pointer("/DATA/NB_SONG")))
                 };
                 let total = announced(&r);
-                collect_pages(&mut songs, total, MAX_TRACKS, |start| {
+                // Une page en échec et des titres manquants à la fin : erreur plutôt qu'une playlist coupée (la synchro
+                // d'une playlist téléchargée supprimait les titres manquants). Un total annoncé trop grand (titres
+                // indisponibles comptés par Deezer) sans échec de page reste accepté.
+                let mut failed = !collect_pages(&mut songs, total, MAX_TRACKS, |start| {
                     let fut = page(start);
                     async move { fut.await.ok().map(|v| data(&v, "SONGS").to_vec()) }.boxed()
                 })
@@ -862,13 +869,16 @@ impl DeezerClient {
                     // 2) sinon, page par page
                     if total > songs.len() || capped {
                         let want = if capped { usize::MAX } else { total };
-                        collect_pages(&mut songs, want, MAX_TRACKS, |start| {
+                        failed |= !collect_pages(&mut songs, want, MAX_TRACKS, |start| {
                             let body = json!({ "playlist_id": sid.clone(), "nb": PAGE, "start": start });
                             async move { self.gw::<Value>("playlist.getSongs", &body).await.ok().map(|v| rows(&v)) }.boxed()
                         })
                         .await;
                         note(format!("playlist {id} : après playlist.getSongs par pages, {} titres sur {total}", songs.len()));
                     }
+                }
+                if failed && total > songs.len() {
+                    return Err(DeezerError::Gateway("playlist incomplète (réseau), réessaie".into()));
                 }
                 let d = r.get("DATA").cloned().unwrap_or(Value::Null);
                 let uid = self.user_id().await.unwrap_or(0);

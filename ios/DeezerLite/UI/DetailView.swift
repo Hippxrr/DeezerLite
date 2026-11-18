@@ -55,6 +55,9 @@ final class SortedTracks {
         }
         return value
     }
+
+    /// Clé du dernier résultat (sert à garder aussi le filtrage de la recherche, voir `DetailView.shown`).
+    var lastKey: String { key }
 }
 
 /// Position de la liste (voir `DetailView.scrollMemory`) : une classe simple, que SwiftUI ne surveille pas.
@@ -92,6 +95,7 @@ struct DetailView: View {
     @State private var tint: Color = .clear
     @State private var query = ""
     @State private var sorted = SortedTracks()
+    @State private var filtered = SortedTracks()
     /// Champ de recherche affiché seulement après un appui sur la loupe.
     @State private var searching = false
     /// Ligne en haut de l'écran et dernière position dans la liste complète (hors recherche tapée), remise à l'ouverture
@@ -147,9 +151,14 @@ struct DetailView: View {
     private func shown(_ d: Detail) -> [Track] {
         let q = query.trimmingCharacters(in: .whitespaces)
         // La liste déjà triée est filtrée telle quelle : pas de nouveau tri à chaque lettre.
-        guard !q.isEmpty else { return full(d) }
-        return full(d).filter {
-            $0.title.localizedStandardContains(q) || $0.artist.localizedStandardContains(q) || $0.album.localizedStandardContains(q)
+        let list = full(d)
+        guard !q.isEmpty else { return list }
+        // Filtrage gardé tant que la liste et le texte ne changent pas : avant, refait à chaque redessin de la page
+        // (3 comparaisons par titre, des milliers de titres), la frappe ralentissait dans une longue playlist.
+        return filtered.get("\(sorted.lastKey)|\(q)") {
+            list.filter {
+                $0.title.localizedStandardContains(q) || $0.artist.localizedStandardContains(q) || $0.album.localizedStandardContains(q)
+            }
         }
     }
 
@@ -216,12 +225,9 @@ struct DetailView: View {
         }
     }
 
-    /// Collection téléchargée dont des titres manquent sans être en cours (« Tout arrêter », annulés) : avant, seule
-    /// la corbeille restait, qui supprimait aussi les titres déjà là.
-    private func hasRest(_ d: Detail) -> Bool {
-        player.downloadedCollection(kind: d.kind, id: d.id) != nil
-            && d.tracks.contains { !$0.unavailable && !player.downloadedIds.contains($0.id) && player.downloadStates[$0.id] == nil }
-    }
+    /// Petit écran (iPhone SE, mini) : partager, épingler et télécharger regroupés dans un menu « … » (six boutons à
+    /// droite cachaient le titre de la page).
+    private var compactBar: Bool { UIScreen.main.bounds.width < 390 }
 
     @ToolbarContentBuilder
     private var pageToolbar: some ToolbarContent {
@@ -231,13 +237,13 @@ struct DetailView: View {
                     .accessibilityLabel(tr("Importer un MP3"))
             }
         }
-        if let d = detail, !d.offline, hasRest(d) {
-            ToolbarItem(placement: .topBarTrailing) {
-                Button { player.download(d) } label: { Image(systemName: "arrow.down.circle") }
-                    .accessibilityLabel(tr("Télécharger le reste"))
-            }
+        if let d = detail, !d.offline, player.downloadedCollection(kind: d.kind, id: d.id) != nil {
+            ToolbarItem(placement: .topBarTrailing) { DownloadRestButton(detail: d) }
         }
-        if let d = detail, ["album", "playlist", "loved"].contains(d.kind), !d.tracks.isEmpty {
+        if compactBar, let d = detail {
+            ToolbarItem(placement: .topBarTrailing) { compactMenu(d) }
+        }
+        if !compactBar, let d = detail, ["album", "playlist", "loved"].contains(d.kind), !d.tracks.isEmpty {
             ToolbarItem(placement: .topBarTrailing) {
                 let downloaded = player.downloadedCollection(kind: d.kind, id: d.id) != nil
                 // Télécharger : tout de suite. Supprimer : après confirmation (un appui accidentel effaçait tout).
@@ -250,13 +256,13 @@ struct DetailView: View {
                 .accessibilityLabel(downloaded ? tr("Supprimer des téléchargements") : tr("Télécharger la collection"))
             }
         }
-        if let d = detail, let url = deezerLink(kind: d.kind, id: d.id) {
+        if !compactBar, let d = detail, let url = deezerLink(kind: d.kind, id: d.id) {
             ToolbarItem(placement: .topBarTrailing) {
                 ShareLink(item: url, subject: Text(d.title), message: Text(d.title)) { Image(systemName: "square.and.arrow.up") }
                     .accessibilityLabel(tr("Partager"))
             }
         }
-        if let card = pinCard {
+        if !compactBar, let card = pinCard {
             ToolbarItem(placement: .topBarTrailing) {
                 let pinned = player.isPinned(card)
                 Button { withAnimation { player.togglePin(card) } } label: {
@@ -288,6 +294,36 @@ struct DetailView: View {
                 }
                 .accessibilityLabel(tr("Trier par"))
             }
+        }
+    }
+
+    /// Petit écran : télécharger (ou supprimer), partager et épingler dans un seul menu.
+    @ViewBuilder
+    private func compactMenu(_ d: Detail) -> some View {
+        let downloadable = ["album", "playlist", "loved"].contains(d.kind) && !d.tracks.isEmpty
+        let url = deezerLink(kind: d.kind, id: d.id)
+        if downloadable || url != nil || pinCard != nil {
+            Menu {
+                if downloadable {
+                    let downloaded = player.downloadedCollection(kind: d.kind, id: d.id) != nil
+                    Button(role: downloaded ? .destructive : nil) {
+                        if downloaded { confirmRemoveDownload = true } else { player.toggleDownload(d) }
+                    } label: {
+                        Label(downloaded ? tr("Supprimer des téléchargements") : tr("Télécharger la collection"),
+                              systemImage: downloaded ? "trash" : "arrow.down.circle")
+                    }
+                }
+                if let url {
+                    ShareLink(item: url, subject: Text(d.title), message: Text(d.title)) { Label(tr("Partager"), systemImage: "square.and.arrow.up") }
+                }
+                if let card = pinCard {
+                    let pinned = player.isPinned(card)
+                    Button { withAnimation { player.togglePin(card) } } label: {
+                        Label(pinned ? tr("Épinglé sur l'accueil") : tr("Épingler sur l'accueil"), systemImage: pinned ? "pin.fill" : "pin")
+                    }
+                }
+            } label: { Image(systemName: "ellipsis.circle") }
+            .accessibilityLabel(tr("Plus d'actions"))
         }
     }
 
@@ -528,6 +564,21 @@ private struct ListSearch: ViewModifier {
                 .onChange(of: presented) { _, open in if !open { text = "" } }
         } else {
             content
+        }
+    }
+}
+
+/// « Télécharger le reste » : collection téléchargée dont des titres manquent sans être en cours (« Tout arrêter »,
+/// annulés). Vue à part : elle seule suit la progression des téléchargements (avant, toute la page de la playlist était
+/// redessinée à chaque progression).
+private struct DownloadRestButton: View {
+    @Environment(Player.self) private var player
+    let detail: Detail
+
+    var body: some View {
+        if detail.tracks.contains(where: { !$0.unavailable && !player.downloadedIds.contains($0.id) && player.downloadStates[$0.id] == nil }) {
+            Button { player.download(detail) } label: { Image(systemName: "arrow.down.circle") }
+                .accessibilityLabel(tr("Télécharger le reste"))
         }
     }
 }

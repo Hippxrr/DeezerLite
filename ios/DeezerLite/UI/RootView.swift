@@ -75,6 +75,34 @@ private struct LaunchCover: View {
     }
 }
 
+/// Petit message de confirmation (ajouté à la file, à une playlist…) : disparaît seul. Posé sur l'app et aussi sur la
+/// feuille des Réglages : posé seulement sur l'app, il restait caché sous elle.
+private struct ToastOverlay: ViewModifier {
+    @Environment(Player.self) private var player
+
+    func body(content: Content) -> some View {
+        content
+            .overlay(alignment: .top) {
+                if let text = player.toast {
+                    Text(text)
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .surface(Capsule(), interactive: false, material: true)
+                        .shadow(color: .black.opacity(0.3), radius: 10, y: 4)
+                        .padding(.top, 40)
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                        .id(text)
+                }
+            }
+            .animation(.spring(response: 0.35, dampingFraction: 0.85), value: player.toast)
+    }
+}
+
+extension View {
+    func toastOverlay() -> some View { modifier(ToastOverlay()) }
+}
+
 struct RootView: View {
     @Environment(Player.self) private var player
     @Environment(\.scenePhase) private var phase
@@ -95,21 +123,7 @@ struct RootView: View {
             if now == .active { ThemeStore.applyStyle(ThemeStore.shared.appearance.style) }
         }
         .tint(Theme.accent)
-        .overlay(alignment: .top) {
-            // Petit message de confirmation (ajouté à la file, à une playlist…) : disparaît seul.
-            if let text = player.toast {
-                Text(text)
-                    .font(.subheadline.weight(.semibold))
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
-                    .surface(Capsule(), interactive: false, material: true)
-                    .shadow(color: .black.opacity(0.3), radius: 10, y: 4)
-                    .padding(.top, 40)
-                    .transition(.move(edge: .top).combined(with: .opacity))
-                    .id(text)
-            }
-        }
-        .animation(.spring(response: 0.35, dampingFraction: 0.85), value: player.toast)
+        .toastOverlay()
         .overlay {
             if launchCover {
                 LaunchCover { launchCover = false }
@@ -344,6 +358,15 @@ struct MainTabs: View {
         barCollapsed = false
     }
 
+    /// Réglages › Téléchargements : la Bibliothèque, puis sa page Téléchargements une fois la feuille des Réglages fermée.
+    private func showDownloadsPage() {
+        selectOwn(2)
+        Task {
+            try? await Task.sleep(for: .milliseconds(400))
+            player.requestedSection = .downloads
+        }
+    }
+
     /// Page d'un onglet : gardée en place une fois ouverte, cachée quand un autre onglet est affiché.
     private func ownPage<Page: View>(_ id: Int, _ page: Page) -> some View {
         page
@@ -423,6 +446,7 @@ struct MainTabs: View {
         }
         // Pochette perso : la photo choisie est lue en mémoire, cadrée à la main, puis enregistrée (rien d'autre ne reste).
         .photosPicker(isPresented: Binding(get: { player.pickingCover }, set: { player.pickingCover = $0 }), selection: $picked, matching: .images)
+        .onChange(of: player.openDownloadsPage) { showDownloadsPage() }
         .onChange(of: picked) { _, item in
             guard let item, let card = player.coverTarget else { return }
             picked = nil
@@ -547,6 +571,11 @@ struct TabStack<Content: View>: View {
             guard active, let route else { return }
             path.append(route)
             player.requestedRoute = nil
+        }
+        .onChange(of: player.requestedSection) { _, section in
+            guard active, let section else { return }
+            path.append(section)
+            player.requestedSection = nil
         }
         // Autre profil : les pages ouvertes étaient celles du profil d'avant.
         .onChange(of: player.profileEpoch) { path = NavigationPath() }

@@ -7,43 +7,9 @@ struct DownloadsView: View {
 
     /// Créé une seule fois (un formateur par rendu coûtait pour rien).
     private static let byteFormatter = ByteCountFormatter()
-    /// Lignes affichées au plus dans « Téléchargements en cours ».
-    private static let maxActiveRows = 6
 
     private var isEmpty: Bool {
         player.downloadCollections.isEmpty && player.downloads.isEmpty
-    }
-
-    /// Téléchargements en cours d'abord, puis échecs, dans l'ordre de la file : les lignes ne changent plus de place
-    /// à chaque mise à jour, et des échecs ne cachent plus les téléchargements qui avancent.
-    private var active: [DownloadUpdate] {
-        let states = player.downloadStates
-        let rank = Dictionary(player.downloadQueueOrder.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
-        let visible = states.values.filter { $0.state != .queued }
-        let sorted = visible.sorted { a, b in
-            let pa = a.state == .downloading ? 0 : 1
-            let pb = b.state == .downloading ? 0 : 1
-            if pa != pb { return pa < pb }
-            let ra = rank[a.id] ?? Int.max, rb = rank[b.id] ?? Int.max
-            return ra != rb ? ra < rb : a.id < b.id
-        }
-        return Array(sorted.prefix(Self.maxActiveRows))
-    }
-
-    private var queuedCount: Int {
-        player.downloadStates.values.reduce(into: 0) { count, update in
-            if update.state == .queued { count += 1 }
-        }
-    }
-
-    private var failedCount: Int {
-        player.downloadStates.values.reduce(into: 0) { count, update in
-            if update.state == .failed { count += 1 }
-        }
-    }
-
-    private var hasActivity: Bool {
-        queuedCount > 0 || player.downloadStates.values.contains { $0.state == .downloading }
     }
 
     private var storage: String {
@@ -52,59 +18,11 @@ struct DownloadsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            if hasActivity {
-                HStack {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(tr("Téléchargements en cours")).font(.title3.bold())
-                        if queuedCount > 0 {
-                            Text(tr("%@ en attente", "\(queuedCount)")).font(.subheadline).foregroundStyle(.secondary)
-                        }
-                    }
-                    Spacer()
-                    Button(role: .destructive) { player.cancelAllDownloads() } label: {
-                        Label(tr("Tout arrêter"), systemImage: "stop.fill")
-                            .font(.subheadline.weight(.semibold))
-                    }
-                    .buttonStyle(.bordered)
-                }
-            } else if failedCount > 0 {
-                Text(tr("Téléchargements en échec")).font(.title3.bold())
-            }
-
-            if !active.isEmpty {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach(active, id: \.id) { update in
-                        activeRow(update)
-                    }
-                }
-            }
-
-            if failedCount > 0 {
-                HStack {
-                    Text(failedCount == 1 ? tr("1 échec") : tr("%@ échecs", "\(failedCount)"))
-                        .font(.subheadline).foregroundStyle(.secondary)
-                    Spacer()
-                    Button(tr("Tout réessayer")) { retryFailed() }
-                        .font(.subheadline.weight(.semibold))
-                    Button(tr("Effacer"), role: .destructive) { player.clearFailedDownloads() }
-                        .font(.subheadline.weight(.semibold))
-                }
-            }
-
+            // Parties qui suivent la progression des téléchargements : à part, seules redessinées à chaque mise à jour
+            // (avant, toute la page, liste des titres téléchargés comprise, l'était plusieurs fois par seconde).
+            DownloadActivity()
             if isEmpty {
-                VStack(spacing: 12) {
-                    Image(systemName: "arrow.down.circle")
-                        .font(.system(size: 38))
-                        .foregroundStyle(Theme.accent)
-                    Text(hasActivity ? tr("Les titres terminés apparaîtront ici") : tr("Aucun téléchargement"))
-                        .font(.headline)
-                    Text(tr("Télécharge un titre, un album ou une playlist pour les écouter sans connexion, en Wi-Fi comme en 4G/5G."))
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 40)
+                DownloadsEmptyNote()
             } else {
                 HStack {
                     VStack(alignment: .leading, spacing: 3) {
@@ -183,13 +101,6 @@ struct DownloadsView: View {
         }
     }
 
-    private func retryFailed() {
-        let tracks = player.downloadStates.values
-            .filter { $0.state == .failed }
-            .compactMap { player.downloadTracks[$0.id] }
-        if !tracks.isEmpty { player.download(tracks) }
-    }
-
     /// Nom actuel dans la bibliothèque (playlist renommée sur Deezer…), sinon celui gardé au téléchargement.
     private func title(_ collection: DownloadCollection) -> String {
         if collection.kind == "loved" { return player.lovedTitle }
@@ -206,6 +117,94 @@ struct DownloadsView: View {
         Card(kind: collection.kind, id: collection.id, title: title(collection),
              subtitle: collection.subtitle, coverUrl: collection.coverUrl,
              owned: collection.owned, key: "")
+    }
+}
+
+/// En-tête des téléchargements en cours, leurs lignes et les échecs : seule partie de la page qui suit la progression.
+private struct DownloadActivity: View {
+    @Environment(Player.self) private var player
+    /// Lignes affichées au plus dans « Téléchargements en cours ».
+    private static let maxActiveRows = 6
+
+    /// Téléchargements en cours d'abord, puis échecs, dans l'ordre de la file : les lignes ne changent plus de place
+    /// à chaque mise à jour, et des échecs ne cachent plus les téléchargements qui avancent.
+    private var active: [DownloadUpdate] {
+        let states = player.downloadStates
+        let rank = Dictionary(player.downloadQueueOrder.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
+        let visible = states.values.filter { $0.state != .queued }
+        let sorted = visible.sorted { a, b in
+            let pa = a.state == .downloading ? 0 : 1
+            let pb = b.state == .downloading ? 0 : 1
+            if pa != pb { return pa < pb }
+            let ra = rank[a.id] ?? Int.max, rb = rank[b.id] ?? Int.max
+            return ra != rb ? ra < rb : a.id < b.id
+        }
+        return Array(sorted.prefix(Self.maxActiveRows))
+    }
+
+    private var queuedCount: Int {
+        player.downloadStates.values.reduce(into: 0) { count, update in
+            if update.state == .queued { count += 1 }
+        }
+    }
+
+    private var failedCount: Int {
+        player.downloadStates.values.reduce(into: 0) { count, update in
+            if update.state == .failed { count += 1 }
+        }
+    }
+
+    private var hasActivity: Bool {
+        queuedCount > 0 || player.downloadStates.values.contains { $0.state == .downloading }
+    }
+
+    var body: some View {
+        if hasActivity {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(tr("Téléchargements en cours")).font(.title3.bold())
+                    if queuedCount > 0 {
+                        Text(tr("%@ en attente", "\(queuedCount)")).font(.subheadline).foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
+                Button(role: .destructive) { player.cancelAllDownloads() } label: {
+                    Label(tr("Tout arrêter"), systemImage: "stop.fill")
+                        .font(.subheadline.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+            }
+        } else if failedCount > 0 {
+            Text(tr("Téléchargements en échec")).font(.title3.bold())
+        }
+
+        if !active.isEmpty {
+            LazyVStack(alignment: .leading, spacing: 12) {
+                ForEach(active, id: \.id) { update in
+                    activeRow(update)
+                }
+            }
+        }
+
+        if failedCount > 0 {
+            HStack {
+                Text(failedCount == 1 ? tr("1 échec") : tr("%@ échecs", "\(failedCount)"))
+                    .font(.subheadline).foregroundStyle(.secondary)
+                Spacer()
+                Button(tr("Tout réessayer")) { retryFailed() }
+                    .font(.subheadline.weight(.semibold))
+                Button(tr("Effacer"), role: .destructive) { player.clearFailedDownloads() }
+                    .font(.subheadline.weight(.semibold))
+            }
+        }
+
+    }
+
+    private func retryFailed() {
+        let tracks = player.downloadStates.values
+            .filter { $0.state == .failed }
+            .compactMap { player.downloadTracks[$0.id] }
+        if !tracks.isEmpty { player.download(tracks) }
     }
 
     @ViewBuilder
@@ -260,5 +259,30 @@ struct DownloadsView: View {
         case .failed: tr("Échec")
         case .complete, .cancelled: ""
         }
+    }
+}
+
+/// Page vide : rien de téléchargé (ou seulement en cours).
+private struct DownloadsEmptyNote: View {
+    @Environment(Player.self) private var player
+
+    private var hasActivity: Bool {
+        player.downloadStates.values.contains { $0.state == .queued || $0.state == .downloading }
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "arrow.down.circle")
+                .font(.system(size: 38))
+                .foregroundStyle(Theme.accent)
+            Text(hasActivity ? tr("Les titres terminés apparaîtront ici") : tr("Aucun téléchargement"))
+                .font(.headline)
+            Text(tr("Télécharge un titre, un album ou une playlist pour les écouter sans connexion, en Wi-Fi comme en 4G/5G."))
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 40)
     }
 }

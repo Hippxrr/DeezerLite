@@ -95,6 +95,8 @@ struct SearchView: View {
                     .onSubmit {
                         let q = query.trimmingCharacters(in: .whitespaces)
                         if !q.isEmpty { player.remember(.query(q)) }
+                        // Résultats déjà affichés pour ce texte : pas la même recherche une seconde fois.
+                        if q == resultsQuery, results != nil, !failed { return }
                         run(after: .zero)
                     }
                 if !query.isEmpty {
@@ -281,6 +283,10 @@ private struct TopArtist: View {
         // Dernière sortie : lue sur la page de l'artiste (gardée en mémoire, reprise si on l'ouvre ensuite).
         .task(id: card.id) {
             latest = nil
+            // Courte attente : pendant la frappe (« nin » puis « ninh »), l'artiste trouvé change à chaque lettre, et chaque
+            // page d'artiste coûte plusieurs requêtes (et une place parmi les pages gardées en mémoire).
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
             let page = await player.detail(.detail(kind: "artist", id: card.id, title: card.title), force: false)
             guard !Task.isCancelled else { return } // un autre artiste entre-temps
             withAnimation(.easeOut(duration: 0.2)) { latest = page?.latest }

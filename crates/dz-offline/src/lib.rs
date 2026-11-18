@@ -73,12 +73,16 @@ pub struct OfflineCollection {
     pub track_ids: Vec<i64>,
     pub downloaded_at: u64,
     cover: Option<String>,
+    /// Titres manquants à la dernière synchro, pas encore retirés (baisse trop forte d'un coup, voir
+    /// `store_collection_removing`). Retirés si la synchro suivante les voit manquer de la même façon.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pending_drop: Vec<i64>,
 }
 
 impl OfflineCollection {
     pub fn new(kind: String, id: u64, owned: bool, title: String, subtitle: String, cover_url: Option<String>, track_ids: Vec<i64>) -> Self {
         let downloaded_at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        Self { kind, id, owned, title, subtitle, cover_url, track_ids, downloaded_at, cover: None }
+        Self { kind, id, owned, title, subtitle, cover_url, track_ids, downloaded_at, cover: None, pending_drop: Vec::new() }
     }
 
     pub fn key(&self) -> String {
@@ -479,9 +483,31 @@ impl OfflineStore {
         list
     }
 
+    /// Lue une seule fois dans l'index, sans regarder chaque fichier audio (leur taille est vérifiée à l'ouverture du
+    /// stockage), et chaque pochette d'album partagée n'est cherchée qu'une fois sur le disque. Avant : deux accès disque
+    /// par titre (6 000 pour 3 000 titres aimés), sur le fil principal à l'ouverture d'une page hors ligne.
     pub fn collection(&self, kind: &str, id: u64) -> Option<(OfflineCollection, Vec<TrackInfo>)> {
         let collection = self.collections.read().ok()?.get(&collection_key(kind, id))?.clone();
-        let tracks = collection.track_ids.iter().filter_map(|id| self.local(*id).map(|local| local.info)).collect();
+        let entries = self.entries.read().ok()?;
+        let mut covers: std::collections::HashMap<&str, Option<String>> = std::collections::HashMap::new();
+        let tracks = collection
+            .track_ids
+            .iter()
+            .filter_map(|id| entries.get(id))
+            .map(|entry| {
+                let mut info = entry.info.clone();
+                if let Some(cover) = entry.cover.as_deref() {
+                    let local = covers.entry(cover).or_insert_with(|| {
+                        let path = self.root.join(cover);
+                        path.exists().then(|| path.to_string_lossy().into_owned())
+                    });
+                    if let Some(path) = local {
+                        info.cover_url = Some(path.clone());
+                    }
+                }
+                info
+            })
+            .collect();
         Some((self.display_collection(&collection), tracks))
     }
 
@@ -1203,16 +1229,31 @@ pub async fn store_collection_removing(
         let kept: BTreeSet<i64> = collection.track_ids.iter().copied().collect();
         saved.track_ids.iter().copied().filter(|id| !kept.contains(id)).collect()
     });
-    let suspicious = previous.as_ref().is_some_and(|saved| dropped.len() > sync_removal_limit(saved.track_ids.len()));
+    let mut dropped_sorted = dropped.clone();
+    dropped_sorted.sort_unstable();
+    let large = previous.as_ref().is_some_and(|saved| dropped.len() > sync_removal_limit(saved.track_ids.len()));
+    // Même forte baisse (mêmes titres en moins) à deux synchros de suite : c'est un vrai retrait (25 titres retirés d'une
+    // playlist de 100…), appliqué. Avant, il ne l'était jamais : les titres restaient téléchargés pour rien.
+    let confirmed = large && previous.as_ref().is_some_and(|saved| saved.pending_drop == dropped_sorted);
+    let suspicious = large && !confirmed;
     if suspicious {
         collection.track_ids.extend(dropped.iter().copied());
+        collection.pending_drop = dropped_sorted;
     }
     store.insert_collection(collection.clone())?;
     let removed = if suspicious || dropped.is_empty() { Vec::new() } else { store.remove_unused(&dropped)? };
     if !(same_url && previous_cover.is_some()) {
         if let Some(url) = collection.cover_url.as_deref().filter(|url| is_remote(url)) {
             let safe_kind: String = kind.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-            let relative = PathBuf::from("covers").join(format!("collection-{safe_kind}-{id}-v1.jpg"));
+            // Nom qui dépend de l'adresse de l'image : une nouvelle pochette a un nouveau fichier, et l'app ne garde plus
+            // l'ancienne affichée (mémoire des images rangée par chemin). L'ancien fichier part au rangement suivant.
+            let tag = {
+                use std::hash::{Hash, Hasher};
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                url.hash(&mut h);
+                h.finish()
+            };
+            let relative = PathBuf::from("covers").join(format!("collection-{safe_kind}-{id}-{tag:016x}.jpg"));
             if let Some(cover) = download_image(&api, &store.root, url, relative).await {
                 store.update_collection_cover(&kind, id, cover)?;
             }
@@ -2138,6 +2179,11 @@ mod tests {
         assert!((1..=39).all(|id| store.local(id).is_some()));
         assert_eq!(store.collection("playlist", 10).unwrap().0.track_ids.len(), 39);
         assert!((1..=39).all(|id| store.in_collection(id)));
+        // La même liste courte à la synchro suivante : c'est un vrai retrait, appliqué cette fois.
+        let (_, removed) = store_collection_removing(api(), store.clone(), playlist(10, (1..=5).collect())).await.unwrap();
+        assert_eq!(removed.len(), 34);
+        assert!(store.local(6).is_none() && store.local(5).is_some());
+        assert_eq!(store.collection("playlist", 10).unwrap().0.track_ids.len(), 5);
         std::fs::remove_dir_all(root).unwrap();
     }
 

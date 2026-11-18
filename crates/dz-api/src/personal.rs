@@ -13,18 +13,33 @@ impl DeezerClient {
         #[derive(Deserialize)]
         struct Page {
             #[serde(default)]
-            data: Vec<RawTrack>,
+            data: Vec<Value>,
         }
         const NB: usize = 1000;
-        let mut all = Vec::new();
-        loop {
-            let page: Page = self.gw("personal_song.getList", &json!({ "start": all.len(), "nb": NB })).await?;
+        // Garde-fous : au plus 50 000 MP3, et arrêt si une page recommence la première (serveur qui ignorerait `start`).
+        // Avant, la boucle pouvait tourner sans fin.
+        const MAX: usize = 50_000;
+        let mut all: Vec<TrackInfo> = Vec::new();
+        let mut first = None;
+        let mut read = 0;
+        while read < MAX {
+            let page: Page = self.gw("personal_song.getList", &json!({ "start": read, "nb": NB })).await?;
             let n = page.data.len();
-            all.extend(page.data.into_iter().map(TrackInfo::from));
+            let head = page.data.first().cloned();
+            if read > 0 && head.is_some() && head == first {
+                break;
+            }
+            if read == 0 {
+                first = head;
+            }
+            read += n;
+            // Ligne par ligne : une ligne illisible est sautée, sans perdre toute la page.
+            all.extend(page.data.into_iter().filter_map(|v| serde_json::from_value::<RawTrack>(v).ok()).map(TrackInfo::from));
             if n < NB {
-                return Ok(all);
+                break;
             }
         }
+        Ok(all)
     }
 
     /// Envoie un MP3 sur le compte (formulaire multipart, champ « file », comme le site). Renvoie la réponse du serveur.

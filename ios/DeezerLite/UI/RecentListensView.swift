@@ -51,6 +51,7 @@ struct RecentListensPage: View {
         .toolbar {
             Button { Task { await load() } } label: { Image(systemName: "arrow.clockwise") }
                 .disabled(loading)
+                .accessibilityLabel(tr("Actualiser"))
         }
         // Rechargé aussi au changement de profil (chaque profil a son historique).
         .task(id: player.profileEpoch) { await load() }

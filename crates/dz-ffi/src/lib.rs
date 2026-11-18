@@ -538,8 +538,9 @@ impl Core {
             let _guard = rt.enter();
             spawn_player(api.clone(), Some(Arc::new(|id| Some(dz_decrypt::decryptor(id)))), Some(offline.clone()), ev_tx)
         };
+        // Titres téléchargés : pas recopiés ici au lancement (un contrôle de pochette sur le disque par titre, sur le fil
+        // principal) ; les recherches de fiches se rabattent déjà sur le stockage hors ligne (`lookup`, `play_by_id`…).
         let known: Known = Arc::default();
-        remember(&known, offline.infos());
         let start: SharedStart = Arc::default();
         let listener: Arc<dyn Listener> = Arc::from(listener);
         let download_quality = Arc::new(RwLock::new(Quality::Flac));

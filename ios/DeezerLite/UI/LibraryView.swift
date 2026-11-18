@@ -406,6 +406,7 @@ struct SettingsView: View {
         .onAppear { player.settingsOpen = true }
         .onDisappear { player.settingsOpen = false }
         .tint(Theme.accent)
+        .toastOverlay() // messages visibles aussi Réglages ouverts
     }
 
     /// Accueil, lecture, stockage, compte.
@@ -660,7 +661,7 @@ struct SettingsView: View {
             .confirmationDialog(tr("Effacer les pochettes enregistrées ?"), isPresented: $confirmClearCovers, titleVisibility: .visible) {
                 Button(tr("Effacer"), role: .destructive) {
                     CoverLoader.shared.clear()
-                    coverBytes = CoverLoader.shared.diskUsage
+                    coverBytes = 0 // le système efface le disque un peu après : relu tout de suite, l'ancienne taille restait
                     player.showToast(tr("Pochettes effacées"))
                 }
                 Button(tr("Annuler"), role: .cancel) {}
@@ -668,8 +669,13 @@ struct SettingsView: View {
                 Text(tr("Seules les pochettes gardées pour un affichage rapide sont effacées. Elles sont retéléchargées quand elles réapparaissent à l'écran. Tes téléchargements, ta session, ton historique et tes réglages ne sont pas touchés."))
             }
             divider
-            // Ce qui prend vraiment de la place : les téléchargements. Leur taille, et leur page pour en supprimer.
-            NavigationLink { LibrarySectionView(section: .downloads).environment(player) } label: {
+            // Ce qui prend vraiment de la place : les téléchargements. Leur taille, et leur page pour en supprimer : ouverte
+            // dans la Bibliothèque, Réglages fermés. Ouverte ici, ses menus, ses messages et ses pages ne s'affichaient pas
+            // (ils sont posés sous la feuille des Réglages).
+            Button {
+                dismiss()
+                player.openDownloadsPage += 1
+            } label: {
                 row("arrow.down.circle", tr("Téléchargements")) {
                     Text(ByteCountFormatter.string(fromByteCount: Int64(player.downloadBytes), countStyle: .file)).foregroundStyle(.secondary)
                     chevron
@@ -749,6 +755,7 @@ struct SettingsView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .accessibilityAddTraits(q == selected ? .isSelected : []) // VoiceOver dit laquelle est choisie
         }
     }
 }
@@ -773,6 +780,7 @@ private struct ThemeDots: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel(tr(p.name))
+                .accessibilityAddTraits(p.id == current ? .isSelected : [])
             }
         }
         .sensoryFeedback(.selection, trigger: current)
@@ -913,9 +921,9 @@ struct RecoSettingsView: View {
         }
         .environment(\.editMode, .constant(.active))
         .listStyle(.insetGrouped)
-        .listRowBackground(Theme.card)
         .scrollContentBackground(.hidden)
-        .background(Theme.background.ignoresSafeArea())
+        // Même fond que les autres pages des Réglages.
+        .sheetBackground(Theme.accent, strength: 0.3)
         .navigationTitle(tr("Personnaliser l'accueil"))
         .navigationBarTitleDisplayMode(.inline)
     }

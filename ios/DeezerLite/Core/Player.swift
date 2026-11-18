@@ -66,6 +66,10 @@ final class Player {
     private(set) var shownIndex = 0
     /// Page demandée hors d'un onglet (depuis le lecteur plein écran) : l'onglet actif l'ouvre.
     var requestedRoute: Route?
+    /// Page Téléchargements demandée depuis les Réglages : ouverte dans la Bibliothèque (voir `MainTabs`).
+    var openDownloadsPage = 0
+    /// Section de la Bibliothèque à ouvrir dans l'onglet affiché (voir `TabStack`).
+    var requestedSection: LibrarySection?
     /// Pages déjà chargées : affichées tout de suite en revenant dessus (tirer vers le bas pour actualiser).
     private(set) var home: [Shelf]?
     /// Change à chaque nouvelle file (autre album, playlist, Flow…).
@@ -1192,6 +1196,12 @@ final class Player {
         switchingProfile = true
         defer { switchingProfile = false }
         do {
+            // Données d'avant la séparation par profil (historique, épinglés, dernière écoute) : rangées d'abord chez le
+            // profil ouvert jusqu'ici. Sinon elles partaient au profil choisi (celles du titulaire données à un enfant).
+            if Self.savedProfile == nil, let id = currentProfile?.id {
+                Self.savedProfile = id
+                ProfileData.migrate()
+            }
             try await core.switchProfile(id: p.id)
             // Déconnexion pendant le changement : rien n'est gardé pour le compte suivant.
             guard loggedIn == true else { return }
@@ -1434,6 +1444,7 @@ final class Player {
         homeOrder = []
         UserDefaults.standard.removeObject(forKey: "homeOrder")
         setLovedTitle("")
+        setMp3Title("") // nom de la page MP3 choisi sur ce téléphone : oublié aussi
         coverTarget = nil
         pickingCover = false
         lovedCard = nil
@@ -1711,10 +1722,12 @@ final class Player {
                     }
                 }
             } catch {
-                // Profil changé entre-temps : ses cœurs à lui ne sont pas touchés.
-                guard gen == profileGeneration else { return }
-                if liked { lovedIds.remove(track.id) } else { lovedIds.insert(track.id) }
-                showToast(describe(error), seconds: 4)
+                // Profil changé entre-temps : ses cœurs à lui ne sont pas touchés. Un appui plus récent sur ce cœur décide
+                // seul (avant, l'échec d'un ancien envoi éteignait le cœur d'un titre aimé juste après, chez Deezer).
+                if gen == profileGeneration, likeGeneration[track.id] == mine {
+                    if liked { lovedIds.remove(track.id) } else { lovedIds.insert(track.id) }
+                    showToast(describe(error), seconds: 4)
+                }
             }
             // Dernier envoi pour ce titre terminé : plus rien à attendre, il n'est plus gardé.
             if likeGeneration[track.id] == mine {

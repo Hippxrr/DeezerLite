@@ -543,6 +543,11 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
                     order.append(job.id)
                 }
             } catch {
+                // Fichier illisible : mis de côté plutôt qu'écrasé par la prochaine sauvegarde (une file vide), comme le
+                // fait le cœur pour ses propres fichiers.
+                let aside = jobsURL.appendingPathExtension("corrupt")
+                try? FileManager.default.removeItem(at: aside)
+                try? FileManager.default.moveItem(at: jobsURL, to: aside)
                 player?.downloadQueuePersistenceFailed()
             }
         }

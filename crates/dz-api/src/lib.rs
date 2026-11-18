@@ -338,6 +338,13 @@ impl DeezerClient {
         if let Ok(mut c) = self.date_cache.lock() {
             c.clear();
         }
+        // Jeton d'accès (valable quelques minutes) et pochettes introuvables : rien du compte ne reste après la déconnexion.
+        if let Ok(mut j) = self.jwt.lock() {
+            *j = None;
+        }
+        if let Ok(mut m) = self.cover_misses.lock() {
+            m.clear();
+        }
     }
 
     fn sid_cookie(&self) -> Option<String> {
@@ -960,17 +967,17 @@ pub struct ArtistRef {
 pub(crate) struct RawTrack {
     #[serde(rename = "SNG_ID", deserialize_with = "flex_i64")]
     id: i64,
-    #[serde(rename = "SNG_TITLE", default)]
+    #[serde(rename = "SNG_TITLE", default, deserialize_with = "null_default")]
     title: String,
-    #[serde(rename = "VERSION", default)]
+    #[serde(rename = "VERSION", default, deserialize_with = "null_default")]
     version: String,
-    #[serde(rename = "ART_NAME", default)]
+    #[serde(rename = "ART_NAME", default, deserialize_with = "null_default")]
     artist: String,
-    #[serde(rename = "ALB_TITLE", default)]
+    #[serde(rename = "ALB_TITLE", default, deserialize_with = "null_default")]
     album: String,
     #[serde(rename = "DURATION", default, deserialize_with = "flex_u64")]
     duration: u64,
-    #[serde(rename = "ALB_PICTURE", default)]
+    #[serde(rename = "ALB_PICTURE", default, deserialize_with = "null_default")]
     picture: String,
     #[serde(rename = "TRACK_TOKEN", default)]
     token: Option<String>,
@@ -992,7 +999,7 @@ pub(crate) struct RawTrack {
     #[serde(rename = "PHYSICAL_RELEASE_DATE", default)]
     physical_date: Option<String>,
     /// Deezer ne met que le PREMIER artiste dans ART_NAME : les feats sont dans cette liste.
-    #[serde(rename = "ARTISTS", default)]
+    #[serde(rename = "ARTISTS", default, deserialize_with = "null_default")]
     artists: Vec<Value>,
 }
 
@@ -1098,6 +1105,12 @@ pub struct ResolvedMedia {
     pub media: MediaSource,
     pub stream_id: i64,
     pub info: TrackInfo,
+}
+
+/// `null` envoyé par Deezer à la place d'un texte ou d'une liste : valeur vide. Avant, le titre entier était refusé
+/// (sauté des listes, ou toute une série de fiches en échec).
+fn null_default<'de, D: Deserializer<'de>, T: Default + Deserialize<'de>>(d: D) -> std::result::Result<T, D::Error> {
+    Ok(Option::<T>::deserialize(d)?.unwrap_or_default())
 }
 
 /// Les MP3 importés par l'utilisateur ont des identifiants négatifs.
@@ -1263,6 +1276,9 @@ mod tests {
     fn odd_numbers_from_deezer_keep_the_track() {
         let t: RawTrack = serde_json::from_value(serde_json::json!({ "SNG_ID": "42", "SNG_TITLE": "T", "DURATION": "", "ART_ID": null, "ALB_ID": -3 })).unwrap();
         assert_eq!((t.id, t.duration, t.artist_id, t.album_id), (42, 0, 0, 0));
+        let t: RawTrack = serde_json::from_value(serde_json::json!({ "SNG_ID": 7, "SNG_TITLE": null, "VERSION": null, "ART_NAME": null,
+            "ALB_TITLE": null, "ALB_PICTURE": null, "ARTISTS": null })).unwrap();
+        assert!(t.id == 7 && t.title.is_empty() && t.artist.is_empty() && t.picture.is_empty() && t.artists.is_empty());
     }
     #[test]
     fn writes_are_never_sent_twice_after_a_timeout() {

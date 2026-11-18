@@ -18,6 +18,11 @@ enum ProfileData {
         return key
     }
 
+    /// Range tout de suite les données d'avant la séparation chez le profil ouvert (voir `key`).
+    static func migrate() {
+        for base in bases { _ = key(base) }
+    }
+
     /// Déconnexion : rien d'aucun profil ne reste sur le téléphone.
     static func clearAll() {
         let defaults = UserDefaults.standard

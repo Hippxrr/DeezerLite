@@ -52,7 +52,11 @@ impl DeezerClient {
     }
 
     fn genius(&self, url: &str) -> reqwest::RequestBuilder {
-        self.http().get(url).header(reqwest::header::USER_AGENT, UA).timeout(std::time::Duration::from_secs(10))
+        // Client à part, sans cookies : Genius ne garde ni ne retrouve rien d'une recherche à l'autre (avant, il
+        // partageait la réserve de cookies de la session Deezer).
+        static CLIENT: std::sync::OnceLock<Option<reqwest::Client>> = std::sync::OnceLock::new();
+        let client = CLIENT.get_or_init(|| reqwest::Client::builder().build().ok()).clone().unwrap_or_else(|| self.http());
+        client.get(url).header(reqwest::header::USER_AGENT, UA).timeout(std::time::Duration::from_secs(10))
     }
 }
 

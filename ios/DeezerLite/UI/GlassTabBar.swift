@@ -95,6 +95,9 @@ struct GlassTabBar: View {
         }
         .buttonStyle(.pressable)
         .accessibilityLabel(title(id))
+        // Très grande taille de texte : appui long sur un onglet = son nom en grand, comme la barre d'iOS (le nom affiché
+        // reste petit pour tenir dans la barre).
+        .accessibilityShowsLargeContentViewer()
         .accessibilityAddTraits(id == tab ? .isSelected : [])
         // Elle réapparaît une fois le mini-lecteur remonté (il passait dessus en même temps).
         .animation(.easeOut(duration: 0.15).delay(visible && !isSearch ? 0.12 : 0)) { $0.opacity(visible ? 1 : 0) }
