@@ -425,6 +425,9 @@ struct MainTabs: View {
                 // réagir même sous ce qui est posé dessus), et l'effet d'appui apparaissait sur la page quand il descendait.
                 .allowsHitTesting(!player.showFullPlayer)
                 .environment(\.glassReactsToTouch, !player.showFullPlayer)
+                // Ici plutôt qu'avec les autres réactions plus bas : ajoutée à cette longue chaîne, elle dépassait ce que le
+                // compilateur sait vérifier.
+                .onChange(of: player.openDownloadsPage) { showDownloadsPage() }
             // Mini-lecteur posé au-dessus de la barre d'onglets, sous le grand lecteur. Il ignore le clavier :
             // celui-ci le recouvre simplement, sans rien déplacer ni retirer (le baisser en faisant défiler reste fluide).
             if !MiniPlayerMetrics.inTabBar {
@@ -446,7 +449,6 @@ struct MainTabs: View {
         }
         // Pochette perso : la photo choisie est lue en mémoire, cadrée à la main, puis enregistrée (rien d'autre ne reste).
         .photosPicker(isPresented: Binding(get: { player.pickingCover }, set: { player.pickingCover = $0 }), selection: $picked, matching: .images)
-        .onChange(of: player.openDownloadsPage) { showDownloadsPage() }
         .onChange(of: picked) { _, item in
             guard let item, let card = player.coverTarget else { return }
             picked = nil
