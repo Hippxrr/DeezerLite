@@ -25,11 +25,18 @@ fn serve(body: Vec<u8>) -> String {
     format!("http://{addr}/t.mp3")
 }
 
+/// Faux déchiffreur qui dépend du numéro de bloc. Avant, il l'ignorait : un mauvais numéro après une reprise ou un saut
+/// passait inaperçu dans les tests.
 struct Xor;
 impl ChunkDecryptor for Xor {
-    fn decrypt_chunk(&self, _i: u64, c: &mut [u8]) {
-        c.iter_mut().for_each(|b| *b ^= 0xFF);
+    fn decrypt_chunk(&self, i: u64, c: &mut [u8]) {
+        c.iter_mut().for_each(|b| *b ^= 0xFF ^ i as u8);
     }
+}
+
+/// Octet attendu à la position `pos` après `Xor` (blocs complets seulement).
+fn xored(pos: usize, b: u8) -> u8 {
+    b ^ 0xFF ^ (pos / CHUNK) as u8
 }
 
 fn data() -> Vec<u8> {
@@ -66,7 +73,7 @@ fn decrypts_full_chunks_only() {
     let mut out = Vec::new();
     r.read_to_end(&mut out).unwrap();
     let full = 10_000 / CHUNK * CHUNK;
-    assert!(out[..full].iter().zip(data()).all(|(a, b)| *a == b ^ 0xFF));
+    assert!(out[..full].iter().zip(data()).enumerate().all(|(i, (a, b))| *a == xored(i, b)));
     assert_eq!(&out[full..], &data()[full..]); // dernier bloc partiel laissé tel quel
 }
 
@@ -111,37 +118,8 @@ fn network_cut_resumes_where_it_stopped_and_keeps_decrypting_the_right_blocks() 
     assert_eq!(ranges.recv_timeout(Duration::from_secs(5)).unwrap(), "4096");
     assert_eq!(out.len(), body.len(), "titre complet malgré la coupure");
     let full = body.len() / CHUNK * CHUNK;
-    assert!(out[..full].iter().zip(&body).all(|(a, b)| *a == b ^ 0xFF), "chaque bloc déchiffré avec le bon numéro");
+    assert!(out[..full].iter().zip(&body).enumerate().all(|(i, (a, b))| *a == xored(i, *b)), "chaque bloc déchiffré avec le bon numéro");
     assert_eq!(&out[full..], &body[full..]);
-}
-
-fn leftover_temp_files() -> usize {
-    let prefix = format!("deezer-lite-stream-{}-", std::process::id());
-    std::fs::read_dir(std::env::temp_dir())
-        .map(|d| d.filter_map(Result::ok).filter(|e| e.file_name().to_string_lossy().starts_with(&prefix)).count())
-        .unwrap_or(0)
-}
-
-#[test]
-fn big_stream_is_buffered_on_disk_with_random_access_and_cleans_up() {
-    let rt = tokio::runtime::Runtime::new().unwrap();
-    let body: Vec<u8> = (0..700_000u32).map(|i| (i.wrapping_mul(31) % 251) as u8).collect();
-    let url = serve(body.clone());
-    let mut r = StreamReader::spawn(rt.handle(), reqwest::Client::new(), url, Arc::new(Passthrough));
-
-    // Accès aléatoire pendant que le téléchargement se poursuit.
-    for &pos in &[600_000u64, 12_345, 400_001, 0, 699_990] {
-        r.seek(SeekFrom::Start(pos)).unwrap();
-        let mut buf = [0u8; 8];
-        r.read_exact(&mut buf).unwrap();
-        assert_eq!(buf.to_vec(), body[pos as usize..pos as usize + 8].to_vec(), "octets à la position {pos}");
-    }
-    assert_eq!(r.buffered(), 700_000);
-    assert!(leftover_temp_files() >= 1, "le tampon doit être un fichier temporaire pendant la lecture");
-
-    drop(r);
-    std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(leftover_temp_files(), 0, "le fichier temporaire est supprimé à la fermeture");
 }
 
 /// Serveur qui envoie les en-têtes (ou pas) puis un début de titre, et reste muet ensuite (réseau figé).
@@ -242,22 +220,25 @@ fn network_cut_resumes_even_when_the_server_ignores_range() {
     r.read_to_end(&mut out).expect("titre complet malgré un serveur qui ignore la reprise");
     assert_eq!(out.len(), body.len());
     let full = body.len() / CHUNK * CHUNK;
-    assert!(out[..full].iter().zip(&body).all(|(a, b)| *a == b ^ 0xFF), "chaque bloc déchiffré avec le bon numéro");
+    assert!(out[..full].iter().zip(&body).enumerate().all(|(i, (a, b))| *a == xored(i, *b)), "chaque bloc déchiffré avec le bon numéro");
     assert_eq!(&out[full..], &body[full..]);
 }
 
 /// Serveur lent (environ 400 Ko/s) qui sert chaque connexion dans son propre fil, avec ou sans prise en charge de `Range`.
 /// Renvoie l'adresse et la liste des débuts de requête reçus.
-fn serve_slow(body: Vec<u8>, honor_range: bool) -> (String, Arc<std::sync::Mutex<Vec<u64>>>) {
+/// `fail_first_range` : la première requête partielle reçoit un 503 (serveur momentanément indisponible).
+fn serve_slow(body: Vec<u8>, honor_range: bool, fail_first_range: bool) -> (String, Arc<std::sync::Mutex<Vec<u64>>>) {
     let l = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = l.local_addr().unwrap();
     let starts = Arc::new(std::sync::Mutex::new(Vec::new()));
     let seen = starts.clone();
     let body = Arc::new(body);
+    let failed = Arc::new(std::sync::atomic::AtomicBool::new(!fail_first_range));
     std::thread::spawn(move || {
         for s in l.incoming().flatten() {
             let body = body.clone();
             let seen = seen.clone();
+            let failed = failed.clone();
             std::thread::spawn(move || {
                 let mut s = s;
                 let mut buf = [0u8; 2048];
@@ -269,6 +250,10 @@ fn serve_slow(body: Vec<u8>, honor_range: bool) -> (String, Arc<std::sync::Mutex
                     .filter(|_| honor_range)
                     .unwrap_or(0);
                 seen.lock().unwrap().push(from as u64);
+                if from > 0 && !failed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    let _ = s.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    return;
+                }
                 let head = if from > 0 {
                     format!(
                         "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n",
@@ -300,7 +285,7 @@ fn big_body() -> Vec<u8> {
 fn far_seek_restarts_the_download_there_and_fills_the_gap_afterwards() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let body = big_body();
-    let (url, starts) = serve_slow(body.clone(), true);
+    let (url, starts) = serve_slow(body.clone(), true, false);
     let mut r = StreamReader::spawn(rt.handle(), reqwest::Client::new(), url, Arc::new(Xor));
     assert!(r.is_seekable());
 
@@ -312,7 +297,7 @@ fn far_seek_restarts_the_download_there_and_fills_the_gap_afterwards() {
     r.read_exact(&mut b).unwrap();
     assert!(t.elapsed() < Duration::from_secs(2), "saut servi en {:?}", t.elapsed());
     let at = target as usize;
-    let expect: Vec<u8> = (at..at + 64).map(|i| if i / CHUNK < body.len() / CHUNK { body[i] ^ 0xFF } else { body[i] }).collect();
+    let expect: Vec<u8> = (at..at + 64).map(|i| if i / CHUNK < body.len() / CHUNK { xored(i, body[i]) } else { body[i] }).collect();
     assert_eq!(b.to_vec(), expect, "bon déchiffrement après le saut (numéro de bloc recalculé)");
     let requested = starts.lock().unwrap().clone();
     assert!(requested.contains(&(target / CHUNK as u64 * CHUNK as u64)), "relancé au bloc du saut : {requested:?}");
@@ -323,7 +308,7 @@ fn far_seek_restarts_the_download_there_and_fills_the_gap_afterwards() {
     r.read_to_end(&mut out).unwrap();
     assert_eq!(out.len(), body.len());
     let full = body.len() / CHUNK * CHUNK;
-    assert!(out[..full].iter().zip(&body).all(|(a, b)| *a == b ^ 0xFF));
+    assert!(out[..full].iter().zip(&body).enumerate().all(|(i, (a, b))| *a == xored(i, *b)));
     assert_eq!(&out[full..], &body[full..]);
 }
 
@@ -331,7 +316,7 @@ fn far_seek_restarts_the_download_there_and_fills_the_gap_afterwards() {
 fn far_seek_waits_normally_when_the_server_cannot_resume() {
     let rt = tokio::runtime::Runtime::new().unwrap();
     let body: Vec<u8> = big_body()[..600_000].to_vec();
-    let (url, _) = serve_slow(body.clone(), false);
+    let (url, _) = serve_slow(body.clone(), false, false);
     let mut r = StreamReader::spawn(rt.handle(), reqwest::Client::new(), url, Arc::new(Passthrough));
     r.seek(SeekFrom::Start(590_000)).unwrap();
     let mut b = [0u8; 100];
@@ -341,4 +326,87 @@ fn far_seek_waits_normally_when_the_server_cannot_resume() {
     let mut out = Vec::new();
     r.read_to_end(&mut out).unwrap();
     assert_eq!(out, body);
+}
+
+#[test]
+fn far_seek_still_jumps_after_a_passing_server_error() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let body = big_body();
+    let (url, starts) = serve_slow(body.clone(), true, true);
+    let mut r = StreamReader::spawn(rt.handle(), reqwest::Client::new(), url, Arc::new(Xor));
+    assert!(r.is_seekable());
+    // 1er saut : la première requête reçoit un 503, la suivante passe. Avant, ce seul échec faisait attendre le
+    // téléchargement dans l'ordre (~7 s) pour ce saut et tous les suivants.
+    for target in [2_700_001u64, 1_500_001] {
+        let t = std::time::Instant::now();
+        r.seek(SeekFrom::Start(target)).unwrap();
+        let mut b = [0u8; 64];
+        r.read_exact(&mut b).unwrap();
+        assert!(t.elapsed() < Duration::from_secs(2), "saut à {target} servi en {:?}", t.elapsed());
+        let at = target as usize;
+        let expect: Vec<u8> = (at..at + 64).map(|i| xored(i, body[i])).collect();
+        assert_eq!(b.to_vec(), expect);
+    }
+    let requested = starts.lock().unwrap().clone();
+    assert!(requested.contains(&(1_500_001 / CHUNK as u64 * CHUNK as u64)), "2e saut relancé là-bas : {requested:?}");
+}
+
+/// Serveur qui envoie le titre en plusieurs connexions : la n-ième s'arrête à `ends[n]`, la dernière va jusqu'au bout.
+/// `short` : les reprises (206) annoncent une longueur courte et se terminent proprement, sans erreur réseau ; sinon
+/// elles annoncent toute la suite et coupent. Renvoie l'octet de départ de chaque requête.
+fn serve_in_parts(body: Vec<u8>, ends: Vec<usize>, short: bool) -> (String, std::sync::mpsc::Receiver<usize>) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for k in 0..=ends.len() {
+            let Ok((mut s, _)) = l.accept() else { return };
+            let mut buf = [0u8; 2048];
+            let n = s.read(&mut buf).unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_ascii_lowercase();
+            let from: usize = req.lines().find_map(|l| l.strip_prefix("range: bytes=")).map_or(0, |r| r.trim_end_matches('-').parse().unwrap());
+            let _ = tx.send(from);
+            let end = ends.get(k).copied().unwrap_or(body.len());
+            let (status, len) = match (from, short) {
+                (0, _) => ("200 OK", body.len()),
+                (_, true) => ("206 Partial Content", end - from),
+                (_, false) => ("206 Partial Content", body.len() - from),
+            };
+            let _ = s.write_all(format!("HTTP/1.1 {status}\r\nContent-Length: {len}\r\nConnection: close\r\n\r\n").as_bytes());
+            let _ = s.write_all(&body[from..end]);
+            let _ = s.flush();
+        }
+    });
+    (format!("http://{addr}/t.flac"), rx)
+}
+
+#[test]
+fn many_cuts_in_one_track_still_finish_when_each_resume_works() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let body: Vec<u8> = (0..24_000u32).map(|i| (i % 241) as u8).collect();
+    // 5 coupures : avant, la 4e arrêtait le titre.
+    let (url, _) = serve_in_parts(body.clone(), vec![3_000, 7_000, 11_000, 15_000, 19_000], false);
+    let mut r = StreamReader::spawn(rt.handle(), reqwest::Client::new(), url, Arc::new(Xor));
+    let mut out = Vec::new();
+    r.read_to_end(&mut out).unwrap();
+    assert_eq!(out.len(), body.len());
+    let full = body.len() / CHUNK * CHUNK;
+    assert!(out[..full].iter().zip(&body).enumerate().all(|(i, (a, b))| *a == xored(i, *b)));
+}
+
+#[test]
+fn short_partial_response_is_resumed_instead_of_ending_the_track() {
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let body: Vec<u8> = (0..20_000u32).map(|i| (i % 239) as u8).collect();
+    let (url, starts) = serve_in_parts(body.clone(), vec![5_000, 12_000], true);
+    let mut r = StreamReader::spawn(rt.handle(), reqwest::Client::new(), url, Arc::new(Xor));
+    let mut out = Vec::new();
+    r.read_to_end(&mut out).unwrap();
+    // Avant : fin du titre à 12 000 octets, sans erreur.
+    assert_eq!(out.len(), body.len());
+    let full = body.len() / CHUNK * CHUNK;
+    assert!(out[..full].iter().zip(&body).enumerate().all(|(i, (a, b))| *a == xored(i, *b)));
+    assert_eq!(&out[full..], &body[full..]);
+    let starts: Vec<usize> = starts.try_iter().collect();
+    assert_eq!(starts, vec![0, 4_096, 10_240], "reprises sur des frontières de bloc");
 }

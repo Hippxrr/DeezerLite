@@ -90,7 +90,14 @@ impl Store {
                 Ok(())
             }
             Store::Disk { file, len } => {
-                write_all_at(file, buf, pos)?;
+                if let Err(e) = write_all_at(file, buf, pos) {
+                    // Écriture refusée en cours de titre (disque plein) : la suite continue en mémoire, avec ce qui est
+                    // déjà reçu. Avant, le titre échouait, et chaque nouvel essai recréait un fichier qui échouait pareil.
+                    let mut kept = vec![0; *len as usize];
+                    read_exact_at(file, &mut kept, 0).map_err(|_| e)?;
+                    *self = Store::Mem(kept);
+                    return self.write_at(pos, buf);
+                }
                 *len = (*len).max(end);
                 Ok(())
             }
@@ -355,9 +362,20 @@ impl StreamReader {
 /// Ce qui réveille la boucle de téléchargement.
 enum Event {
     Data(Option<reqwest::Result<bytes::Bytes>>),
-    Switched(Option<ByteStream>),
+    Switched(Result<ByteStream, NoResume>),
     Wake,
 }
+
+/// Pourquoi une relance n'a pas abouti.
+enum NoResume {
+    /// Le serveur a répondu mais ne sait pas reprendre à cet endroit : inutile de réessayer.
+    Refused,
+    /// Erreur réseau ou serveur momentanément indisponible (503…) : un nouvel essai peut marcher.
+    Failed,
+}
+
+/// Échecs passagers d'affilée tolérés pour un saut avant de ne plus en faire (voir `NoResume::Failed`).
+const MAX_SEEK_FAILURES: u32 = 3;
 
 async fn pump(
     inner: &Inner,
@@ -379,9 +397,10 @@ async fn pump(
     let mut cursor = 0u64;
     let mut pending: Vec<u8> = Vec::with_capacity(CHUNK * 4);
     let mut resumes = 0u32;
+    let mut seek_failures = 0u32;
     // Relance en cours ailleurs dans le titre : (position, demandée par le lecteur ?, requête). Le flux en cours continue
     // pendant ce temps : rien n'est perdu si le serveur répond lentement.
-    let mut switching: Option<(u64, bool, futures_util::future::BoxFuture<'static, Option<ByteStream>>)> = None;
+    let mut switching: Option<(u64, bool, futures_util::future::BoxFuture<'static, Result<ByteStream, NoResume>>)> = None;
 
     loop {
         // Saut demandé par le lecteur : relance là-bas (remplace une relance interne en cours).
@@ -398,25 +417,31 @@ async fn pump(
         };
         let failure: StreamError = match event {
             Event::Wake => continue,
-            Event::Switched(Some(next)) => {
+            Event::Switched(Ok(next)) => {
                 let (target, _, _) = switching.take().expect("relance");
                 stream = Some(next);
                 cursor = target;
                 pending.clear();
                 resumes = 0;
+                seek_failures = 0;
                 let mut st = inner.lock()?;
                 st.cursor = target;
                 st.seeking_to = None;
                 continue;
             }
-            Event::Switched(None) => {
+            Event::Switched(Err(why)) => {
                 let (_, asked, _) = switching.take().expect("relance");
                 {
                     let mut st = inner.lock()?;
                     st.seeking_to = None;
                     // Le serveur ne sait pas reprendre au milieu : le lecteur attendra le téléchargement dans l'ordre.
+                    // Une erreur passagère (réseau, 503) laisse le lecteur redemander le saut, 3 fois de suite au plus.
+                    // Avant, un seul échec passager désactivait les sauts rapides pour tout le reste du titre.
                     if asked {
-                        st.no_seek = true;
+                        seek_failures += 1;
+                        if matches!(why, NoResume::Refused) || seek_failures >= MAX_SEEK_FAILURES {
+                            st.no_seek = true;
+                        }
                     }
                 }
                 inner.cv.notify_all();
@@ -528,11 +553,11 @@ async fn pump(
         }
         tokio::time::sleep(std::time::Duration::from_millis(500 * u64::from(resumes))).await;
         match resume_from(http.clone(), url.to_owned(), cursor, total, true).await {
-            Some(s) => {
+            Ok(s) => {
                 stream = Some(s);
                 pending.clear();
             }
-            None => return Err(failure),
+            Err(_) => return Err(failure),
         }
     }
 }
@@ -554,7 +579,7 @@ fn start_switch(
     url: &str,
     target: u64,
     total: u64,
-) -> Result<(u64, bool, futures_util::future::BoxFuture<'static, Option<ByteStream>>), StreamError> {
+) -> Result<(u64, bool, futures_util::future::BoxFuture<'static, Result<ByteStream, NoResume>>), StreamError> {
     inner.lock()?.seeking_to = Some(target);
     Ok((target, false, resume_from(http.clone(), url.to_owned(), target, Some(total), true).boxed()))
 }
@@ -568,22 +593,33 @@ fn finish(inner: &Inner) -> Result<(), StreamError> {
 
 type ByteStream = futures_util::stream::BoxStream<'static, reqwest::Result<bytes::Bytes>>;
 
-/// Relance le téléchargement à partir de l'octet `from`. `None` si le serveur ne sait pas reprendre ou ne repart pas de
-/// l'octet demandé (le son serait alors décalé et le déchiffrement faux). Un serveur qui ignore la demande et renvoie
-/// tout le fichier (réponse 200 de la bonne taille : certains CDN et proxys) est accepté : les `from` premiers octets,
-/// déjà reçus, sont sautés. Avant, le titre s'arrêtait là et tout était retéléchargé depuis le début.
+/// Relance le téléchargement à partir de l'octet `from`. `Refused` si le serveur ne sait pas reprendre ou ne repart pas
+/// de l'octet demandé (le son serait alors décalé et le déchiffrement faux), `Failed` si l'échec est passager. Un serveur
+/// qui ignore la demande et renvoie tout le fichier (réponse 200 de la bonne taille : certains CDN et proxys) est
+/// accepté : les `from` premiers octets, déjà reçus, sont sautés. Avant, le titre s'arrêtait là et tout était
+/// retéléchargé depuis le début.
 /// `allow_full` : accepter un serveur qui renvoie tout le fichier (utile après une coupure ; inutile pour un saut, qui
 /// serait alors aussi long que d'attendre).
-async fn resume_from(http: reqwest::Client, url: String, from: u64, total: Option<u64>, allow_full: bool) -> Option<ByteStream> {
-    let resp = http.get(&url).header(reqwest::header::RANGE, format!("bytes={from}-")).send().await.ok()?;
-    if resp.status() == reqwest::StatusCode::OK {
+async fn resume_from(
+    http: reqwest::Client,
+    url: String,
+    from: u64,
+    total: Option<u64>,
+    allow_full: bool,
+) -> Result<ByteStream, NoResume> {
+    let resp = http.get(&url).header(reqwest::header::RANGE, format!("bytes={from}-")).send().await.map_err(|_| NoResume::Failed)?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::OK {
         if !allow_full || total.is_none() || resp.content_length() != total {
-            return None;
+            return Err(NoResume::Refused);
         }
-        return Some(skip_prefix(resp.bytes_stream().boxed(), from));
+        return Ok(skip_prefix(resp.bytes_stream().boxed(), from));
     }
-    if resp.status() != reqwest::StatusCode::PARTIAL_CONTENT {
-        return None;
+    if status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(NoResume::Failed);
+    }
+    if status != reqwest::StatusCode::PARTIAL_CONTENT {
+        return Err(NoResume::Refused);
     }
     // `Content-Range: bytes <début>-<fin>/<total>` : le début doit être celui demandé.
     if let Some(range) = resp.headers().get(reqwest::header::CONTENT_RANGE) {
@@ -594,10 +630,10 @@ async fn resume_from(http: reqwest::Client, url: String, from: u64, total: Optio
             .and_then(|r| r.split('-').next())
             .and_then(|s| s.trim().parse::<u64>().ok());
         if start != Some(from) {
-            return None;
+            return Err(NoResume::Refused);
         }
     }
-    Some(resp.bytes_stream().boxed())
+    Ok(resp.bytes_stream().boxed())
 }
 
 /// Le même flux, sans ses `skip` premiers octets.
@@ -701,5 +737,25 @@ impl Drop for StreamReader {
             task.abort();
         }
         self.inner.cv.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disk_write_failure_falls_back_to_memory_with_what_was_received() {
+        // Fichier ouvert en lecture seule : toute écriture échoue, comme sur un disque plein.
+        let path = std::env::temp_dir().join(format!("deezer-lite-store-test-{}.tmp", std::process::id()));
+        std::fs::write(&path, b"deja recu").unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let mut store = Store::Disk { file, len: 9 };
+        store.write_at(9, b" puis la suite").unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(matches!(store, Store::Mem(_)));
+        let mut out = [0u8; 23];
+        assert_eq!(store.read_at(0, &mut out).unwrap(), 23);
+        assert_eq!(&out, b"deja recu puis la suite");
     }
 }

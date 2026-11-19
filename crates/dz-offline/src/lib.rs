@@ -2653,6 +2653,34 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// Faux déchiffreur qui dépend du numéro de bloc : un compteur de blocs faux se verrait.
+    struct XorIndex;
+    impl ChunkDecryptor for XorIndex {
+        fn decrypt_chunk(&self, index: u64, chunk: &mut [u8]) {
+            chunk.iter_mut().for_each(|b| *b ^= 0xFF ^ index as u8);
+        }
+    }
+
+    /// Avant, les imports n'étaient testés que non chiffrés : le numéro de bloc (sur plusieurs lectures du fichier) et le
+    /// dernier bloc partiel de `decrypt_file` n'étaient jamais vérifiés.
+    #[test]
+    fn decrypt_file_numbers_blocks_across_reads_and_keeps_the_partial_tail() {
+        let root = root("decrypt-file");
+        std::fs::create_dir_all(&root).unwrap();
+        let (source, part) = (root.join("native.encrypted"), root.join("native.part"));
+        // Plus de 64 blocs : le fichier est lu en plusieurs fois.
+        let bytes: Vec<u8> = (0..CHUNK * 130 + 17).map(|n| (n % 251) as u8).collect();
+        std::fs::write(&source, &bytes).unwrap();
+
+        let written = decrypt_file(&source, &part, &XorIndex).unwrap();
+        assert_eq!(written, bytes.len() as u64);
+        let out = std::fs::read(&part).unwrap();
+        let full = bytes.len() / CHUNK * CHUNK;
+        assert!(out[..full].iter().zip(&bytes).enumerate().all(|(i, (a, b))| *a == b ^ 0xFF ^ (i / CHUNK) as u8));
+        assert_eq!(&out[full..], &bytes[full..], "dernier bloc partiel laissé tel quel");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[tokio::test]
     async fn imports_native_download_and_clears_pending_entry() {
         let root = root("native");

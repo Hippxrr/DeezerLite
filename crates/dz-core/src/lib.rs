@@ -1400,7 +1400,9 @@ impl Actor {
             EngineEvent::Error { id, msg } => {
                 // Titre Deezer en cours interrompu (coupure réseau…) : on retente, 2 fois au plus.
                 let current = self.queue.get(self.index) == Some(&id);
-                if current && id > 0 && self.retries < 2 && self.recover_at.is_none() {
+                // Les MP3 importés (identifiant négatif) aussi : avant, `id > 0` les excluait alors qu'ils passent par le
+                // même flux.
+                if current && id != 0 && self.retries < 2 && self.recover_at.is_none() {
                     self.retries += 1;
                     self.recover_at = Some(Instant::now() + Duration::from_millis(1200));
                     self.error("Lecture interrompue, nouvelle tentative…");
