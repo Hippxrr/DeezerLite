@@ -108,6 +108,8 @@ struct LibraryView: View {
                 if playlists.isEmpty && player.flowOnHome && player.lovedOnHome {
                     Text(tr("Pas d'autre playlist.")).font(.subheadline).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.top, 30)
                 }
+            } else if player.loadFailed.contains("library0") {
+                RetryNote { await player.loadLibrary(0, force: true) }
             } else {
                 ForEach(0..<6, id: \.self) { _ in
                     RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Theme.card).frame(height: 84)
@@ -299,6 +301,8 @@ struct LibrarySectionView: View {
         .navigationBarTitleDisplayMode(.large)
         .refreshable {
             if section == .stats { statsRefresh += 1 }
+            // Téléchargements : listes relues (avant, le geste ne faisait rien).
+            if section == .downloads { await player.refreshDownloadsInBackground() }
             if let list { await player.loadLibrary(list, force: true) }
         }
         .task(id: player.profileEpoch) {
@@ -315,6 +319,8 @@ struct LibrarySectionView: View {
                     Text(section == .albums ? tr("Aucun album dans ta bibliothèque.") : tr("Aucun artiste suivi."))
                         .font(.subheadline).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.top, 30)
                 }
+            } else if let list, player.loadFailed.contains("library\(list)") {
+                RetryNote { await player.loadLibrary(list, force: true) }
             } else {
                 ForEach(0..<6, id: \.self) { _ in
                     RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Theme.card).frame(height: 84)

@@ -157,20 +157,18 @@ struct Mp3EditView: View {
             }
             .navigationTitle(edit.track == nil ? tr("Importer un MP3") : tr("Modifier le MP3"))
             .task { await prepareCut() }
-            .onDisappear {
-                stopListening()
-                // Cadrage de la pochette ouvert par-dessus : la fenêtre n'est que cachée, le fichier sert encore (avant, il
-                // était supprimé ici et « Importer » échouait ensuite).
-                guard crop == nil else { return }
-                if let file = edit.file { try? FileManager.default.removeItem(at: file) }
-            }
+            // La copie du fichier est supprimée à la fermeture de la fenêtre (voir `Player.mp3Editor`), pas ici : cachée un
+            // instant (choix d'une photo, cadrage de la pochette), la fenêtre disparaît aussi, et le fichier supprimé faisait
+            // échouer l'envoi (« Fichier illisible »), alors qu'un nouvel essai marchait.
+            .onDisappear { stopListening() }
             // Pendant l'envoi : pas de fermeture par glissement (le fichier serait supprimé).
             .interactiveDismissDisabled(sending || trimming)
             .scrollDisabled(trimming)
             .sensoryFeedback(.selection, trigger: trimming)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button(tr("Annuler")) { dismiss() } }
+                // Pendant l'envoi : fermer supprimerait le fichier en cours de lecture (MP3 importé quand même, ou illisible).
+                ToolbarItem(placement: .cancellationAction) { Button(tr("Annuler")) { dismiss() }.disabled(sending) }
                 ToolbarItem(placement: .confirmationAction) {
                     Button(edit.track == nil ? tr("Importer") : tr("Enregistrer")) {
                         sending = true
@@ -206,6 +204,8 @@ struct Mp3EditView: View {
                 resetCover = false
             }
         }
+        // Messages (envoi en cours, erreur) par-dessus la fenêtre : avant, affichés dessous, on ne les voyait qu'en la fermant.
+        .toastOverlay()
     }
 }
 
@@ -342,7 +342,7 @@ struct TrimBar: View {
                         let v = peaks.isEmpty ? 0.12 : CGFloat(peaks[min(i, peaks.count - 1)])
                         let mid = (Double(i) + 0.5) / Double(Self.bars) * length
                         Capsule()
-                            .fill(.white.opacity(mid < from || mid > to ? 0.3 : 0.9))
+                            .fill(.primary.opacity(mid < from || mid > to ? 0.3 : 0.9)) // noir en mode clair (blanc : invisible sur la carte)
                             .frame(maxWidth: 4)
                             .frame(height: max(4, v * h))
                             .frame(maxWidth: .infinity)
@@ -351,12 +351,12 @@ struct TrimBar: View {
                 .frame(width: w, height: h)
                 // Cadre : un trait en haut et un en bas, entre les deux poignées.
                 ForEach([-4.0, h + 4], id: \.self) { y in
-                    Rectangle().fill(.white.opacity(0.85))
+                    Rectangle().fill(.primary.opacity(0.85))
                         .frame(width: max(x(to) - x(from), 0), height: 3)
                         .position(x: (x(from) + x(to)) / 2, y: y)
                 }
                 if let playhead {
-                    Capsule().fill(.white)
+                    Capsule().fill(.primary)
                         .frame(width: 3, height: h + 16)
                         .shadow(color: .black.opacity(0.6), radius: 2)
                         .position(x: x(playhead), y: h / 2)

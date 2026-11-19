@@ -165,7 +165,7 @@ impl Engine {
     pub fn skip_next(&self) { let _ = self.tx.send(Cmd::SkipNext); }
     /// Fondu enchaîné entre deux pistes (0 à 12 s ; 0 = enchaînement sans coupure classique).
     pub fn set_crossfade(&self, ms: u64) { self.shared.crossfade_ms.store(ms.min(12_000), Ordering::Relaxed); }
-    /// Gain en décibels (−10 à +12 dB) : négatif = son plus faible. Au-delà de 0 dB, un limiteur doux évite l'écrêtage brutal.
+    /// Gain en décibels (−10 à +12 dB) : négatif = son plus faible. Au-delà de 0 dB, le limiteur de crête évite l'écrêtage.
     pub fn set_boost_db(&self, db: f32) {
         let gain = 10f32.powf(db.clamp(-10.0, 12.0) / 20.0);
         self.shared.boost.store(gain.to_bits(), Ordering::Relaxed);
@@ -304,15 +304,44 @@ fn open_output(shared: Arc<Shared>, wanted: Option<&str>) -> Result<Output, Audi
     Ok(Output { stream, running: true, producer, ctl, rate, channels, name })
 }
 
-/// Limiteur doux : linéaire jusqu'à 0,8, puis compression progressive qui tend vers 1,0 sans jamais le dépasser
-/// (évite la distorsion dure d'un écrêtage quand le gain dépasse le maximum d'origine).
-fn soft_limit(x: f32) -> f32 {
-    const KNEE: f32 = 0.8;
-    let a = x.abs();
-    if a <= KNEE {
-        x
-    } else {
-        x.signum() * (KNEE + (1.0 - KNEE) * ((a - KNEE) / (1.0 - KNEE)).tanh())
+/// Limiteur de crête : transparent tant que le son reste sous `CEIL` (échantillons inchangés). Au-dessus
+/// (amplification, égaliseur, fondu enchaîné), le gain baisse juste assez pour ne pas dépasser, puis remonte en ~0,15 s.
+/// Avant : un écrêteur doux déformait chaque pic au-delà de 0,8 dès que l'amplification ou l'égaliseur était actif
+/// (même avec seulement des baisses), et pendant tout un fondu enchaîné : son saturé, écrasé.
+struct Limiter {
+    /// Réduction en cours (0 : aucune, son inchangé). Gardée en réduction plutôt qu'en gain : elle décroît par
+    /// multiplication, sans rester bloquée juste sous 1 (précision des f32).
+    reduction: f32,
+    decay: f32,
+}
+
+impl Limiter {
+    const CEIL: f32 = 0.98;
+
+    fn new(rate: u32) -> Self {
+        Self { reduction: 0.0, decay: (-1.0 / (rate.max(1) as f32 * 0.15)).exp() }
+    }
+
+    /// Début d'une trame : la réduction s'efface doucement (exactement 0 une fois revenue : son inchangé).
+    #[inline]
+    fn frame(&mut self) {
+        if self.reduction > 0.0 {
+            self.reduction *= self.decay;
+            if self.reduction < 1e-4 {
+                self.reduction = 0.0;
+            }
+        }
+    }
+
+    #[inline]
+    fn apply(&mut self, y: f32) -> f32 {
+        let a = y.abs();
+        let mut gain = 1.0 - self.reduction;
+        if a * gain > Self::CEIL {
+            gain = Self::CEIL / a;
+            self.reduction = 1.0 - gain;
+        }
+        y * gain
     }
 }
 
@@ -329,6 +358,7 @@ struct Renderer {
     gain: usize,
     /// Durée du fondu en trames (5 ms).
     ramp: usize,
+    limiter: Limiter,
     /// iPhone : trames entrelacées le temps de les séparer en gauche / droite (alloué une fois, à la création).
     #[cfg(target_os = "ios")]
     scratch: Vec<f32>,
@@ -344,6 +374,7 @@ impl Renderer {
             channels,
             gain: 0, // le son monte en 5 ms au premier rendu
             ramp: (rate as usize / 200).max(1),
+            limiter: Limiter::new(rate),
             #[cfg(target_os = "ios")]
             scratch: vec![0.0; 4096 * channels.max(1)],
         }
@@ -352,7 +383,7 @@ impl Renderer {
     /// Remplit `data` (échantillons entrelacés). `silence` et `conv` : le format d'échantillon de la sortie.
     #[inline]
     fn render<T: Copy>(&mut self, data: &mut [T], silence: T, conv: impl Fn(f32) -> T) {
-        let Self { cons, ctl, eq, bands, channels, gain, ramp, .. } = self;
+        let Self { cons, ctl, eq, bands, channels, gain, ramp, limiter, .. } = self;
         // Vidage demandé (saut, autre titre, arrêt) : le son en cours descend d'abord à zéro en 5 ms, puis le tampon est
         // vidé. Le nouveau son remonte ensuite en 5 ms. Avant, la coupure nette faisait un petit clic.
         let req = ctl.flush_req.load(Ordering::Acquire);
@@ -380,9 +411,6 @@ impl Renderer {
         let measure = ctl.shared.levels_on.load(Ordering::Relaxed);
         let vol = f32::from_bits(ctl.shared.volume.load(Ordering::Relaxed)) * f32::from_bits(ctl.shared.boost.load(Ordering::Relaxed));
         eq.set(std::array::from_fn(|i| ctl.shared.eq[i].load(Ordering::Relaxed)));
-        // Le limiteur n'intervient que si le gain dépasse 1 (volume + amplification, ou un réglage d'égaliseur actif) :
-        // au maximum d'origine et à plat, le son est strictement inchangé.
-        let limit = vol > 1.0 || eq.active();
         let mut n = 0u64;
         let ch = (*channels).max(1);
         // Trame entière (un échantillon par canal) ou rien : son en retard, la fin du tampon est du silence
@@ -390,6 +418,7 @@ impl Renderer {
         let mut starved = false;
         for (i, s) in data.iter_mut().enumerate() {
             if i % ch == 0 {
+                limiter.frame();
                 if fading {
                     *gain = gain.saturating_sub(1);
                 }
@@ -411,7 +440,7 @@ impl Renderer {
                     if *gain < ramp {
                         y *= *gain as f32 / ramp as f32;
                     }
-                    *s = conv(if limit { soft_limit(y) } else { y });
+                    *s = conv(limiter.apply(y));
                     n += 1;
                 }
                 None => *s = silence,
@@ -873,7 +902,13 @@ impl Track {
             let mut buf = Vec::new();
             match self.step(ch, &mut buf)? {
                 Step::Samples => self.pending.extend_from_slice(&buf),
-                Step::Eof => self.eof = true,
+                Step::Eof => {
+                    // Fin du titre : ce que retient encore le rééchantillonneur (avant, ~25 ms perdues à chaque titre).
+                    if let Some(rs) = &mut self.rs {
+                        rs.flush(&mut self.pending);
+                    }
+                    self.eof = true;
+                }
             }
         }
         Ok(())
@@ -931,8 +966,8 @@ impl Track {
 
 /// Mélange deux blocs entrelacés avec une courbe à puissance constante (cos / sin) :
 /// le volume perçu reste stable pendant tout le fondu.
-/// Au milieu du fondu, deux titres forts s'additionnent (jusqu'à ×1,41) : le limiteur doux évite l'écrêtage
-/// (il ne touche à rien sous 0,8, donc les passages normaux restent intacts).
+/// Au milieu du fondu, deux titres forts s'additionnent (jusqu'à ×1,41) : le limiteur de la sortie évite l'écrêtage
+/// (il ne touche à rien sous son plafond, donc les passages normaux restent intacts).
 fn mix_equal_power(a: &[f32], b: &[f32], ch: usize, start_frame: u64, total_frames: u64) -> Vec<f32> {
     let total = total_frames.max(1) as f32;
     let mut out = Vec::with_capacity(a.len());
@@ -940,7 +975,7 @@ fn mix_equal_power(a: &[f32], b: &[f32], ch: usize, start_frame: u64, total_fram
         let t = ((start_frame + i as u64) as f32 / total).clamp(0.0, 1.0);
         let (gain_in, gain_out) = (t * std::f32::consts::FRAC_PI_2).sin_cos();
         for c in 0..ch {
-            out.push(soft_limit(fa[c] * gain_out + fb[c] * gain_in));
+            out.push(fa[c] * gain_out + fb[c] * gain_in); // dépassements : limiteur de la sortie
         }
     }
     out
@@ -1839,11 +1874,13 @@ mod tests {
             assert!((si * si + co * co - 1.0).abs() < 1e-5);
             assert!(f[0] > 0.49, "pas de creux de volume au milieu du fondu: {}", f[0]);
         }
-        // Deux titres à pleine puissance : la somme (jusqu'à 1,41) ne dépasse jamais 1, donc pas d'écrêtage.
+        // Deux titres à pleine puissance : la somme (jusqu'à 1,41) n'est plus déformée ici ; le limiteur de la sortie la
+        // ramène sous son plafond, sans écrêtage.
         let loud = vec![1.0f32; n * 2];
         let out3 = mix_equal_power(&loud, &loud, 2, 0, n as u64);
-        assert!(out3.iter().all(|&x| x <= 1.0), "écrêtage pendant le fondu");
-        assert!(out3[n] > 0.95, "le milieu du fondu reste fort (compressé, pas écrasé) : {}", out3[n]);
+        assert!(out3[n] > 1.3, "somme intacte au milieu du fondu : {}", out3[n]);
+        let mut l = Limiter::new(48_000);
+        assert!(out3.iter().all(|&x| l.apply(x) <= Limiter::CEIL + 1e-6), "écrêtage pendant le fondu");
         // Sources opposées au milieu : tout vient de la piste sortante au début.
         let out2 = mix_equal_power(&[0.6, 0.6], &[0.0, 0.0], 2, 0, 100);
         assert!((out2[0] - 0.6).abs() < 1e-3);
@@ -1887,20 +1924,20 @@ mod tests {
     }
 
     #[test]
-    fn soft_limit_is_transparent_below_the_knee_and_never_exceeds_one() {
-        for x in [0.0f32, 0.1, -0.5, 0.79, -0.8] {
-            assert_eq!(soft_limit(x), x, "inchangé sous le seuil");
+    fn limiter_is_transparent_below_the_ceiling_and_never_exceeds_it() {
+        let mut l = Limiter::new(48_000);
+        for x in [0.0f32, 0.3, -0.7, 0.97, -0.98] {
+            l.frame();
+            assert_eq!(l.apply(x), x, "inchangé sous le plafond");
         }
-        let mut prev = soft_limit(0.8);
-        for i in 1..=200 {
-            let x = 0.8 + i as f32 * 0.05; // jusqu'à ~10,8 (gain énorme)
-            let y = soft_limit(x);
-            assert!(y >= prev && y <= 1.0, "croissant et borné par 1.0 : {x} -> {y}");
-            assert_eq!(soft_limit(-x), -y, "symétrique");
-            prev = y;
+        for x in [1.5f32, -2.0, 1.2, 4.0] {
+            l.frame();
+            assert!(l.apply(x).abs() <= Limiter::CEIL + 1e-6, "jamais au-dessus du plafond : {x}");
         }
-        assert!((soft_limit(0.8001) - 0.8001).abs() < 1e-3, "continu au seuil");
-        let y = soft_limit(1.5);
-        assert!(y > 0.8 && y < 1.0, "un pic à 1,5 est compressé sous 1,0 sans être écrasé : {y}");
+        // Après les pics, le gain remonte : 2 s plus tard, le son est de nouveau strictement inchangé.
+        for _ in 0..96_000 {
+            l.frame();
+        }
+        assert_eq!(l.apply(0.5), 0.5);
     }
 }

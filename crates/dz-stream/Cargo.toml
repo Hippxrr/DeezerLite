@@ -10,7 +10,6 @@ futures-util.workspace = true
 bytes = "1"
 symphonia.workspace = true
 thiserror.workspace = true
-lru.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread"] }

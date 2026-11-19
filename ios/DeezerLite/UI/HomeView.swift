@@ -37,6 +37,8 @@ struct HomeView: View {
                         }
                     }
                     .transition(.opacity)
+                } else if player.loadFailed.contains("home") {
+                    RetryNote { await player.loadHome(force: true) }
                 } else {
                     SkeletonShelf()
                     SkeletonShelf()

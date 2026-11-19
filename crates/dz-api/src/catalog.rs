@@ -20,6 +20,9 @@ pub struct LyricLine {
 /// Paroles d'un titre sur le service récent de Deezer : lignes synchronisées, sinon le texte seul.
 const PIPE_LYRICS: &str = "query TrackLyrics($trackId: String!) { track(trackId: $trackId) { id lyrics { id text copyright synchronizedLines { line milliseconds } } } }";
 
+/// Titres aimés coupés par le réseau en cours de route (message traduit par les apps).
+const LOVED_INCOMPLETE: &str = "titres aimés incomplets (réseau), réessaie";
+
 /// Réponse du service récent : `None` s'il n'a pas de paroles pour ce titre.
 fn lyrics_from_pipe(data: &Value) -> Option<Lyrics> {
     let l = data.pointer("/track/lyrics").filter(|v| !v.is_null())?;
@@ -74,6 +77,8 @@ pub struct SearchResults {
     pub albums: Vec<Card>,
     pub artists: Vec<Card>,
     pub playlists: Vec<Card>,
+    /// L'artiste cherché, s'il y en a un (fiche en tête des résultats) ; il est aussi le premier de `artists`.
+    pub top_artist: Option<Card>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -430,10 +435,14 @@ fn artist_cards(items: &[Value]) -> Vec<Card> {
         .collect()
 }
 
-/// Artistes d'une recherche : le plus suivi d'abord (un homonyme peu connu ne passe plus devant l'artiste cherché),
-/// avec le nombre de fans en sous-titre (« 9 028 132 fans »).
-fn search_artists(items: &[Value]) -> Vec<Card> {
-    let mut found: Vec<(u64, Card)> = items
+/// Artistes d'une recherche, avec le nombre de fans en sous-titre (« 9 028 132 fans »), et l'artiste cherché s'il y en a
+/// un. Nom comparé sans majuscules, accents, espaces ni ponctuation, une ou deux fautes de frappe tolérées : « booskap »
+/// trouve Booska-P. Entre plusieurs noms proches, le plus suivi l'emporte, un nom identique comptant un peu plus : avant,
+/// le nom identique gagnait toujours (un « BooskaP » de 4 500 fans devant le Booska-P de 52 000 fans, l'artiste de tous les
+/// titres trouvés). Les noms proches d'abord, puis les autres, du plus suivi au moins suivi.
+fn search_artists(items: &[Value], query: &str) -> (Vec<Card>, Option<Card>) {
+    let q = search_key(query);
+    let mut found: Vec<(bool, f64, Card)> = items
         .iter()
         .filter_map(|a| {
             let mut card = artist_cards(std::slice::from_ref(a)).pop()?;
@@ -441,12 +450,76 @@ fn search_artists(items: &[Value]) -> Vec<Card> {
             if fans > 0 {
                 card.subtitle = format!("{} fans", group_digits(fans));
             }
-            Some((fans, card))
+            let close = closeness(&q, &search_key(&card.title));
+            // Un nom identique compte comme ~7 fois plus de fans, un début de nom ~3 fois.
+            let score = (1.0 + fans as f64).ln() + [0.0, 0.0, 1.0, 2.0][usize::from(close)];
+            Some((close > 0, score, card))
         })
         .collect();
-    // Tri stable : à nombre de fans égal, l'ordre de Deezer est gardé.
-    found.sort_by(|a, b| b.0.cmp(&a.0));
-    found.into_iter().map(|(_, c)| c).collect()
+    // Tri stable : à égalité, l'ordre de Deezer est gardé.
+    found.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.total_cmp(&a.1)));
+    let top = found.first().filter(|f| f.0).map(|f| f.2.clone());
+    (found.into_iter().map(|(_, _, c)| c).collect(), top)
+}
+
+/// Nom réduit pour le comparer à une recherche : minuscules, sans accents, sans espaces ni ponctuation (« Booska-P » et
+/// « booskap » donnent la même chose).
+fn search_key(s: &str) -> String {
+    s.chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| match c {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' => 'a',
+            'ç' => 'c',
+            'è' | 'é' | 'ê' | 'ë' => 'e',
+            'ì' | 'í' | 'î' | 'ï' => 'i',
+            'ñ' => 'n',
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' => 'o',
+            'ù' | 'ú' | 'û' | 'ü' => 'u',
+            'ý' | 'ÿ' => 'y',
+            c => c,
+        })
+        .filter(|c| c.is_alphanumeric())
+        .collect()
+}
+
+/// 3 : même nom ; 2 : le nom commence par la recherche (3 caractères au moins) ; 1 : une faute de frappe (deux à partir
+/// de 8 caractères ; deux lettres inversées comptent pour une) ; 0 : rien à voir.
+fn closeness(q: &str, name: &str) -> u8 {
+    let n = q.chars().count();
+    if n == 0 || name.is_empty() {
+        return 0;
+    }
+    if name == q {
+        return 3;
+    }
+    if n >= 3 && name.starts_with(q) {
+        return 2;
+    }
+    let allowed = match n {
+        0..=3 => 0,
+        4..=7 => 1,
+        _ => 2,
+    };
+    u8::from(allowed > 0 && within_typos(q, name, allowed))
+}
+
+/// Distance d'édition (lettre ajoutée, retirée, changée, ou deux lettres inversées) d'au plus `max`.
+fn within_typos(a: &str, b: &str, max: usize) -> bool {
+    let (a, b): (Vec<char>, Vec<char>) = (a.chars().collect(), b.chars().collect());
+    if a.len().abs_diff(b.len()) > max {
+        return false;
+    }
+    let mut d: Vec<Vec<usize>> = (0..=a.len()).map(|i| (0..=b.len()).map(|j| if i == 0 { j } else if j == 0 { i } else { 0 }).collect()).collect();
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            d[i][j] = (d[i - 1][j] + 1).min(d[i][j - 1] + 1).min(d[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                d[i][j] = d[i][j].min(d[i - 2][j - 2] + 1);
+            }
+        }
+    }
+    d[a.len()][b.len()] <= max
 }
 
 impl DeezerClient {
@@ -462,11 +535,13 @@ impl DeezerClient {
         });
         let r: Value = self.gw("deezer.pageSearch", &body).await?;
         let uid = self.user_id().await.unwrap_or(0);
+        let (artists, top_artist) = search_artists(data(&r, "ARTIST"), query);
         Ok(SearchResults {
             tracks: tracks(data(&r, "TRACK")),
             albums: album_cards(data(&r, "ALBUM")),
-            artists: search_artists(data(&r, "ARTIST")),
+            artists,
             playlists: playlist_cards(data(&r, "PLAYLIST"), uid),
+            top_artist,
         })
     }
 
@@ -635,7 +710,7 @@ impl DeezerClient {
         })
         .await;
         if failed.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(DeezerError::Gateway("titres aimés incomplets (réseau), réessaie".into()));
+            return Err(DeezerError::Gateway(LOVED_INCOMPLETE.into()));
         }
         let mut seen = std::collections::HashSet::new();
         let mut v: Vec<(i64, u64)> = items
@@ -670,10 +745,16 @@ impl DeezerClient {
             self.apply_cover_fixes(&mut v);
             return Ok(v);
         }
-        let mut fresh = self.fetch_loved().await?;
+        let gen = self.loved_gen.load(std::sync::atomic::Ordering::Relaxed);
+        let (mut fresh, complete) = self.fetch_loved().await?;
         self.apply_cover_fixes(&mut fresh);
-        if let Ok(mut g) = self.loved_cache.lock() {
-            *g = Some((uid, std::time::Instant::now(), fresh.clone()));
+        // Un « j'aime » arrivé pendant le chargement : la liste est déjà dépassée, elle n'est pas gardée (avant, la synchro
+        // suivante des titres aimés téléchargés la reprenait et supprimait le titre tout juste aimé).
+        // Liste de secours (onglet du profil, peut-être coupée) : pas gardée non plus, la suivante redemande la vraie.
+        if complete && gen == self.loved_gen.load(std::sync::atomic::Ordering::Relaxed) {
+            if let Ok(mut g) = self.loved_cache.lock() {
+                *g = Some((uid, std::time::Instant::now(), fresh.clone()));
+            }
         }
         Ok(fresh)
     }
@@ -728,14 +809,23 @@ impl DeezerClient {
     }
 
     fn invalidate_loved(&self) {
+        self.loved_gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Ok(mut g) = self.loved_cache.lock() {
             *g = None;
         }
     }
 
-    /// `song.getFavoriteIds` puis détails par lots ; à défaut, onglet du profil.
-    async fn fetch_loved(&self) -> Result<Vec<TrackInfo>> {
+    /// `song.getFavoriteIds` puis détails par lots ; à défaut, onglet du profil. Le booléen : liste sûrement complète
+    /// (faux pour l'onglet du profil, qui peut s'arrêter à sa première page).
+    async fn fetch_loved(&self) -> Result<(Vec<TrackInfo>, bool)> {
         let ids_result = self.favorite_ids().await;
+        // Favoris coupés par le réseau en cours de route : erreur, pas l'onglet du profil à la place (ses 500 premiers
+        // titres seulement : la synchro des titres aimés téléchargés aurait supprimé tous les autres).
+        if let Err(DeezerError::Gateway(m)) = &ids_result {
+            if m == LOVED_INCOMPLETE {
+                return Err(DeezerError::Gateway(LOVED_INCOMPLETE.into()));
+            }
+        }
         if let Ok(ids) = &ids_result {
             let lots: Vec<Vec<i64>> = ids.chunks(100).map(|chunk| chunk.iter().map(|p| p.0).collect()).collect();
             let batches = lots.into_iter().map(|list| async move {
@@ -763,12 +853,12 @@ impl DeezerClient {
                 })
                 .collect();
             if !out.is_empty() {
-                return Ok(out);
+                return Ok((out, true));
             }
         }
         match self.profile_tab("loved").await {
-            Ok(t) => Ok(tracks(t.get("data").and_then(Value::as_array).map_or(&[][..], Vec::as_slice))),
-            Err(e) => ids_result.map(|_| Vec::new()).or(Err(e)),
+            Ok(t) => Ok((tracks(t.get("data").and_then(Value::as_array).map_or(&[][..], Vec::as_slice)), false)),
+            Err(e) => ids_result.map(|_| (Vec::new(), true)).or(Err(e)),
         }
     }
 
@@ -1144,9 +1234,32 @@ mod tests {
             serde_json::json!({ "ART_ID": "2", "ART_NAME": "Ninho", "NB_FAN": "9028132" }),
             serde_json::json!({ "ART_ID": "0", "ART_NAME": "Sans id" }),
         ];
-        let found = search_artists(&items);
+        let (found, top) = search_artists(&items, "");
         assert_eq!(found.iter().map(|c| c.id).collect::<Vec<_>>(), vec![2, 1]);
         assert_eq!(found[0].subtitle, "9\u{202f}028\u{202f}132 fans");
+        assert!(top.is_none(), "rien de tapé : pas d'artiste en tête");
+        assert_eq!(search_artists(&items, "ninho").1.map(|c| c.id), Some(2));
+    }
+
+    /// Ce que Deezer renvoie pour « booskap » (extrait) : Booska-P en tête, pas l'homonyme exact moins suivi ni l'artiste
+    /// le plus suivi au nom différent.
+    #[test]
+    fn search_artist_ignores_punctuation_and_small_typos() {
+        let items = vec![
+            serde_json::json!({ "ART_ID": "1", "ART_NAME": "Booska-P", "NB_FAN": "52089" }),
+            serde_json::json!({ "ART_ID": "2", "ART_NAME": "Booska-p", "NB_FAN": "51" }),
+            serde_json::json!({ "ART_ID": "3", "ART_NAME": "Boomkat", "NB_FAN": "640" }),
+            serde_json::json!({ "ART_ID": "4", "ART_NAME": "BooskaP", "NB_FAN": "4520" }),
+            serde_json::json!({ "ART_ID": "5", "ART_NAME": "Booka Shade", "NB_FAN": "74814" }),
+        ];
+        let (found, top) = search_artists(&items, "booskap");
+        assert_eq!(top.map(|c| c.id), Some(1));
+        assert_eq!(found.iter().map(|c| c.id).collect::<Vec<_>>(), vec![1, 4, 2, 5, 3], "noms proches d'abord");
+        // Lettres inversées, accents, espaces.
+        let items = vec![serde_json::json!({ "ART_ID": "7", "ART_NAME": "Angèle", "NB_FAN": "2000000" })];
+        assert_eq!(search_artists(&items, "angle").1.map(|c| c.id), Some(7));
+        assert_eq!(search_artists(&items, "a n g e l e").1.map(|c| c.id), Some(7));
+        assert!(search_artists(&items, "pousse toi").1.is_none());
     }
     use super::*;
 

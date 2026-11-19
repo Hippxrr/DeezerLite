@@ -150,7 +150,9 @@ struct SearchView: View {
                         Text(tr("Aucun résultat.")).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.top, 40)
                     }
                     // Un artiste recherché : sa fiche en tête (photo, dernière sortie), puis ses titres et albums.
-                    let top = topArtist(r)
+                    // Choisi par le cœur : nom sans tirets ni accents, petites fautes tolérées, le plus suivi parmi les noms
+                    // proches (« booskap » donne Booska-P). Rien pour un titre de chanson.
+                    let top = r.topArtist
                     if let top { TopArtist(card: top, onOpen: remember) }
                     // Nouveaux résultats : une nouvelle grille apparaît en fondu, à partir du début. Avec la même grille, le
                     // nombre de lignes changeait et les titres glissaient d'une colonne à l'autre, vers la droite.
@@ -168,6 +170,8 @@ struct SearchView: View {
                 }
             }
             .padding(.vertical, 12)
+            // Ici plutôt qu'avec les réactions plus bas : la chaîne de la page reste courte pour le compilateur.
+            .navigationDestination(for: SearchTracksPage.self) { _ in AllTracks(tracks: results?.tracks ?? [], onOpen: remember) }
         }
         // Glisser sur la page baisse le clavier, même si elle est trop courte pour défiler (sinon le geste ne faisait rien).
         .scrollBounceBehavior(.always, axes: .vertical)
@@ -191,15 +195,6 @@ struct SearchView: View {
 
     private func remember(_ card: Card) { player.remember(.card(card)) }
 
-    /// Artiste qui correspond à ce qui est tapé (« ninho » → Ninho ; rien pour un titre de chanson). Les artistes
-    /// arrivent du plus suivi au moins suivi : à nom égal, c'est le plus connu qui est choisi, pas un homonyme.
-    private func topArtist(_ r: SearchResults) -> Card? {
-        let fold = { (s: String) in s.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
-            .trimmingCharacters(in: .whitespaces) }
-        let q = fold(resultsQuery)
-        return r.artists.first { fold($0.title) == q }
-            ?? (q.count >= 3 ? r.artists.first { fold($0.title).hasPrefix(q) } : nil)
-    }
 
     private func run(after delay: Duration) {
         pending?.cancel()
@@ -308,9 +303,9 @@ private struct TrackPages: View {
     var body: some View {
         let shown = Array(tracks.prefix(18))
         VStack(alignment: .leading, spacing: 10) {
-            NavigationLink {
-                AllTracks(tracks: tracks, onOpen: onOpen)
-            } label: {
+            // Par la pile de l'onglet (une valeur, pas une vue) : avant, « Aller à l'album » depuis la liste la retirait au lieu
+            // de s'ouvrir par-dessus, et un nouvel appui sur l'onglet Recherche ne la refermait pas.
+            NavigationLink(value: SearchTracksPage()) {
                 HStack(spacing: 6) {
                     Text(tr("Titres")).font(.title3.bold())
                     Image(systemName: "chevron.right").font(.subheadline.weight(.bold)).foregroundStyle(.secondary)
@@ -338,6 +333,9 @@ private struct TrackPages: View {
         }
     }
 }
+
+/// Page « Titres » de la recherche : ses titres sont ceux des résultats affichés.
+private struct SearchTracksPage: Hashable {}
 
 /// Tous les titres trouvés, en liste.
 private struct AllTracks: View {
@@ -413,10 +411,12 @@ private struct HistoryList: View {
         switch entry.kind {
         case .query:
             Image(systemName: "clock.arrow.circlepath").font(.title3).foregroundStyle(.secondary).frame(width: 44, height: 44)
+        // Pochettes choisies sur ce téléphone (MP3, playlists, Titres aimés), comme partout ailleurs.
         case .track:
-            CoverView(url: entry.coverUrl, side: 44, radius: 6)
+            CoverView(url: entry.trackId.flatMap { $0 < 0 ? player.customCovers["mp3\($0)"] : nil } ?? entry.coverUrl, side: 44, radius: 6)
         case .card:
-            CoverView(url: entry.card?.coverUrl, side: 44, radius: 6, round: entry.card?.kind == "artist")
+            CoverView(url: entry.card.flatMap { player.coverURL(kind: $0.kind, id: $0.id, fallback: $0.coverUrl) },
+                      side: 44, radius: 6, round: entry.card?.kind == "artist")
         }
     }
 

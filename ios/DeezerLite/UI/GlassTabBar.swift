@@ -45,7 +45,7 @@ struct GlassTabBar: View {
     /// Ordre à l'écran : accueil, bibliothèque, recherche.
     private static let order = [0, 2, 1]
 
-    private var hasMini: Bool { player.current != nil || player.loading }
+    private var hasMini: Bool { player.hasTrack || player.loading }
     private var folded: Bool { collapsed && hasMini }
     private var leftTab: Int { tab == 1 ? lastPage : tab }
 

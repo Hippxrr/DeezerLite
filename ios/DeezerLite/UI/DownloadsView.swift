@@ -154,17 +154,16 @@ private struct DownloadActivity: View {
         }
     }
 
-    private var hasActivity: Bool {
-        queuedCount > 0 || player.downloadStates.values.contains { $0.state == .downloading }
-    }
-
     var body: some View {
-        if hasActivity {
+        // Calculés une fois par rendu (avant, chacun 2 à 3 fois, à chaque progression d'un téléchargement).
+        let queued = queuedCount, failures = failedCount, rows = active
+        let busy = queued > 0 || player.downloadStates.values.contains { $0.state == .downloading }
+        if busy {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(tr("Téléchargements en cours")).font(.title3.bold())
-                    if queuedCount > 0 {
-                        Text(tr("%@ en attente", "\(queuedCount)")).font(.subheadline).foregroundStyle(.secondary)
+                    if queued > 0 {
+                        Text(tr("%@ en attente", "\(queued)")).font(.subheadline).foregroundStyle(.secondary)
                     }
                 }
                 Spacer()
@@ -174,21 +173,21 @@ private struct DownloadActivity: View {
                 }
                 .buttonStyle(.bordered)
             }
-        } else if failedCount > 0 {
+        } else if failures > 0 {
             Text(tr("Téléchargements en échec")).font(.title3.bold())
         }
 
-        if !active.isEmpty {
+        if !rows.isEmpty {
             LazyVStack(alignment: .leading, spacing: 12) {
-                ForEach(active, id: \.id) { update in
+                ForEach(rows, id: \.id) { update in
                     activeRow(update)
                 }
             }
         }
 
-        if failedCount > 0 {
+        if failures > 0 {
             HStack {
-                Text(failedCount == 1 ? tr("1 échec") : tr("%@ échecs", "\(failedCount)"))
+                Text(failures == 1 ? tr("1 échec") : tr("%@ échecs", "\(failures)"))
                     .font(.subheadline).foregroundStyle(.secondary)
                 Spacer()
                 Button(tr("Tout réessayer")) { retryFailed() }

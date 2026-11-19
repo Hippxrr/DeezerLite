@@ -331,6 +331,13 @@ fn remove_orphans(root: &Path, entries: &BTreeMap<i64, OfflineTrack>, collection
     }
 }
 
+/// Fichiers posés directement dans `root` (index, file d'attente), sans les dossiers.
+fn top_level_bytes(root: &Path) -> u64 {
+    std::fs::read_dir(root)
+        .map(|dir| dir.flatten().filter_map(|e| e.metadata().ok()).filter(|m| m.is_file()).map(|m| m.len()).sum())
+        .unwrap_or(0)
+}
+
 fn stored_bytes(root: &Path) -> u64 {
     let mut total = 0;
     if let Ok(entries) = std::fs::read_dir(root) {
@@ -419,8 +426,11 @@ impl OfflineStore {
         })
     }
 
+    /// Titre téléchargé et son fichier complet sur le téléphone. Sans copier la fiche ni chercher sa pochette (avant, via
+    /// `local` : deux copies et deux accès disque, à chaque titre lancé, préparé ou téléchargé).
     pub fn contains(&self, id: i64) -> bool {
-        self.local(id).is_some()
+        let Some((ext, bytes)) = self.entries.read().ok().and_then(|e| e.get(&id).map(|t| (t.ext.clone(), t.bytes))) else { return false };
+        audio_path(&self.root, id, &ext).metadata().is_ok_and(|m| m.len() == bytes)
     }
 
     /// Nom, artiste et album à jour pour des titres téléchargés (MP3 importés renommés ici ou ailleurs) :
@@ -460,10 +470,6 @@ impl OfflineStore {
         self.entries.read().map(|e| e.keys().copied().collect()).unwrap_or_default()
     }
 
-    pub fn infos(&self) -> Vec<TrackInfo> {
-        self.list().iter().map(|e| self.display_info(e)).collect()
-    }
-
     pub fn collections(&self) -> Vec<(OfflineCollection, usize)> {
         let available: BTreeSet<i64> = self.entries.read().map(|entries| entries.keys().copied().collect()).unwrap_or_default();
         let mut list: Vec<_> = self
@@ -489,26 +495,25 @@ impl OfflineStore {
     pub fn collection(&self, kind: &str, id: u64) -> Option<(OfflineCollection, Vec<TrackInfo>)> {
         let collection = self.collections.read().ok()?.get(&collection_key(kind, id))?.clone();
         let entries = self.entries.read().ok()?;
-        let mut covers: std::collections::HashMap<&str, Option<String>> = std::collections::HashMap::new();
-        let tracks = collection
-            .track_ids
-            .iter()
-            .filter_map(|id| entries.get(id))
-            .map(|entry| {
-                let mut info = entry.info.clone();
-                if let Some(cover) = entry.cover.as_deref() {
-                    let local = covers.entry(cover).or_insert_with(|| {
-                        let path = self.root.join(cover);
-                        path.exists().then(|| path.to_string_lossy().into_owned())
-                    });
-                    if let Some(path) = local {
-                        info.cover_url = Some(path.clone());
-                    }
-                }
-                info
-            })
-            .collect();
+        let mut covers = std::collections::HashMap::new();
+        let tracks = collection.track_ids.iter().filter_map(|id| entries.get(id)).map(|entry| self.local_info(entry, &mut covers)).collect();
         Some((self.display_collection(&collection), tracks))
+    }
+
+    /// Fiche affichée d'un titre téléchargé : avec sa pochette enregistrée sur le téléphone si elle y est. `covers` garde
+    /// la réponse par image (les titres d'un même album la partagent : un seul accès disque pour eux tous).
+    fn local_info<'a>(&self, entry: &'a OfflineTrack, covers: &mut std::collections::HashMap<&'a str, Option<String>>) -> TrackInfo {
+        let mut info = entry.info.clone();
+        if let Some(cover) = entry.cover.as_deref() {
+            let local = covers.entry(cover).or_insert_with(|| {
+                let path = self.root.join(cover);
+                path.exists().then(|| path.to_string_lossy().into_owned())
+            });
+            if let Some(path) = local {
+                info.cover_url = Some(path.clone());
+            }
+        }
+        info
     }
 
     pub fn standalone_infos(&self) -> Vec<TrackInfo> {
@@ -517,8 +522,14 @@ impl OfflineStore {
             .read()
             .map(|collections| collections.values().flat_map(|collection| collection.track_ids.iter().copied()).collect())
             .unwrap_or_default();
-        // Titres téléchargés seuls, même s'ils sont aussi dans une collection téléchargée.
-        self.list().iter().filter(|e| e.pinned || !grouped.contains(&e.info.id)).map(|e| self.display_info(e)).collect()
+        // Titres téléchargés seuls, même s'ils sont aussi dans une collection téléchargée. Choisis avant d'être copiés, et une
+        // vérification de pochette par image : avant, toutes les fiches étaient copiées et triées, puis une pochette
+        // vérifiée sur le disque par titre, à chaque fin de téléchargement.
+        let Ok(entries) = self.entries.read() else { return Vec::new() };
+        let mut alone: Vec<&OfflineTrack> = entries.values().filter(|e| e.pinned || !grouped.contains(&e.info.id)).collect();
+        alone.sort_by_key(|e| std::cmp::Reverse(e.downloaded_at));
+        let mut covers = std::collections::HashMap::new();
+        alone.into_iter().map(|entry| self.local_info(entry, &mut covers)).collect()
     }
 
     /// Le titre fait-il partie d'une collection téléchargée ?
@@ -578,8 +589,12 @@ impl OfflineStore {
         serde_json::from_slice::<LyricsFile>(&bytes).ok().map(|f| f.lyrics)
     }
 
+    /// Place prise : l'audio d'après l'index (tailles vérifiées à l'ouverture et à chaque téléchargement), plus les
+    /// pochettes et les fichiers d'index. Avant, tout le dossier était parcouru (un accès disque par fichier, des milliers
+    /// avec les paroles) à chaque fin de téléchargement. Les paroles (quelques Ko par titre) ne sont pas comptées.
     pub fn total_bytes(&self) -> u64 {
-        stored_bytes(&self.root)
+        let audio: u64 = self.entries.read().map(|e| e.values().map(|t| t.bytes).sum()).unwrap_or(0);
+        audio + stored_bytes(&self.root.join("covers")) + top_level_bytes(&self.root)
     }
 
     /// Un titre déjà attendu pour lui-même le reste (adresse renouvelée pendant le téléchargement d'une collection).
@@ -796,7 +811,10 @@ impl OfflineStore {
         // Fichier pas réécrit (disque plein) : l'écoute n'est plus en mémoire, elle ne repart donc plus pendant cette
         // session ; la prochaine écriture réussie l'efface du fichier. Au pire, un seul renvoi au lancement suivant.
         // (La remettre en mémoire la faisait renvoyer à Deezer à chaque envoi : comptée plusieurs fois.)
-        self.persist_listens()
+        // Sans attendre l'écriture physique : une par écoute envoyée (des centaines au retour du réseau), chacune forcée
+        // sur le disque usait la mémoire flash et la batterie. Seule une coupure de courant peut perdre la dernière
+        // version (au pire, une écoute renvoyée) ; l'app fermée par iOS, non.
+        self.write_manifest_sync("listens.json", &*self.listens, false)
     }
 
     /// Écoute en cours mise de côté (à une pause) ou oubliée (`None`, à la fin de l'écoute). Rien n'est écrit si rien
@@ -1034,12 +1052,17 @@ impl OfflineStore {
 
     /// Instantané pris sous le verrou d'écriture : le dernier écrit est toujours le plus récent.
     fn write_manifest<T: Serialize>(&self, name: &str, value: &RwLock<T>) -> io::Result<()> {
+        self.write_manifest_sync(name, value, true)
+    }
+
+    /// `sync` : voir `write_replace`.
+    fn write_manifest_sync<T: Serialize>(&self, name: &str, value: &RwLock<T>, sync: bool) -> io::Result<()> {
         let _guard = self.persist_lock.lock().map_err(|_| io::Error::other("écriture des manifests verrouillée"))?;
         let bytes = {
             let value = value.read().map_err(|_| io::Error::other("index verrouillé"))?;
             serde_json::to_vec(&*value).map_err(io::Error::other)?
         };
-        write_atomic(&self.root.join(name), &bytes)
+        write_replace(&self.root.join(name), &bytes, sync)
     }
 
     /// Réécriture complète de `downloads.json` (le journal y est alors fondu et vidé).
@@ -1560,8 +1583,17 @@ pub async fn repair_lyrics(api: Arc<DeezerClient>, store: OfflineStore) {
     }
     let _release = Release;
     // Absentes, illisibles (fichier abîmé), ou sans paroles synchronisées depuis plus d'une semaine : redemandées.
-    let ids: Vec<i64> = store.entries.read().map(|e| e.keys().copied().collect()).unwrap_or_default();
-    let missing: Vec<i64> = ids.into_iter().filter(|id| store.lyrics_due(*id)).take(LYRICS_RECHECK_MAX).collect();
+    // Un fichier lu par titre (souvent tous) : hors des fils du cœur, qui servent aussi au lecteur et à l'accueil au
+    // moment où la session s'ouvre.
+    let scan = store.clone();
+    let Ok(missing) = tokio::task::spawn_blocking(move || {
+        let ids: Vec<i64> = scan.entries.read().map(|e| e.keys().copied().collect()).unwrap_or_default();
+        ids.into_iter().filter(|id| scan.lyrics_due(*id)).take(LYRICS_RECHECK_MAX).collect::<Vec<i64>>()
+    })
+    .await
+    else {
+        return;
+    };
     // Par petits paquets : quelques requêtes à la fois, et arrêt dès que le réseau manque.
     for chunk in missing.chunks(3) {
         let results = futures_util::future::join_all(chunk.iter().map(|id| fetch_lyrics(&api, &store, *id))).await;
@@ -1576,10 +1608,11 @@ pub async fn repair_lyrics(api: Arc<DeezerClient>, store: OfflineStore) {
 /// autre titre. À lancer une fois la session ouverte : les adresses d'origine sont redemandées à Deezer (une requête
 /// pour 100 titres), puis chaque pochette est réparée titre par titre si besoin. Sans réseau ou sans session, rien
 /// n'est marqué vérifié et tout reprend plus tard. Le manifest est écrit par paquets (pas une écriture par titre).
-pub async fn repair_covers(api: Arc<DeezerClient>, store: OfflineStore) {
+/// Vrai si des pochettes ont été enregistrées (sinon rien à relire côté interface).
+pub async fn repair_covers(api: Arc<DeezerClient>, store: OfflineStore) -> bool {
     // Lancée au démarrage puis à l'ouverture de la session : une seule à la fois.
     if REPAIRING_COVERS.swap(true, Ordering::AcqRel) {
-        return;
+        return false;
     }
     struct Release;
     impl Drop for Release {
@@ -1590,11 +1623,13 @@ pub async fn repair_covers(api: Arc<DeezerClient>, store: OfflineStore) {
     let _release = Release;
     // Pas encore de session (démarrage, ou sans réseau) : relancée à l'ouverture de la session.
     if api.session().await.is_none() {
-        return;
+        return false;
     }
-    let entries = covers_to_check(&store);
+    // Un accès disque par titre : hors des fils du cœur, comme pour les paroles.
+    let scan = store.clone();
+    let Ok(entries) = tokio::task::spawn_blocking(move || covers_to_check(&scan)).await else { return false };
     if entries.is_empty() {
-        return;
+        return false;
     }
     // Adresses d'origine chez Deezer (celle gardée peut être une réparation fausse) : par paquets de 100.
     let ids: Vec<i64> = entries.iter().map(|e| e.info.id).collect();
@@ -1603,10 +1638,10 @@ pub async fn repair_covers(api: Arc<DeezerClient>, store: OfflineStore) {
         match api.tracks_info(chunk).await {
             Ok(found) => originals.extend(found.into_iter().filter_map(|t| Some((t.id, t.cover_url?)))),
             // Pas de réseau, ou Deezer ne répond pas : tout reprend plus tard.
-            Err(_) => return,
+            Err(_) => return false,
         }
     }
-    check_covers(&api, &store, entries, &originals).await;
+    check_covers(&api, &store, entries, &originals).await
 }
 
 /// Titres dont la pochette est à vérifier : jamais vérifiée dans la version actuelle, ou image absente du téléphone.
@@ -1626,7 +1661,8 @@ fn covers_to_check(store: &OfflineStore) -> Vec<OfflineTrack> {
 }
 
 /// Vérifie un lot de pochettes, 3 à la fois, et enregistre les résultats par paquets de 30.
-async fn check_covers(api: &DeezerClient, store: &OfflineStore, entries: Vec<OfflineTrack>, originals: &BTreeMap<i64, String>) {
+async fn check_covers(api: &DeezerClient, store: &OfflineStore, entries: Vec<OfflineTrack>, originals: &BTreeMap<i64, String>) -> bool {
+    let mut saved = false;
     let mut checks = futures_util::stream::iter(entries)
         .map(|entry| {
             let original = originals.get(&entry.info.id).cloned();
@@ -1641,11 +1677,13 @@ async fn check_covers(api: &DeezerClient, store: &OfflineStore, entries: Vec<Off
     while let Some(batch) = checks.next().await {
         let updates: Vec<CoverUpdate> = batch;
         if let Ok(replaced) = store.apply_cover_updates(&updates) {
+            saved = true;
             for old in replaced {
                 let _ = tokio::fs::remove_file(store.root.join(old)).await;
             }
         }
     }
+    saved
 }
 
 /// md5 d'une adresse de pochette Deezer (`…/images/cover/<md5>/…`).
@@ -1801,6 +1839,11 @@ fn audio_path(root: &Path, id: i64, ext: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Ce que `total_bytes` doit compter, relevé sur le disque : audio, pochettes et fichiers d'index.
+    fn counted_on_disk(root: &Path) -> u64 {
+        stored_bytes(&root.join("audio")) + stored_bytes(&root.join("covers")) + top_level_bytes(root)
+    }
 
     fn root(name: &str) -> PathBuf {
         let n = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -2042,7 +2085,7 @@ mod tests {
         assert!(!path.exists());
         assert!(store.list().is_empty());
         assert_eq!(audio_bytes(&store), 0);
-        assert_eq!(store.total_bytes(), stored_bytes(&root));
+        assert_eq!(store.total_bytes(), counted_on_disk(&root));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -2542,7 +2585,7 @@ mod tests {
         assert!(!root.join("covers/orphan.jpg").exists());
         assert!(root.join(cover).exists());
         assert!(root.join("Incoming/44.download").exists());
-        assert_eq!(restored.total_bytes(), stored_bytes(&root));
+        assert_eq!(restored.total_bytes(), counted_on_disk(&root));
         std::fs::remove_dir_all(root).unwrap();
     }
 

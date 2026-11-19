@@ -359,12 +359,7 @@ struct DetailView: View {
     var body: some View {
         pageWithPosition
         .scrollDismissesKeyboard(.interactively)
-        .background(alignment: .top) {
-            LinearGradient(colors: [tint.opacity(colorScheme == .dark ? 0.75 : 0.3), .clear], startPoint: .top, endPoint: .bottom)
-                .frame(height: 460)
-                .ignoresSafeArea()
-                .animation(.easeInOut(duration: 0.5), value: tint)
-        }
+        .background(alignment: .top) { tintGradient }
         .navigationTitle(pageTitle)
         .navigationBarTitleDisplayMode(.inline)
         .modifier(ListSearch(active: searching, text: $query, presented: $searching))
@@ -374,21 +369,7 @@ struct DetailView: View {
             if let d = detail, !d.offline { await player.checkCovers(d.tracks) }
         }
         .confirmationDialog(tr("Supprimer le téléchargement ?"), isPresented: $confirmRemoveDownload, titleVisibility: .visible) {
-            Button(tr("Supprimer"), role: .destructive) {
-                // Relu au moment de l'appui : la collection a pu être supprimée ailleurs entre-temps.
-                if let d = detail, let collection = player.downloadedCollection(kind: d.kind, id: d.id) {
-                    player.removeDownloadCollection(collection)
-                    // Copie hors ligne affichée : ses titres n'existent plus. Rechargée depuis Deezer, ou page fermée
-                    // sans réseau (avant, elle restait affichée et « Lecture » échouait).
-                    if d.offline {
-                        detail = nil
-                        Task {
-                            await load(force: true)
-                            if detail == nil { dismiss() }
-                        }
-                    }
-                }
-            }
+            Button(tr("Supprimer"), role: .destructive) { removeDownload() }
         } message: {
             Text(tr("Les titres de « %@ » seront supprimés de ce téléphone, sauf ceux qui font aussi partie d'une autre playlist ou d'un autre album téléchargé.", pageTitle))
         }
@@ -398,8 +379,8 @@ struct DetailView: View {
             if detail?.kind == "mp3", player.mp3Revision > 0 { await load(force: true) }
         }
         // Copie hors ligne : un titre supprimé de ce téléphone disparaît aussi de la page.
-        .onChange(of: player.downloadedIds) { _, ids in
-            guard detail?.offline == true else { return }
+        .onChange(of: offlineIds) { _, ids in
+            guard let ids, detail?.offline == true else { return }
             detail?.tracks.removeAll { !ids.contains($0.id) }
         }
         .task(id: detail.flatMap(coverURL) ?? "") {
@@ -411,6 +392,34 @@ struct DetailView: View {
         }
         .refreshable { await load(force: true) }
     }
+
+    // Sortis du `body`, comme `removeDownload` : sa longue chaîne approchait de ce que le compilateur sait vérifier à temps.
+    private var tintGradient: some View {
+        LinearGradient(colors: [tint.opacity(colorScheme == .dark ? 0.75 : 0.3), .clear], startPoint: .top, endPoint: .bottom)
+            .frame(height: 460)
+            .ignoresSafeArea()
+            .animation(.easeInOut(duration: 0.5), value: tint)
+    }
+
+    private func removeDownload() {
+        // Relu au moment de l'appui : la collection a pu être supprimée ailleurs entre-temps.
+        guard let d = detail, let collection = player.downloadedCollection(kind: d.kind, id: d.id) else { return }
+        let removal = player.removeDownloadCollection(collection)
+        // Copie hors ligne affichée : ses titres n'existent plus. Rechargée depuis Deezer, ou page fermée sans réseau
+        // (avant, elle restait affichée et « Lecture » échouait).
+        guard d.offline else { return }
+        detail = nil
+        Task {
+            // Après la suppression (sinon la copie, pas encore effacée, était relue : page vide ouverte).
+            await removal?.value
+            await load(force: true)
+            if detail == nil { dismiss() }
+        }
+    }
+
+    /// Titres du téléphone, suivis seulement sur une copie hors ligne : sur les autres pages, chaque titre téléchargé
+    /// redessinait toute la page (des milliers de fois pendant la synchro d'une grosse playlist).
+    private var offlineIds: Set<Int64>? { detail?.offline == true ? player.downloadedIds : nil }
 
     private var title: String {
         switch route {

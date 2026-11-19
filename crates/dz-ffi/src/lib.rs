@@ -295,6 +295,8 @@ pub struct SearchResults {
     pub albums: Vec<Card>,
     pub artists: Vec<Card>,
     pub playlists: Vec<Card>,
+    /// L'artiste cherché, s'il y en a un (voir `dz_api::SearchResults`).
+    pub top_artist: Option<Card>,
 }
 
 /// Une ligne de paroles ; `ms` = instant d'affichage (0 si les paroles ne sont pas synchronisées).
@@ -457,10 +459,11 @@ impl TrackCache {
     fn insert(&mut self, info: TrackInfo) {
         let stamp = self.next;
         self.next += 1;
-        if let Some((_, old)) = self.tracks.insert(info.id, (info.clone(), stamp)) {
+        let id = info.id; // sans copier la fiche (des milliers à chaque file reçue)
+        if let Some((_, old)) = self.tracks.insert(id, (info, stamp)) {
             self.order.remove(&old);
         }
-        self.order.insert(stamp, info.id);
+        self.order.insert(stamp, id);
     }
 
     fn evict(&mut self, keep: usize) {
@@ -548,8 +551,10 @@ impl Core {
         let cover_store = offline.clone();
         let cover_api = api.clone();
         rt.spawn(async move {
-            dz_offline::repair_covers(cover_api, cover_store).await;
-            cover_listener.on_event(Event::DownloadsChanged);
+            // Seulement si des pochettes ont changé : sinon l'interface relisait toutes les listes pour rien.
+            if dz_offline::repair_covers(cover_api, cover_store).await {
+                cover_listener.on_event(Event::DownloadsChanged);
+            }
         });
 
         // Événements du lecteur -> Swift.
@@ -577,6 +582,9 @@ impl Core {
                         }
                         continue;
                     }
+                    // Fiche complétée ou titre d'avant remis : affichée sans compter comme une annonce (avant, celle du titre
+                    // précédent, arrivée juste après un appui, faisait partir `Started` avant que le son soit audible).
+                    CoreEvent::TrackUpdated(t) => Event::Track { track: (&t).into() },
                     // Messages techniques traduits ; échec de préparation du titre suivant : rien à dire (réessayé au moment de le jouer).
                     CoreEvent::Error(message) => match friendly_error(&message) {
                         Some(message) => Event::Error { message },
@@ -827,11 +835,6 @@ impl Core {
         Ok(())
     }
 
-    /// Profil ouvert en ce moment (0 si aucune session).
-    pub async fn current_profile_id(&self) -> u64 {
-        self.api.session().await.map_or(0, |s| s.user_id)
-    }
-
     // --- Catalogue
 
     pub async fn home(&self) -> Result<Vec<Shelf>, CoreError> {
@@ -855,7 +858,8 @@ impl Core {
     pub async fn search(&self, query: String) -> Result<SearchResults, CoreError> {
         let api = self.api.clone();
         let r = self.run(async move { api.search_all(&query).await }).await??;
-        let out = SearchResults { tracks: tracks(&r.tracks), albums: cards(r.albums), artists: cards(r.artists), playlists: cards(r.playlists) };
+        let top_artist = cards(r.top_artist.into_iter().collect()).pop();
+        let out = SearchResults { tracks: tracks(&r.tracks), albums: cards(r.albums), artists: cards(r.artists), playlists: cards(r.playlists), top_artist };
         remember(&self.known, r.tracks);
         Ok(out)
     }
@@ -1185,10 +1189,6 @@ impl Core {
         self.offline.ids()
     }
 
-    pub fn downloads(&self) -> Vec<Track> {
-        tracks(&self.offline.infos())
-    }
-
     pub fn standalone_downloads(&self) -> Vec<Track> {
         tracks(&self.offline.standalone_infos())
     }
@@ -1340,28 +1340,46 @@ impl Core {
         let missing: Vec<i64> = missing.into_iter().filter(|id| !self.offline.contains(*id)).collect();
         // Fiches reçues gardées ici : le cache peut en oublier une partie pendant une très longue file.
         let mut fetched: HashMap<i64, TrackInfo> = HashMap::new();
-        for chunk in missing.chunks(100) {
-            let api = self.api.clone();
-            let chunk = chunk.to_vec();
-            // Un paquet qui échoue n'empêche pas la reprise : ses titres sont sautés.
-            if let Ok(Ok(found)) = self.run(async move { api.tracks_info(&chunk).await }).await {
-                fetched.extend(found.iter().cloned().map(|t| (t.id, t)));
-                remember(&self.known, found);
+        for group in missing.chunks(400) {
+            // Autre lecture demandée entre-temps : rien de plus n'est demandé à Deezer (avant, toute la file l'était).
+            if !self.still_wanted(play) {
+                return Ok(());
+            }
+            // 4 paquets de 100 en même temps (avant, l'un après l'autre : une très longue file mettait des secondes).
+            let asks: Vec<_> = group
+                .chunks(100)
+                .map(|chunk| {
+                    let (api, chunk) = (self.api.clone(), chunk.to_vec());
+                    self.rt.spawn(async move { api.tracks_info(&chunk).await })
+                })
+                .collect();
+            for ask in asks {
+                // Un paquet qui échoue n'empêche pas la reprise : ses titres sont sautés.
+                if let Ok(Ok(found)) = ask.await {
+                    fetched.extend(found.iter().cloned().map(|t| (t.id, t)));
+                    remember(&self.known, found);
+                }
             }
         }
         let known_now: Vec<Option<TrackInfo>> = {
             let known = self.known.lock().map_err(|_| CoreError::Player)?;
             ids.iter().map(|id| fetched.get(id).cloned().or_else(|| known.get(id).cloned())).collect()
         };
-        let tracks: Vec<TrackInfo> = ids
-            .iter()
-            .zip(known_now)
-            .filter_map(|(id, info)| info.or_else(|| self.offline.local(*id).map(|local| local.info)))
-            .collect();
+        let mut tracks: Vec<TrackInfo> = Vec::with_capacity(ids.len());
+        // Place du titre visé lui-même parmi les titres gardés (avant : sa première copie, si le titre était deux fois
+        // dans la file) ; introuvable, le suivant gardé.
+        let mut start = None;
+        for (i, (id, info)) in ids.iter().zip(known_now).enumerate() {
+            let Some(t) = info.or_else(|| self.offline.local(*id).map(|local| local.info)) else { continue };
+            if start.is_none() && i >= index as usize {
+                start = Some(tracks.len());
+            }
+            tracks.push(t);
+        }
         if tracks.is_empty() {
             return Err(CoreError::UnknownTrack);
         }
-        let start = target.and_then(|t| tracks.iter().position(|x| x.id == t)).unwrap_or(0);
+        let start = start.unwrap_or(0);
         let same_track = target == Some(tracks[start].id);
         if !self.still_wanted(play) {
             return Ok(());
@@ -1427,8 +1445,19 @@ impl Core {
         self.send(PlayerCmd::PlayQueue { tracks: list, index: 0 })
     }
 
-    pub fn queue_add(&self, ids: Vec<i64>, next: bool) -> Result<(), CoreError> {
-        let tracks = self.lookup(&ids)?;
+    pub async fn queue_add(&self, ids: Vec<i64>, next: bool) -> Result<(), CoreError> {
+        // Fiches oubliées par le cache (longue navigation depuis l'affichage du titre) : redemandées à Deezer, comme pour
+        // la reprise d'une file. Avant : « Titre inconnu ».
+        let tracks = match self.lookup(&ids) {
+            Ok(tracks) => tracks,
+            Err(_) => {
+                for chunk in ids.chunks(100) {
+                    let (api, chunk) = (self.api.clone(), chunk.to_vec());
+                    remember(&self.known, self.run(async move { api.tracks_info(&chunk).await }).await??);
+                }
+                self.lookup(&ids)?
+            }
+        };
         self.send(PlayerCmd::QueueAdd { tracks, next })
     }
 
@@ -1452,10 +1481,6 @@ impl Core {
 
     pub fn resume(&self) -> Result<(), CoreError> {
         self.player.resume().map_err(|_| CoreError::Player)
-    }
-
-    pub fn toggle(&self) -> Result<(), CoreError> {
-        if self.player.shared.playing.load(Ordering::Relaxed) { self.pause() } else { self.resume() }
     }
 
     pub fn next(&self) -> Result<(), CoreError> {
@@ -1575,8 +1600,9 @@ impl Core {
         // Pochettes pas encore vérifiées (app démarrée sans réseau : la vérification du démarrage n'a rien pu faire).
         let (api, store, listener) = (self.api.clone(), self.offline.clone(), self.listener.clone());
         self.rt.spawn(async move {
-            dz_offline::repair_covers(api, store).await;
-            listener.on_event(Event::DownloadsChanged);
+            if dz_offline::repair_covers(api, store).await {
+                listener.on_event(Event::DownloadsChanged);
+            }
         });
     }
 
@@ -1603,9 +1629,14 @@ impl Core {
             if copies != COPIES_GEN.load(Ordering::Acquire) {
                 return;
             }
-            let tmp = path.with_extension("tmp");
+            // Nom propre à chaque écriture : deux chargements simultanés (accueil, playlists) écrivaient le même fichier
+            // temporaire en même temps, et la copie pouvait se relire vide au lancement suivant.
+            static SEQ: AtomicU64 = AtomicU64::new(0);
+            let tmp = path.with_extension(format!("{}.tmp", SEQ.fetch_add(1, Ordering::Relaxed)));
             if std::fs::write(&tmp, bytes).is_ok() {
                 let _ = std::fs::rename(&tmp, &path);
+            } else {
+                let _ = std::fs::remove_file(&tmp);
             }
             // Copies effacées pendant l'écriture : celle-ci ne reste pas.
             if copies != COPIES_GEN.load(Ordering::Acquire) {

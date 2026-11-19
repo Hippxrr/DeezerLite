@@ -48,7 +48,12 @@ final class Player {
 
     /// `nil` tant que la session n'a pas été vérifiée au lancement.
     private(set) var loggedIn: Bool?
-    private(set) var current: Track?
+    private(set) var current: Track? {
+        didSet { if (current != nil) != hasTrack { hasTrack = current != nil } }
+    }
+    /// Un titre est affiché. Lu par la barre d'onglets et le mini-lecteur à la place de `current` : lire `current`
+    /// redessinait les onglets (et leurs pages) à chaque changement de titre.
+    private(set) var hasTrack = false
     private(set) var status = Status(playing: false, positionMs: 0, durationMs: 0)
     /// Instant où `status` a été reçu : la position affichée est extrapolée à partir de là, sans interroger Rust.
     private(set) var statusAt = Date()
@@ -169,6 +174,14 @@ final class Player {
             if sessionReady, profiles.isEmpty { Task { await loadProfiles() } }
             // Pages ouvertes pendant la coupure (copies hors ligne) : rechargées depuis Deezer à la prochaine visite.
             if sessionReady { forgetOfflineDetails() }
+            // Accueil et playlists pas encore chargés (échec, coupure) : redemandés maintenant.
+            if sessionReady {
+                Task {
+                    async let h: Void = loadHome(force: false)
+                    async let p: Void = loadLibrary(0, force: false)
+                    _ = await (h, p)
+                }
+            }
             // Lancé sans réseau : la session Deezer est ouverte maintenant que le réseau est revenu.
             if loggedIn == true, !sessionReady {
                 Task { await restore() }
@@ -200,15 +213,16 @@ final class Player {
 
     func download(_ detail: Detail) {
         guard core != nil, !detail.tracks.isEmpty else { return }
-        Task {
+        // Dans la file des modifications : passe après une suppression de cette collection demandée juste avant.
+        editDownloads {
             do {
-                let missing = try await storeDownloadCollection(detail)
+                let missing = try await self.storeDownloadCollection(detail)
                 if missing.isEmpty {
-                    showToast(tr("%@ est disponible hors ligne", detail.title))
+                    self.showToast(tr("%@ est disponible hors ligne", detail.title))
                 } else {
-                    download(missing)
+                    self.download(missing)
                 }
-            } catch { message = describe(error) }
+            } catch { self.message = self.describe(error) }
         }
     }
 
@@ -219,40 +233,42 @@ final class Player {
         let removed = try await core.downloadCollection(detail: detail)
         // Titres sortis de la collection : leur téléchargement en attente ne finit plus en titre téléchargé seul.
         if !removed.isEmpty { BackgroundDownloadManager.shared.cancel(removed) }
-        if refresh { refreshDownloads() } else { scheduleDownloadsRefresh() }
+        // Relues hors du fil principal : sur le fil principal, l'appui sur « Télécharger » figeait l'app avec une grosse
+        // bibliothèque hors ligne (toutes les fiches converties, un contrôle de fichier par titre).
+        if refresh { await refreshDownloadsInBackground() } else { scheduleDownloadsRefresh() }
         // Titres pas encore sortis ou retirés : Deezer refuse de les télécharger (ils échouaient à chaque lancement).
         return detail.tracks.filter { !downloadedIds.contains($0.id) && !$0.unavailable }
     }
 
-    private func syncDownloadedCollection(kind: String, id: UInt64) async -> Bool {
-        guard let core, downloadedCollection(kind: kind, id: id) != nil else { return false }
+    private func syncDownloadedCollection(kind: String, id: UInt64) async {
+        guard let core, downloadedCollection(kind: kind, id: id) != nil else { return }
         let gen = profileGeneration
+        let fresh: Detail
         do {
-            let fresh = kind == "loved"
+            fresh = kind == "loved"
                 ? try await core.lovedDetail()
                 : try await core.openDetail(kind: kind, id: id)
-            // Deezer injoignable : le cœur a renvoyé la copie hors ligne, qu'il ne faut pas réenregistrer
-            // (les titres pas encore téléchargés disparaîtraient de la collection).
-            guard !fresh.offline else { return false }
-            // Profil changé pendant la requête : la réponse peut être celle de l'autre profil.
-            guard gen == profileGeneration else { return false }
-            // La collection a pu être retirée des téléchargements pendant la requête.
-            guard downloadedCollection(kind: kind, id: id) != nil else { return true }
-            let missing = try await storeDownloadCollection(fresh, refresh: false)
+        } catch { return }
+        // Deezer injoignable : le cœur a renvoyé la copie hors ligne, qu'il ne faut pas réenregistrer
+        // (les titres pas encore téléchargés disparaîtraient de la collection).
+        guard !fresh.offline else { return }
+        // Dans la file des modifications, et relue là : une suppression demandée pendant la requête passe avant (avant,
+        // la collection supprimée était recréée puis retéléchargée en entier).
+        await editDownloads {
+            // Profil changé pendant la requête (la réponse peut être celle de l'autre profil), ou collection retirée.
+            guard gen == self.profileGeneration, self.downloadedCollection(kind: kind, id: id) != nil,
+                  let missing = try? await self.storeDownloadCollection(fresh, refresh: false) else { return }
             // Sauf ceux annulés ou supprimés à la main (voir `skippedDownloads`).
-            let new = missing.filter { downloadStates[$0.id] == nil && !skippedDownloads.contains($0.id) }
-            if !new.isEmpty { download(new) }
-            return true
-        } catch {
-            return false
-        }
+            let new = missing.filter { self.downloadStates[$0.id] == nil && !self.skippedDownloads.contains($0.id) }
+            if !new.isEmpty { self.download(new) }
+        }.value
     }
 
     /// Une collection qui échoue (playlist supprimée sur Deezer…) n'empêche plus la synchro des suivantes.
     private func syncDownloadedCollections() async {
         let saved = downloadCollections
         for collection in saved {
-            _ = await syncDownloadedCollection(kind: collection.kind, id: collection.id)
+            await syncDownloadedCollection(kind: collection.kind, id: collection.id)
         }
     }
 
@@ -292,12 +308,15 @@ final class Player {
     }
 
     /// Lance une modification des téléchargements après celles en cours.
-    private func editDownloads(_ work: @escaping @MainActor () async -> Void) {
+    @discardableResult
+    private func editDownloads(_ work: @escaping @MainActor () async -> Void) -> Task<Void, Never> {
         let previous = downloadEdits
-        downloadEdits = Task { @MainActor in
+        let task = Task { @MainActor in
             await previous?.value
             await work()
         }
+        downloadEdits = task
+        return task
     }
 
     func downloadedCollection(kind: String, id: UInt64) -> DownloadCollection? {
@@ -365,7 +384,8 @@ final class Player {
     }
 
     func download(_ tracks: [Track]) {
-        guard core != nil, !tracks.isEmpty else { return }
+        // Compte fermé (synchro encore en route pendant la déconnexion) : rien n'est ajouté pour le compte suivant.
+        guard core != nil, loggedIn == true, !tracks.isEmpty else { return }
         // Redemandés par l'utilisateur : de nouveau suivis par la synchro.
         let ids = tracks.map(\.id)
         if !skippedDownloads.isDisjoint(with: ids) {
@@ -421,11 +441,13 @@ final class Player {
     }
 
     /// Fichiers supprimés hors du thread principal : des centaines de titres figeaient l'app quelques secondes.
-    func removeDownloadCollection(_ collection: DownloadCollection) {
-        guard let core else { return }
+    /// La tâche rendue finit une fois les fichiers supprimés et les listes relues.
+    @discardableResult
+    func removeDownloadCollection(_ collection: DownloadCollection) -> Task<Void, Never>? {
+        guard let core else { return nil }
         let (kind, id) = (collection.kind, collection.id)
         // Dans la file des modifications : un titre aimé juste avant n'y est plus ajouté après coup.
-        editDownloads {
+        return editDownloads {
             do {
                 let ids = try await Task.detached(priority: .userInitiated) { try core.removeDownloadCollection(kind: kind, id: id) }.value
                 BackgroundDownloadManager.shared.cancel(ids)
@@ -446,6 +468,8 @@ final class Player {
                 try await Task.detached(priority: .userInitiated) { try core.clearDownloads() }.value
                 self.downloadStates = [:]
                 self.downloadTracks = [:]
+                // Copies hors ligne gardées en mémoire : sans réseau, elles restaient servies et la lecture échouait.
+                self.forgetOfflineDetails()
                 await self.refreshDownloadsInBackground()
                 self.showToast(tr("Téléchargements effacés"))
             } catch { self.message = self.describe(error) }
@@ -555,7 +579,7 @@ final class Player {
     }
 
     /// Comme `refreshDownloads`, avec les listes lues hors du fil principal.
-    private func refreshDownloadsInBackground() async {
+    func refreshDownloadsInBackground() async {
         guard let core else { return }
         cancelBackgroundDownloadsRefresh()
         let version = downloadsVersion
@@ -1100,11 +1124,15 @@ final class Player {
         current = queue[index]
         shownIndex = index
         startLoading()
+        let request = playRequests
         let ids = last.tracks.map(\.id)
         Task {
             do {
                 try await core.restoreQueue(ids: ids, index: UInt32(index), positionMs: index == last.index ? position : 0)
             } catch {
+                // Autre lecture demandée entre-temps : elle décide seule (avant, la reprise revenait en attente et
+                // figeait la barre de progression et le bouton lecture du titre lancé).
+                guard request == playRequests else { return }
                 loading = false
                 pendingRestore = last // un nouvel appui sur lecture la retente (avant : plus rien ne se passait)
                 // Titre gardé de nouveau affiché (avant : celui demandé, avec la position de l'autre).
@@ -1358,7 +1386,7 @@ final class Player {
         status = Status(playing: false, positionMs: 0, durationMs: 0)
         loading = false
         isFlow = false
-        NowPlaying.update(track: nil, status: status)
+        NowPlaying.update(track: nil, status: status, cover: nil)
         profileGeneration += 1
         profileEpoch += 1
         lovedIds = []
@@ -1384,13 +1412,24 @@ final class Player {
         guard loggedIn == true else { return }
         accountGeneration += 1
         forgetAccountCopies()
+        sessionRetryTask?.cancel()
+        sessionRetryTask = nil
+        BackgroundDownloadManager.shared.deezerSessionEnded()
+        // Retour à l'écran de connexion (avant, l'app restait sur des onglets vides et chaque chargement réaffichait l'alerte).
+        sessionReady = false
+        loggedIn = false
         message = tr("Session Deezer expirée : reconnecte-toi.")
     }
 
     func logout() async {
         guard let core else { return }
         accountGeneration += 1
+        // Réponses encore en route (synchro des téléchargements…) : plus appliquées pendant la déconnexion.
+        profileGeneration += 1
         BackgroundDownloadManager.shared.stopAll()
+        BackgroundDownloadManager.shared.deezerSessionEnded()
+        // Modifications des téléchargements en cours finies avant (leurs messages arrivaient après la déconnexion).
+        await downloadEdits?.value
         do { try await core.logout() } catch { message = describe(error) }
         // Ouverture de session lancée pendant la déconnexion (réseau revenu, nouvel essai) : elle ne rouvre pas le compte.
         accountGeneration += 1
@@ -1443,6 +1482,8 @@ final class Player {
         saveSkippedDownloads()
         homeOrder = []
         UserDefaults.standard.removeObject(forKey: "homeOrder")
+        libraryOrder = [] // ordre des playlists du compte
+        UserDefaults.standard.removeObject(forKey: "libraryOrder")
         setLovedTitle("")
         setMp3Title("") // nom de la page MP3 choisi sur ce téléphone : oublié aussi
         coverTarget = nil
@@ -1452,7 +1493,7 @@ final class Player {
         CustomCovers.store(customCovers)
         CustomCovers.removeAll()
         CoverLoader.shared.clear()
-        NowPlaying.update(track: nil, status: status)
+        NowPlaying.update(track: nil, status: status, cover: nil)
         // Plus aucune reprise automatique en attente, ni de minuterie.
         resumePolicy = ResumePolicy()
         setSleepTimer(nil)
@@ -1499,12 +1540,18 @@ final class Player {
     @ObservationIgnored private var inFlight: [String: Task<Void, Never>] = [:]
 
     /// Un seul chargement à la fois par clé : un second appel attend le premier au lieu de refaire la requête.
-    private func once(_ key: String, _ work: @escaping () async -> Void) async {
-        if let running = inFlight[key] { return await running.value }
+    /// `fresh` : rechargement forcé (playlist créée ou supprimée…) ; un chargement déjà en cours a pu partir avant le
+    /// changement, il est attendu puis refait (avant, sa réponse était reprise : la nouvelle playlist manquait).
+    private func once(_ key: String, fresh: Bool = false, _ work: @escaping () async -> Void) async {
+        if let running = inFlight[key] {
+            await running.value
+            guard fresh else { return }
+            if let other = inFlight[key], other != running { return await other.value } // déjà relancé par un autre
+        }
         let task = Task { await work() }
         inFlight[key] = task
         await task.value
-        inFlight[key] = nil
+        if inFlight[key] == task { inFlight[key] = nil }
     }
 
     func updateReco(_ change: (inout RecoPrefs) -> Void) {
@@ -1519,25 +1566,41 @@ final class Player {
 
     func loadHome(force: Bool) async {
         guard sessionReady, reco.anyVisible, force || !refreshed.contains("home") else { return }
+        // Hors ligne : rien n'est demandé (l'erreur s'afficherait à chaque visite) ; sans copie, « Réessayer » s'affiche.
+        guard force || networkSignature != "none" else { if home == nil { setLoadFailed("home", true) }; return }
         let gen = profileGeneration
-        await once("home#\(gen)") {
+        setLoadFailed("home", false)
+        await once("home#\(gen)", fresh: force) {
             // En cas d'erreur, la copie affichée reste. Profil changé entre-temps : réponse ignorée.
             let fresh = await self.load(nil as [Shelf]?, { try await $0.home() })
             guard gen == self.profileGeneration else { return }
             if let fresh {
                 self.home = fresh
                 self.refreshPins(fresh.flatMap(\.items))
+                self.refreshed.insert("home")
             }
-            self.refreshed.insert("home")
+            // Échec : redemandé à la prochaine visite et au retour du réseau (avant, plus jamais : squelettes sans fin).
+            self.setLoadFailed("home", fresh == nil)
         }
+    }
+
+    /// Accueil (« home ») ou rubrique de la bibliothèque (« library0 »…) en échec : sans copie à afficher, l'écran
+    /// propose « Réessayer ».
+    private(set) var loadFailed: Set<String> = []
+
+    private func setLoadFailed(_ key: String, _ failed: Bool) {
+        guard failed != loadFailed.contains(key) else { return } // inchangé : les écrans ne sont pas redessinés
+        if failed { loadFailed.insert(key) } else { loadFailed.remove(key) }
     }
 
     /// 0 = playlists, 1 = albums, 2 = artistes.
     func loadLibrary(_ tab: Int, force: Bool) async {
         let key = "library\(tab)"
         guard sessionReady, force || !refreshed.contains(key) else { return }
+        guard force || networkSignature != "none" else { if library[tab] == nil { setLoadFailed(key, true) }; return }
         let gen = profileGeneration
-        await once("\(key)#\(gen)") {
+        setLoadFailed(key, false)
+        await once("\(key)#\(gen)", fresh: force) {
             let fresh: [Card]? = await self.load(nil as [Card]?) { core in
                 switch tab {
                 case 0: return try await core.myPlaylists()
@@ -1549,8 +1612,9 @@ final class Player {
             if let fresh {
                 self.library[tab] = fresh
                 self.refreshPins(fresh)
+                self.refreshed.insert(key)
             }
-            self.refreshed.insert(key)
+            self.setLoadFailed(key, fresh == nil)
         }
     }
 
@@ -1635,6 +1699,7 @@ final class Player {
         // Page MP3 : toujours redemandée (un MP3 importé ou renommé sur l'ordinateur doit y apparaître).
         if !force, let hit = details[route], !hit.offline, !hasNewReleases(hit, route: route), !route.isMp3 { return hit }
         let gen = profileGeneration
+        let edits = lovedEdits
         let result: Detail? = await load(nil as Detail?) { core in
             switch route {
             case .detail(let kind, let id, _): return try await core.openDetail(kind: kind, id: id)
@@ -1644,7 +1709,10 @@ final class Player {
             }
         }
         // Profil changé pendant le chargement : la page s'affiche, mais n'est ni gardée ni reprise ailleurs.
-        if let result, gen == profileGeneration {
+        // Titres aimés demandés avant un « j'aime » : affichés, mais ni gardés ni repris pour les cœurs (le titre tout
+        // juste aimé y manque encore).
+        let staleLoved = route == .loved && !lovedListCurrent(since: edits)
+        if let result, gen == profileGeneration, !staleLoved {
             cacheDetail(result, for: route)
             // Copie hors ligne : seulement les titres du téléphone, pas la liste complète des aimés.
             if case .loved = route, !result.offline { lovedIds = Set(result.tracks.map(\.id)) }
@@ -1675,9 +1743,17 @@ final class Player {
     func refreshLoved() async {
         // Deezer ne répond pas : les cœurs déjà connus restent (une liste vide les effaçait tous).
         let gen = profileGeneration
-        guard let list = await load(nil as [Track]?, { try await $0.loved() }), gen == profileGeneration else { return }
+        let edits = lovedEdits
+        guard let list = await load(nil as [Track]?, { try await $0.loved() }), gen == profileGeneration,
+              lovedListCurrent(since: edits) else { return }
         lovedIds = Set(list.map(\.id))
     }
+
+    /// Change à chaque « j'aime » : une liste des titres aimés demandée avant ne remplace plus les cœurs (avant, le cœur
+    /// d'un titre aimé pendant le chargement s'éteignait, alors que Deezer l'avait bien enregistré).
+    @ObservationIgnored private var lovedEdits = 0
+    /// Liste des titres aimés demandée depuis `since` : à jour s'il n'y a eu aucun « j'aime » depuis, ni d'envoi en cours.
+    private func lovedListCurrent(since: Int) -> Bool { since == lovedEdits && likeTasks.isEmpty }
 
     /// Pochettes remplacées dans les listes, par titre (l'image d'origine n'existe plus chez Deezer).
     private(set) var coverFixes: [Int64: String] = [:]
@@ -1700,6 +1776,7 @@ final class Player {
         guard let core else { return }
         // Tout de suite à l'écran ; annulé si Deezer refuse.
         if liked { lovedIds.insert(track.id) } else { lovedIds.remove(track.id) }
+        lovedEdits += 1
         details[.loved] = nil // la page Titres aimés sera rechargée
         let gen = profileGeneration
         // Appuis rapides (j'aime puis plus) : envoyés à Deezer l'un après l'autre, dans l'ordre, pour que le dernier
@@ -1789,15 +1866,16 @@ final class Player {
     /// Rien n'a démarré : le titre qui joue reste affiché (écran verrouillé aussi), le Flow reste marqué, et une
     /// dernière écoute en attente reste reprenable (avant : le bouton lecture ne faisait plus rien).
     private func playFailed(_ error: Error, before: (current: Track?, isFlow: Bool, restore: LastSession?), ifShowing id: Int64?) {
+        // Autre lecture demandée depuis (autre titre affiché) : elle garde son indicateur de chargement, et pas de message
+        // pour une demande abandonnée.
+        guard current?.id == id else { return }
         loading = false
-        if current?.id == id {
-            current = before.current
-            isFlow = before.isFlow
-            pendingRestore = before.restore
-            // État réel du moteur relu (l'état gardé pouvait dater de plusieurs minutes : la barre de l'écran
-            // verrouillé reculait).
-            refreshStatus()
-        }
+        current = before.current
+        isFlow = before.isFlow
+        pendingRestore = before.restore
+        // État réel du moteur relu (l'état gardé pouvait dater de plusieurs minutes : la barre de l'écran
+        // verrouillé reculait).
+        refreshStatus()
         showToast(describe(error), seconds: 4)
     }
 
@@ -1916,7 +1994,7 @@ final class Player {
         current = queue[target]
         shownIndex = target
         startLoading()
-        NowPlaying.update(track: current, status: Status(playing: false, positionMs: 0, durationMs: 0))
+        showOnLockScreen(Status(playing: false, positionMs: 0, durationMs: 0), sharp: false)
         if skipWindow == nil {
             attempt { try $0.queuePlay(index: UInt32(target)) }
             sentTarget = target
@@ -2089,7 +2167,13 @@ final class Player {
 
     func queueAdd(_ tracks: [Track], next: Bool) {
         let pending = editPendingQueue { queue, index in queue.insert(contentsOf: tracks, at: next ? index + 1 : queue.count) }
-        if !pending { attempt { try $0.queueAdd(ids: tracks.map(\.id), next: next) } }
+        if !pending, let core {
+            let ids = tracks.map(\.id)
+            // Fiche oubliée par le cœur : redemandée à Deezer avant l'ajout (d'où l'attente).
+            Task {
+                do { try await core.queueAdd(ids: ids, next: next) } catch { showToast(describe(error), seconds: 4) }
+            }
+        }
         showToast(next ? tr("Lu juste après") : tr("Ajouté à la file"))
     }
 
@@ -2203,7 +2287,11 @@ final class Player {
     /// Sélecteur de fichier ouvert (import d'un MP3).
     var importingMp3 = false
     /// Fenêtre nom / artiste / pochette ouverte.
-    var mp3Editor: Mp3Edit?
+    var mp3Editor: Mp3Edit? {
+        // Fenêtre fermée (ou remplacée) : la copie du fichier faite pour l'app est supprimée. Seulement là : cachée un
+        // instant par une autre fenêtre, elle restait ouverte mais son fichier disparaissait.
+        didSet { if let old = oldValue?.file, old != mp3Editor?.file { try? FileManager.default.removeItem(at: old) } }
+    }
     /// MP3 dont la suppression attend la confirmation.
     var deletingMp3: Track?
     /// Augmente après un import, une modification ou une suppression : la page MP3 se recharge.
@@ -2215,8 +2303,21 @@ final class Player {
         return customCovers["mp3\(track.id)"]
     }
 
-    /// Pochette d'un titre à afficher : celle choisie ici pour un MP3 importé, sinon celle de Deezer.
-    func cover(_ track: Track?) -> String? { mp3Cover(track) ?? track?.coverUrl }
+    /// Écran verrouillé : titre affiché, avec la même pochette que dans l'app (avant, celle de Deezer même pour un MP3
+    /// importé avec une pochette choisie). `sharp` : voir `NowPlaying.update`.
+    private func showOnLockScreen(_ status: Status, sharp: Bool = true) {
+        NowPlaying.update(track: current, status: status, cover: cover(current), sharp: sharp && skipTarget == nil)
+    }
+
+    /// Pochette d'un titre à afficher : celle choisie ici pour un MP3 importé, sinon celle enregistrée sur le téléphone,
+    /// sinon celle de Deezer (remplacée si elle n'existe plus, comme dans les listes : avant, les pochettes voisines du
+    /// carrousel restaient vides puis changeaient d'un coup).
+    func cover(_ track: Track?) -> String? {
+        guard let track else { return nil }
+        if let mp3 = mp3Cover(track) { return mp3 }
+        if let saved = track.coverUrl, !saved.hasPrefix("http") { return saved }
+        return coverFixes[track.id] ?? track.coverUrl
+    }
 
     /// Fichier choisi : nom et artiste lus dans le fichier pour préremplir la fenêtre.
     /// `url` : copie du fichier faite pour l'app ; la fenêtre la garde (lue à l'envoi) et la supprime en se fermant.
@@ -2407,14 +2508,27 @@ final class Player {
             return
         }
         activateOutput()
-        if queue.indices.contains(index) { current = queue[index]; shownIndex = index }
+        // Rafale de suivant / précédent encore ouverte : abandonnée (sinon sa fin renvoyait son titre par-dessus celui
+        // touché), et le titre touché devient celui attendu (le « suivant » d'après part de lui, ses annonces s'affichent).
+        skipWindow?.cancel()
+        skipWindow = nil
+        skipTarget = nil
+        sentTarget = nil
+        if queue.indices.contains(index) {
+            current = queue[index]
+            shownIndex = index
+            awaiting = (index, Date())
+        }
         startLoading()
         attempt { try $0.queuePlay(index: UInt32(index)) }
     }
 
     /// Indicateur jusqu'au signal « son lancé » du cœur ; retiré de toute façon après 20 s (réseau coupé...).
     @ObservationIgnored private var loadingTimeout: Task<Void, Never>?
+    /// Change à chaque lecture demandée (titre, file, suivant…) : l'échec d'une demande dépassée ne touche plus à rien.
+    @ObservationIgnored private var playRequests = 0
     private func startLoading() {
+        playRequests &+= 1
         loading = true
         // Une rafale de suivant / précédent ne laisse pas une tâche en attente par appui.
         loadingTimeout?.cancel()
@@ -2522,12 +2636,12 @@ final class Player {
         guard truth.playing != status.playing || truth.durationMs != status.durationMs || drift > 2000 else { return }
         status = truth
         statusAt = Date()
-        NowPlaying.update(track: current, status: status)
+        showOnLockScreen(status)
     }
 
     private func refreshStatus() {
         syncStatus()
-        NowPlaying.update(track: current, status: lockScreenStatus)
+        showOnLockScreen(lockScreenStatus)
     }
 
     /// État montré sur l'écran verrouillé : à zéro pendant le chargement d'un titre (l'état du moteur est encore celui
@@ -2583,6 +2697,9 @@ final class Player {
         }
         switch event {
         case .track(var track):
+            // Rafale de suivant / précédent : un titre intermédiaire encore annoncé par le cœur (il traite les demandes une
+            // par une) n'écrase plus celui demandé (avant, mini-lecteur, fond et écran verrouillé y repassaient un instant).
+            if let target = skipTarget ?? awaitedIndex, queue.indices.contains(target), queue[target].id != track.id { break }
             // Même titre que celui déjà affiché (passage au suivant) : sa pochette reste la même adresse.
             // Un titre téléchargé arrive d'abord avec son image enregistrée puis avec celle de Deezer : changer
             // d'adresse relançait le fondu du fond du lecteur en plein milieu (saut d'image).
@@ -2660,7 +2777,7 @@ final class Player {
         case .track, .started, .state, .stopped, .closed:
             // Titre demandé en chargement : position et durée à zéro (les états reçus sont encore ceux de l'ancien titre,
             // affichés avec le nouveau nom sur l'écran verrouillé).
-            NowPlaying.update(track: current, status: lockScreenStatus)
+            showOnLockScreen(lockScreenStatus)
             // Minuterie « fin du titre » : échéance recalculée (autre titre, pause, reprise).
             if sleepTimer == .trackEnd { scheduleSleep() }
         default: break

@@ -302,7 +302,11 @@ impl DeezerClient {
                 continue;
             }
             let good = self.cover_fixes.lock().is_ok_and(|f| f.contains_key(&format!("ok:{md5}")));
-            if !good {
+            // Au plus `MAX_NEW` images par appel, les premières de la page : la suite est vérifiée aux visites suivantes
+            // (les images déjà vérifiées sont retenues). Avant, une page de 3 000 titres jamais vérifiés lançait jusqu'à
+            // 3 requêtes par album, plusieurs minutes de radio, qui continuaient après avoir quitté la page.
+            const MAX_NEW: usize = 150;
+            if !good && (todo.len() < MAX_NEW || todo.contains_key(&md5)) {
                 todo.entry(md5).or_default().push((id, url, album));
             }
         }

@@ -40,7 +40,6 @@ symphonia = { version = "0.5", default-features = false, features = ["mp3", "fla
 cpal = "0.15"
 rtrb = "0.3"
 rubato = "0.15"
-lru = "0.12"
 
 # --- pont iOS
 uniffi = "0.29"

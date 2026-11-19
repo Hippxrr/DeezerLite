@@ -12,7 +12,6 @@ use futures_util::{FutureExt, StreamExt};
 use symphonia::core::io::MediaSource;
 use tokio::runtime::Handle;
 
-pub mod cache;
 
 /// Taille de bloc du protocole de chiffrement par blocs.
 pub const CHUNK: usize = 2048;

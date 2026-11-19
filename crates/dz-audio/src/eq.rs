@@ -142,7 +142,8 @@ impl EqState {
         }
     }
 
-    /// Vrai si au moins une bande modifie le son (le limiteur doit alors rester actif : un gain positif peut dépasser 1,0).
+    /// Vrai si au moins une bande modifie le son (vérifié par les tests ; le limiteur de la sortie, lui, est toujours là).
+    #[cfg(test)]
     pub fn active(&self) -> bool {
         self.on
     }

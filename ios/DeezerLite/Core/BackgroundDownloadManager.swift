@@ -93,6 +93,16 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
     }
 
     private var jobsURL: URL { Self.storageDirectory.appendingPathComponent("native-jobs.json") }
+    /// Titres en cours seulement (adresse préparée, fichier reçu) : petit fichier écrit tout de suite à chaque étape. La
+    /// file complète (des milliers de titres possibles) est regroupée : avant, elle était réécrite en entier deux fois par
+    /// titre (jusqu'à ~1 Go écrit pour 3 000 titres).
+    private var activeURL: URL { Self.storageDirectory.appendingPathComponent("native-active.json") }
+
+    private struct ActiveStep: Codable {
+        let id: Int64
+        let preparedURL: String?
+        let incomingPath: String?
+    }
 
     /// Ordre de la file (affichage des téléchargements dans l'ordre où ils ont été demandés).
     var queueOrder: [Int64] { order }
@@ -123,6 +133,12 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         deezerSessionReady = true
         // Session ouverte : Deezer répond, les titres arrêtés par une coupure repartent.
         resumeWaitingForNetwork()
+    }
+
+    /// Session refusée par Deezer ou compte fermé : plus aucun titre n'est préparé (chaque essai échouerait) jusqu'à la
+    /// prochaine connexion.
+    func deezerSessionEnded() {
+        deezerSessionReady = false
     }
 
     /// Changement de réseau (appelé à chaque relevé du système).
@@ -392,7 +408,8 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         jobs[job.id] = job
         // Écrit tout de suite (sans attendre le regroupement) : l'adresse préparée sert à reconnaître, après une
         // relance, un fichier livré pendant que l'app était fermée.
-        writeJobs(wait: false)
+        writeActive()
+        save()
         let task = session.downloadTask(with: url)
         task.taskDescription = String(job.id)
         tasks[job.id] = task
@@ -460,8 +477,9 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         }
         job.incomingPath = file.path
         jobs[id] = job
-        // Écrit tout de suite, pas 0,3 s plus tard : l'app fermée entre-temps perdait le fichier reçu (retéléchargé).
-        writeJobs(wait: false)
+        // Écrit tout de suite, pas après le regroupement : l'app fermée entre-temps perdait le fichier reçu (retéléchargé).
+        writeActive()
+        save()
         pump()
     }
 
@@ -551,6 +569,13 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
                 player?.downloadQueuePersistenceFailed()
             }
         }
+        // Étapes en cours écrites à part (voir `activeURL`), plus récentes que la file complète.
+        if let data = try? Data(contentsOf: activeURL), let steps = try? JSONDecoder().decode([ActiveStep].self, from: data) {
+            for step in steps where jobs[step.id] != nil {
+                if let url = step.preparedURL { jobs[step.id]?.preparedURL = url }
+                if let path = step.incomingPath { jobs[step.id]?.incomingPath = path }
+            }
+        }
         let incoming = Self.storageDirectory.appendingPathComponent("Incoming", isDirectory: true)
         // Chemin enregistré par une version précédente : le dossier de l'app a pu changer de place (mise à jour). Le
         // fichier est retrouvé par son nom dans le dossier actuel ; avant, il était effacé et le titre retéléchargé.
@@ -590,7 +615,8 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
     private func save() {
         guard pendingSave == nil else { return }
         pendingSave = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(300))
+            // Les étapes qui ne doivent pas attendre sont écrites à part, tout de suite (voir `activeURL`).
+            try? await Task.sleep(for: .seconds(2))
             guard !Task.isCancelled, let self else { return }
             self.pendingSave = nil
             self.writeJobs(wait: false)
@@ -611,18 +637,40 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         pendingSave = nil
         // Copie prise maintenant, sur le thread principal ; encodée et écrite ailleurs.
         let list = order.compactMap { jobs[$0] }
-        let url = jobsURL
+        let steps = activeSteps()
+        let (url, stepsURL) = (jobsURL, activeURL)
         let directory = Self.storageDirectory
         let work: () -> Void = { [weak self] in
             do {
                 let data = try JSONEncoder().encode(list)
                 try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
                 try data.write(to: url, options: .atomic)
+                // Étapes en cours réécrites avec : les deux fichiers restent d'accord (plus d'étape d'un titre fini).
+                try JSONEncoder().encode(steps).write(to: stepsURL, options: .atomic)
             } catch {
                 DispatchQueue.main.async { MainActor.assumeIsolated { self?.player?.downloadQueuePersistenceFailed() } }
             }
         }
         if wait { saveQueue.sync(execute: work) } else { saveQueue.async(execute: work) }
+    }
+
+    private func activeSteps() -> [ActiveStep] {
+        jobs.values.compactMap { job in
+            job.preparedURL == nil && job.incomingPath == nil
+                ? nil : ActiveStep(id: job.id, preparedURL: job.preparedURL, incomingPath: job.incomingPath)
+        }
+    }
+
+    /// Étapes en cours seulement, tout de suite (voir `activeURL`).
+    private func writeActive() {
+        let steps = activeSteps()
+        let (url, directory) = (activeURL, Self.storageDirectory)
+        saveQueue.async {
+            // Échec (disque plein) : la file complète, écrite peu après, les contient aussi.
+            guard let data = try? JSONEncoder().encode(steps) else { return }
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try? data.write(to: url, options: .atomic)
+        }
     }
 
     private func finishBackgroundEventsIfPossible() {

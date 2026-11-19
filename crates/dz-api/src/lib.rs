@@ -154,25 +154,27 @@ struct UserData {
 
 #[derive(Deserialize)]
 struct UserBlock {
-    #[serde(rename = "USER_ID", default)]
+    // Nombre ou texte selon les réponses ; `null` ou champ vide : 0 (= session refusée, voir `fetch_user_data`).
+    #[serde(rename = "USER_ID", default, deserialize_with = "flex_u64")]
     id: u64,
     #[serde(rename = "OPTIONS")]
     options: Options,
     /// Identifiant de la playlist « Titres aimés » (nombre ou texte selon les réponses).
     #[serde(rename = "LOVEDTRACKS_ID", default)]
     loved: Value,
-    #[serde(rename = "BLOG_NAME", default)]
+    // `null` accepté comme un champ absent : avant, une erreur à chaque ouverture de session (connexion impossible).
+    #[serde(rename = "BLOG_NAME", default, deserialize_with = "null_default")]
     name: String,
-    #[serde(rename = "USER_PICTURE", default)]
+    #[serde(rename = "USER_PICTURE", default, deserialize_with = "null_default")]
     picture: String,
 }
 
 #[derive(Deserialize)]
 struct Options {
     license_token: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     web_hq: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_default")]
     web_lossless: bool,
 }
 
@@ -246,13 +248,17 @@ pub struct DeezerClient {
     /// Pochettes cassées sans remplacement trouvé (« <md5>:<titre> », « <md5>:album ») et quand : pas recherchées de
     /// nouveau pendant 30 min (avant : à chaque affichage, plusieurs requêtes par titre).
     cover_misses: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+    /// Change à chaque « j'aime » et à la déconnexion : une liste de titres aimés demandée avant n'est pas gardée.
+    loved_gen: std::sync::atomic::AtomicU64,
+    /// Dernière ouverture de session réussie : quand, et pour quel profil (voir `init_session`).
+    renewed: std::sync::Mutex<Option<(std::time::Instant, Option<u64>)>>,
 }
 
 impl DeezerClient {
     pub fn new() -> Result<Self> {
         let jar = Arc::new(CookieStoreMutex::default());
         let http = std::sync::RwLock::new(Self::build_http(jar.clone())?);
-        Ok(Self { http, jar, session: RwLock::new(None), refresh_lock: Mutex::new(()), loved_cache: std::sync::Mutex::new(None), loved_fetch: Mutex::new(()), date_cache: std::sync::Mutex::new(std::collections::HashMap::new()), home_cache: std::sync::Mutex::new(None), profile: std::sync::Mutex::new(None), family: std::sync::Mutex::new(None), jwt: std::sync::Mutex::new(None), cover_fixes: std::sync::Mutex::new(std::collections::HashMap::new()), cover_fixes_file: std::sync::Mutex::new(None), cover_misses: std::sync::Mutex::new(std::collections::HashMap::new()) })
+        Ok(Self { http, jar, session: RwLock::new(None), refresh_lock: Mutex::new(()), loved_cache: std::sync::Mutex::new(None), loved_fetch: Mutex::new(()), date_cache: std::sync::Mutex::new(std::collections::HashMap::new()), home_cache: std::sync::Mutex::new(None), profile: std::sync::Mutex::new(None), family: std::sync::Mutex::new(None), jwt: std::sync::Mutex::new(None), cover_fixes: std::sync::Mutex::new(std::collections::HashMap::new()), cover_fixes_file: std::sync::Mutex::new(None), cover_misses: std::sync::Mutex::new(std::collections::HashMap::new()), loved_gen: std::sync::atomic::AtomicU64::new(0), renewed: std::sync::Mutex::new(None) })
     }
 
     fn build_http(jar: Arc<CookieStoreMutex>) -> Result<Client> {
@@ -315,12 +321,20 @@ impl DeezerClient {
             .map_err(|_| DeezerError::Cookie("mutex empoisonné".into()))?
             .insert_raw(&cookie, &url)
             .map_err(|e| DeezerError::Cookie(e.to_string()))?;
+        // Nouvel arl (connexion après une session expirée) : l'ancien cookie de session ne doit pas être repris.
+        self.forget_sid();
         Ok(())
     }
 
     /// Oublie tout ce qui est lié au compte : cookies (dont l'arl), session et données en cache. À la déconnexion.
     /// (Le jar de cookies n'existe qu'en mémoire : rien n'est écrit sur le disque.)
     pub async fn clear_session(&self) {
+        // Un renouvellement en cours finirait après et remettrait une session (et son cookie) sur un compte déconnecté.
+        let _g = self.refresh_lock.lock().await;
+        if let Ok(mut r) = self.renewed.lock() {
+            *r = None;
+        }
+        self.loved_gen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if let Ok(mut jar) = self.jar.lock() {
             jar.clear();
         }
@@ -377,9 +391,18 @@ impl DeezerClient {
     /// au profil (`user.loginMulti`) ; l'arl ne change pas. Profil devenu inaccessible : on reste sur le titulaire et le
     /// choix est oublié (l'app le voit au profil ouvert).
     pub async fn init_session(&self) -> Result<Session> {
+        let asked = std::time::Instant::now();
         // Une seule ouverture à la fois (connexion au lancement, retour du réseau, renouvellement, changement de profil) :
         // deux ouvertures mêlées se volaient le cookie de session.
         let _g = self.refresh_lock.lock().await;
+        // Une ouverture sur le même profil s'est terminée pendant l'attente : elle sert. Avant, un titre refusé renouvelait
+        // la session deux fois de suite (deux essais en parallèle), et un compte Famille effaçait deux fois la session.
+        let want = self.wanted_profile();
+        if self.renewed.lock().ok().and_then(|r| *r).is_some_and(|(at, p)| at > asked && p == want) {
+            if let Some(s) = self.session.read().await.clone() {
+                return Ok(s);
+            }
+        }
         self.open_session().await
     }
 
@@ -424,6 +447,9 @@ impl DeezerClient {
             }
         }
         *self.session.write().await = Some(session.clone());
+        if let Ok(mut r) = self.renewed.lock() {
+            *r = Some((std::time::Instant::now(), self.wanted_profile()));
+        }
         Ok(session)
     }
 
@@ -1271,6 +1297,15 @@ fn is_token_error(e: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn user_data_accepts_null_and_text_fields() {
+        let v = serde_json::json!({ "checkForm": "x", "USER": { "USER_ID": "42", "BLOG_NAME": null, "USER_PICTURE": null,
+            "OPTIONS": { "license_token": "t", "web_hq": null, "web_lossless": true } } });
+        let d: super::UserData = serde_json::from_value(v).unwrap();
+        assert_eq!((d.user.id, d.user.name.as_str(), d.user.picture.as_str()), (42, "", ""));
+        assert!(!d.user.options.web_hq && d.user.options.web_lossless);
+    }
+
 
     #[test]
     fn odd_numbers_from_deezer_keep_the_track() {

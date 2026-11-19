@@ -301,16 +301,33 @@ struct TrackRow: View {
         player.play(list, at: index)
     }
 
+    /// Pochette à jour : réparée par le cœur si celle de la liste n'existe plus chez Deezer. Titre téléchargé (pochette
+    /// enregistrée sur le téléphone, déjà réparée au téléchargement) : la sienne d'abord, sinon une adresse Internet la
+    /// remplacerait et resterait vide hors ligne. Sortie du `body` (une longue suite de `??` y pesait sur le compilateur).
+    private func rowCover(isCurrent: Bool) -> String? {
+        if let mp3 = player.mp3Cover(track) { return mp3 }
+        if let saved = track.coverUrl, !saved.hasPrefix("http") { return saved }
+        if let fixed = player.coverFixes[track.id] { return fixed }
+        if isCurrent, let shown = player.current?.coverUrl { return shown }
+        return track.coverUrl
+    }
+
     /// Titre pas encore sorti : sa date de sortie ; retiré : « Indisponible ».
     private var unavailableLabel: String {
-        let parser = DateFormatter()
-        parser.locale = Locale(identifier: "en_US_POSIX")
-        parser.dateFormat = "yyyy-MM-dd"
-        if let raw = track.releaseDate, let date = parser.date(from: String(raw.prefix(10))), date > Date() {
-            return tr("Sortie le %@", date.formatted(.dateTime.day().month(.abbreviated)))
+        if let raw = track.releaseDate, let date = Self.dayParser.date(from: String(raw.prefix(10))), date > Date() {
+            // Dans la langue de l'app (avant, celle de l'iPhone : « Out on 12 déc. »).
+            return tr("Sortie le %@", date.formatted(.dateTime.day().month(.abbreviated).locale(LanguageStore.shared.locale)))
         }
         return tr("Indisponible")
     }
+
+    /// Créé une fois (avant, un par ligne affichée).
+    private static let dayParser: DateFormatter = {
+        let parser = DateFormatter()
+        parser.locale = Locale(identifier: "en_US_POSIX")
+        parser.dateFormat = "yyyy-MM-dd"
+        return parser
+    }()
 
     private func drag(_ dx: CGFloat) {
         swiped = true
@@ -359,11 +376,7 @@ struct TrackRow: View {
         } label: {
             HStack(spacing: 12) {
                 if showCover {
-                    // Pochette à jour : réparée par le cœur si celle de la liste n'existe plus chez Deezer. Titre
-                    // téléchargé (pochette enregistrée sur le téléphone, déjà réparée au téléchargement) : la sienne
-                    // d'abord, sinon une adresse Internet la remplacerait et resterait vide hors ligne.
-                    let saved = track.coverUrl.flatMap { $0.hasPrefix("http") ? nil : $0 }
-                    CoverView(url: player.mp3Cover(track) ?? saved ?? player.coverFixes[track.id] ?? (isCurrent ? player.current?.coverUrl : nil) ?? track.coverUrl, side: 48, radius: 8)
+                    CoverView(url: rowCover(isCurrent: isCurrent), side: 48, radius: 8)
                         .overlay {
                             if isCurrent {
                                 RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.black.opacity(0.5))
@@ -976,5 +989,20 @@ struct EdgeOnlyBack: UIViewRepresentable {
             }
             #endif
         }
+    }
+}
+
+/// Chargement en échec sans copie à afficher : un message et « Réessayer » (avant, des squelettes sans fin).
+struct RetryNote: View {
+    let retry: () async -> Void
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Text(tr("Impossible de charger la page.")).foregroundStyle(.secondary)
+            Button(tr("Réessayer")) { Task { await retry() } }
+                .buttonStyle(.bordered)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 40)
     }
 }

@@ -199,6 +199,7 @@ struct LoginView: View {
                                         .onSubmit(loginWithArl)
                                     Button(action: loginWithArl) { Image(systemName: "arrow.right.circle.fill").font(.title2) }
                                         .disabled(arl.trimmingCharacters(in: .whitespaces).isEmpty || busy)
+                                        .accessibilityLabel(tr("Se connecter"))
                                 }
                                 .padding(14)
                                 .surface(RoundedRectangle(cornerRadius: 14, style: .continuous), interactive: false)
@@ -336,8 +337,8 @@ struct MainTabs: View {
         }
         // Réduite en défilant seulement quand le mini-lecteur est là (elle lui fait de la place) : sans titre en cours,
         // la barre restait sinon réduite à l'onglet ouvert, bibliothèque cachée, pour rien.
-        .tabBarMinimizeBehavior(player.current != nil || player.loading ? .onScrollDown : .never)
-        .tabViewBottomAccessory(isEnabled: player.current != nil || player.loading) {
+        .tabBarMinimizeBehavior(player.hasTrack || player.loading ? .onScrollDown : .never)
+        .tabViewBottomAccessory(isEnabled: player.hasTrack || player.loading) {
             BarMiniPlayer().environment(player)
         }
     }
@@ -394,9 +395,9 @@ struct MainTabs: View {
             .ignoresSafeArea(.container, edges: .bottom)
             .ignoresSafeArea(.keyboard)
         }
-        .background(ScrollCollapse(active: !player.showFullPlayer && (player.current != nil || player.loading),
+        .background(ScrollCollapse(active: !player.showFullPlayer && (player.hasTrack || player.loading),
                                    collapsed: barCollapsed) { barCollapsed = $0 })
-        .onChange(of: player.current == nil && !player.loading) { _, empty in if empty { barCollapsed = false } }
+        .onChange(of: !player.hasTrack && !player.loading) { _, empty in if empty { barCollapsed = false } }
     }
 
     @ViewBuilder
@@ -433,7 +434,7 @@ struct MainTabs: View {
             if !MiniPlayerMetrics.inTabBar {
                 VStack {
                     Spacer()
-                    if player.current != nil || player.loading {
+                    if player.hasTrack || player.loading {
                         MiniPlayer()
                             .padding(.bottom, MiniPlayerMetrics.tabBar)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -441,7 +442,7 @@ struct MainTabs: View {
                 }
                 .ignoresSafeArea(.keyboard)
                 .accessibilityHidden(player.showFullPlayer)
-                .animation(.spring(response: 0.4, dampingFraction: 0.85), value: player.current == nil && !player.loading)
+                .animation(.spring(response: 0.4, dampingFraction: 0.85), value: !player.hasTrack && !player.loading)
             }
             // Le lecteur plein écran reste en place, hors de l'écran quand il est fermé : l'ouvrir ou le fermer
             // n'est qu'un déplacement (rien à construire), et il suit le doigt pendant le geste.
@@ -593,7 +594,7 @@ private struct MiniPlayerSpace: ViewModifier {
     @AppStorage("tabBarFull") private var tabBarFull = true
 
     func body(content: Content) -> some View {
-        let mini = player.current != nil || player.loading
+        let mini = player.hasTrack || player.loading
         content.safeAreaInset(edge: .bottom, spacing: 0) {
             if MiniPlayerMetrics.inTabBar {
                 // Barre de l'app : la place est à laisser ici. Barre d'iOS : c'est elle qui s'en charge.

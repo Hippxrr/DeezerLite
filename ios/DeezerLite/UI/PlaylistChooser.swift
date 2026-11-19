@@ -18,7 +18,9 @@ struct PlaylistChooser: View {
                     }
                 }
                 Section(tr("Mes playlists")) {
-                    if player.library[0] == nil {
+                    if player.library[0] == nil, player.loadFailed.contains("library0") {
+                        Button(tr("Réessayer")) { Task { await player.loadLibrary(0, force: true) } }
+                    } else if player.library[0] == nil {
                         ProgressView().frame(maxWidth: .infinity)
                     } else if player.ownedPlaylists.isEmpty {
                         Text(tr("Tu n'as pas encore créé de playlist.")).foregroundStyle(.secondary)

@@ -93,6 +93,9 @@ pub enum PlayerCmd {
 #[derive(Debug, Clone)]
 pub enum CoreEvent {
     Track(TrackInfo),
+    /// Fiche du titre affiché complétée (artistes, pochette réparée) ou titre d'avant remis après un échec : à afficher,
+    /// mais ce n'est pas l'annonce d'un titre lancé (l'interface compte celles-ci pour savoir quand le son démarre).
+    TrackUpdated(TrackInfo),
     Error(String),
     Stopped,
     /// Le titre en cours a été fermé (file vidée) : l'interface masque la barre du lecteur.
@@ -488,6 +491,23 @@ struct Resolved {
     cancel: Option<StreamCancel>,
 }
 
+/// Demandes qui remplacent une lecture encore en préparation (voir `Actor::run_cmd`). Abandonnée au milieu, une
+/// préparation ne laisse rien à moitié : le titre d'avant continue tant que le nouveau n'est pas prêt. « Précédent »,
+/// lecture et pause n'en font pas partie : ils dépendent du titre qui joue (position, reprise), donc ils attendent.
+fn supersedes(cmd: &PlayerCmd) -> bool {
+    matches!(
+        cmd,
+        PlayerCmd::PlayQueue { .. }
+            | PlayerCmd::PlayFlow { .. }
+            | PlayerCmd::QueuePlay { .. }
+            | PlayerCmd::Next
+            | PlayerCmd::PlayFile { .. }
+            | PlayerCmd::PlayUrl { .. }
+            | PlayerCmd::Stop
+            | PlayerCmd::Close
+    )
+}
+
 /// Réveil de la boucle du lecteur en pause ou à l'arrêt : en pratique jamais (une commande ou un événement arrive avant).
 const IDLE_TICK_S: u64 = 24 * 3600;
 
@@ -504,7 +524,7 @@ impl Actor {
             }
             tokio::select! {
                 cmd = rx.recv() => match cmd {
-                    Some(c) => self.on_cmd(c).await,
+                    Some(c) => if !self.run_cmd(c, &mut rx).await { return },
                     None => return,
                 },
                 Some(ev) = erx.recv() => self.on_engine(ev).await,
@@ -550,7 +570,7 @@ impl Actor {
                         self.prefetched = None;
                         self.prefetched_idx = None;
                         match cmd {
-                            Some(c) => self.on_cmd(c).await,
+                            Some(c) => if !self.run_cmd(c, &mut rx).await { return },
                             None => return,
                         }
                     }
@@ -651,6 +671,44 @@ impl Actor {
         }
     }
 
+    /// Exécute une commande. Demande de lecture (voir `supersedes`) : la préparation du titre (réseau, parfois très lente)
+    /// est abandonnée dès qu'une autre demande de lecture arrive, qui passe tout de suite ; les autres commandes reçues
+    /// pendant ce temps passent après elle, dans leur ordre d'arrivée. Avant, chaque demande attendait que la précédente
+    /// soit prête : sur réseau faible, le titre touché d'abord s'affichait et jouait un instant avant le suivant.
+    /// Faux : plus aucune commande ne viendra.
+    async fn run_cmd(&mut self, mut cmd: PlayerCmd, rx: &mut mpsc::Receiver<PlayerCmd>) -> bool {
+        loop {
+            if !supersedes(&cmd) {
+                self.on_cmd(cmd).await;
+                return true;
+            }
+            let mut later = Vec::new();
+            let replaced = {
+                let play = self.on_cmd(cmd);
+                tokio::pin!(play);
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = &mut play => break None,
+                        c = rx.recv() => match c {
+                            Some(c) if supersedes(&c) => break Some(Some(c)),
+                            Some(c) => later.push(c),
+                            None => break Some(None),
+                        },
+                    }
+                }
+            };
+            for c in later {
+                self.on_cmd(c).await;
+            }
+            match replaced {
+                None => return true,
+                Some(None) => return false,
+                Some(Some(c)) => cmd = c,
+            }
+        }
+    }
+
     fn error(&self, msg: impl ToString) {
         let _ = self.events.send(CoreEvent::Error(msg.to_string()));
     }
@@ -677,7 +735,7 @@ impl Actor {
                     if let Ok(mut s) = self.snap.lock() {
                         s.current = Some(now.clone());
                     }
-                    let _ = self.events.send(CoreEvent::Track(now.clone()));
+                    let _ = self.events.send(CoreEvent::TrackUpdated(now.clone()));
                 }
                 self.emit_edit(QueueEdit::Update { track: now, index: self.index });
             }
@@ -690,7 +748,7 @@ impl Actor {
                     if let Ok(mut s) = self.snap.lock() {
                         s.current = Some(now.clone());
                     }
-                    let _ = self.events.send(CoreEvent::Track(now.clone()));
+                    let _ = self.events.send(CoreEvent::TrackUpdated(now.clone()));
                 }
                 self.emit_edit(QueueEdit::Update { track: now, index: self.index });
             }
@@ -1190,7 +1248,7 @@ impl Actor {
                     self.index = pos;
                     self.emit_index();
                     if let Some(info) = self.infos.get(&playing) {
-                        let _ = self.events.send(CoreEvent::Track(info.clone()));
+                        let _ = self.events.send(CoreEvent::TrackUpdated(info.clone()));
                     }
                 } else if playing == id && self.engine.shared.idle.load(Ordering::Relaxed) {
                     // Relance d'un titre (moteur vide) impossible : rien ne joue.
@@ -1649,12 +1707,12 @@ mod tests {
         assert_eq!(a.infos[&9].quality.as_deref(), Some("FLAC"), "qualité de lecture gardée");
         let mut shown = None;
         while let Ok(ev) = rx.try_recv() {
-            if let CoreEvent::Track(t) = ev { shown = Some(t.artist); }
+            if let CoreEvent::TrackUpdated(t) = ev { shown = Some(t.artist); }
         }
         assert_eq!(shown.as_deref(), Some("Ghost Killer Track, WIXO & LA2S"), "le lecteur reçoit la fiche complète");
         // Une deuxième fois, rien de nouveau : aucun événement.
         a.on_cmd(PlayerCmd::Enrich { info: rich }).await;
-        assert!(!std::iter::from_fn(|| rx.try_recv().ok()).any(|e| matches!(e, CoreEvent::Track(_))));
+        assert!(!std::iter::from_fn(|| rx.try_recv().ok()).any(|e| matches!(e, CoreEvent::Track(_) | CoreEvent::TrackUpdated(_))));
     }
 
     #[tokio::test]

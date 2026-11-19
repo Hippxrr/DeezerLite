@@ -623,23 +623,7 @@ struct NowPlayingView: View {
             let bleed = fullBleed && panel == .cover
             ZStack(alignment: .top) {
             if bleed {
-                VStack(spacing: 0) {
-                    CoverCarousel(side: geo.size.width, width: geo.size.width, pull: pull, bleed: true, onPullEnd: pullEnded) { coverLongPress() }
-                        .mask {
-                            // Bas fondu en courbe douce (pas de départ visible du fondu, comme une ligne).
-                            // Haut fondu un peu plus long (7 %) : la jonction avec le fond se fait en douceur, les logos
-                            // tout en haut restent lisibles.
-                            LinearGradient(stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.07),
-                                                   .init(color: .black, location: 0.7), .init(color: .black.opacity(0.74), location: 0.8),
-                                                   .init(color: .black.opacity(0.35), location: 0.88), .init(color: .black.opacity(0.07), location: 0.95),
-                                                   .init(color: .clear, location: 1)],
-                                           startPoint: .top, endPoint: .bottom)
-                        }
-                    Spacer(minLength: 0)
-                }
-                // Collée sous l'heure : la zone réservée en haut (île dynamique comprise) est plus haute que l'heure.
-                .offset(y: -geo.safeAreaInsets.top * 0.3)
-                .transition(.opacity)
+                bleedCover(geo).transition(.opacity)
             }
             VStack(spacing: 0) {
                 Color.clear.frame(height: 21) // marge du haut (le lecteur se ferme en le tirant vers le bas)
@@ -681,23 +665,7 @@ struct NowPlayingView: View {
             .animation(.easeInOut(duration: 0.3), value: clean)
             }
             .animation(.easeInOut(duration: 0.3), value: panel)
-            // Pochette pleine largeur (réglage activé seulement) : son fond, aligné sous elle (mesures de l'écran), par-dessus
-            // le fond habituel. Paroles ou file ouvertes : il s'efface, le fond flouté habituel revient (le sien est net sous
-            // le milieu de la pochette, normalement cachée par elle). Dans son propre `background`, pas avec le fond habituel :
-            // posés ensemble, il prenait la largeur de celui-ci (bien plus large que l'écran) et son image était étirée en
-            // largeur, d'où une copie de la pochette décalée qui se voyait sous son fondu (pattes d'un cheval en double).
-            .background {
-                // Largeur pas encore connue (première mise en page) : rien. Hauteur bornée à 3 fois la largeur : une mesure
-                // à 0 donnait une image de centaines de milliers de pixels de haut (des centaines de Mo, l'app fermée par iOS).
-                if fullBleed, geo.size.width >= 1 {
-                    let screen = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
-                    Backdrop(url: player.cover(player.current), open: player.showFullPlayer,
-                             tall: min(max(screen / geo.size.width, 1), 3),
-                             inset: geo.safeAreaInsets.top * 0.7 / max(geo.size.width, 1))
-                        .opacity(bleed ? 1 : 0)
-                        .animation(.easeInOut(duration: 0.3), value: bleed)
-                }
-            }
+            .background { bleedBackdrop(geo, shown: bleed) }
             .background { Backdrop(url: player.cover(player.current), open: player.showFullPlayer) }
         }
         // Retour haptique à l'appui long seulement (pas à la remise en mode normal quand le lecteur se ferme).
@@ -711,6 +679,48 @@ struct NowPlayingView: View {
         .onChange(of: pulling) { _, on in if !on { pull.recover() } }
         .accessibilityAddTraits(.isModal)
         .accessibilityAction(.escape) { player.showFullPlayer = false }
+        // VoiceOver : fermeture proposée dans les actions (avant, seul le geste d'échappement à deux doigts la permettait).
+        .accessibilityAction(named: Text(tr("Fermer le lecteur"))) { player.showFullPlayer = false }
+    }
+
+    /// Pochette pleine largeur, ses bords haut et bas fondus dans le fond. Sortie du `body` : tout dedans, il approchait de
+    /// ce que le compilateur sait vérifier à temps.
+    private func bleedCover(_ geo: GeometryProxy) -> some View {
+        VStack(spacing: 0) {
+            CoverCarousel(side: geo.size.width, width: geo.size.width, pull: pull, bleed: true, onPullEnd: pullEnded) { coverLongPress() }
+                .mask { Self.bleedMask }
+            Spacer(minLength: 0)
+        }
+        // Collée sous l'heure : la zone réservée en haut (île dynamique comprise) est plus haute que l'heure.
+        .offset(y: -geo.safeAreaInsets.top * 0.3)
+    }
+
+    /// Bas fondu en courbe douce (pas de départ visible du fondu, comme une ligne). Haut fondu un peu plus long (7 %) : la
+    /// jonction avec le fond se fait en douceur, les logos tout en haut restent lisibles.
+    private static let bleedMask = LinearGradient(
+        stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.07),
+                .init(color: .black, location: 0.7), .init(color: .black.opacity(0.74), location: 0.8),
+                .init(color: .black.opacity(0.35), location: 0.88), .init(color: .black.opacity(0.07), location: 0.95),
+                .init(color: .clear, location: 1)],
+        startPoint: .top, endPoint: .bottom)
+
+    /// Pochette pleine largeur (réglage activé seulement) : son fond, aligné sous elle (mesures de l'écran), par-dessus le fond
+    /// habituel. Paroles ou file ouvertes : il s'efface, le fond flouté habituel revient (le sien est net sous le milieu de
+    /// la pochette, normalement cachée par elle). Dans son propre `background`, pas avec le fond habituel : posés ensemble, il
+    /// prenait la largeur de celui-ci (bien plus large que l'écran) et son image était étirée en largeur, d'où une copie de
+    /// la pochette décalée qui se voyait sous son fondu (pattes d'un cheval en double).
+    @ViewBuilder
+    private func bleedBackdrop(_ geo: GeometryProxy, shown: Bool) -> some View {
+        // Largeur pas encore connue (première mise en page) : rien. Hauteur bornée à 3 fois la largeur : une mesure à 0
+        // donnait une image de centaines de milliers de pixels de haut (des centaines de Mo, l'app fermée par iOS).
+        if fullBleed, geo.size.width >= 1 {
+            let screen: CGFloat = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
+            let tall: CGFloat = min(max(screen / geo.size.width, 1), 3)
+            Backdrop(url: player.cover(player.current), open: player.showFullPlayer, tall: tall,
+                     inset: geo.safeAreaInsets.top * 0.7 / max(geo.size.width, 1))
+                .opacity(shown ? 1 : 0)
+                .animation(.easeInOut(duration: 0.3), value: shown)
+        }
     }
 
     /// Glissement vertical n'importe où sur le lecteur : tout le lecteur descend.
@@ -1278,6 +1288,7 @@ private struct SoundMenu: View {
             if player.eqPreset != .off {
                 HStack(spacing: 0) {
                     Button { player.stepEqPreset(-1) } label: { Image(systemName: "chevron.left").frame(width: 44, height: 40) }
+                        .accessibilityLabel(tr("Préréglage précédent"))
                     Spacer(minLength: 4)
                     HStack(spacing: 8) {
                         Image(systemName: player.eqPreset.icon).foregroundStyle(Theme.accent)
@@ -1287,6 +1298,7 @@ private struct SoundMenu: View {
                     .contentTransition(.opacity)
                     Spacer(minLength: 4)
                     Button { player.stepEqPreset(1) } label: { Image(systemName: "chevron.right").frame(width: 44, height: 40) }
+                        .accessibilityLabel(tr("Préréglage suivant"))
                 }
                 .buttonStyle(.pressable)
                 .padding(.horizontal, 4)
@@ -1350,7 +1362,10 @@ private struct PlaylistPicker: View {
             Divider()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 0) {
-                    if player.library[0] == nil {
+                    if player.library[0] == nil, player.loadFailed.contains("library0") {
+                        Button(tr("Réessayer")) { Task { await player.loadLibrary(0, force: true) } }
+                            .frame(maxWidth: .infinity).padding(20)
+                    } else if player.library[0] == nil {
                         ProgressView().frame(maxWidth: .infinity).padding(20)
                     } else if player.ownedPlaylists.isEmpty {
                         Text(tr("Tu n'as pas encore créé de playlist.")).font(.footnote).foregroundStyle(.secondary).padding(14)
@@ -1498,6 +1513,8 @@ private struct LyricsPanel: View {
                                     // Appui long : partager cette ligne (et d'autres) en image avec la pochette.
                                     .onLongPressGesture(minimumDuration: 0.4) { shareLine(i, lyrics) }
                                     .accessibilityAction(named: tr("Partager en image")) { shareLine(i, lyrics) }
+                                    // Paroles synchronisées : un appui va à cette ligne (annoncé comme un bouton).
+                                    .accessibilityAddTraits(lyrics.synced ? .isButton : [])
                                     .id(i)
                             }
                             if !lyrics.copyright.isEmpty {
@@ -1541,16 +1558,28 @@ private struct LyricsPanel: View {
             LyricsShareSheet(request: request).environment(player)
         }
         .sensoryFeedback(.impact(weight: .medium), trigger: share?.id)
-        .task(id: "\(player.showFullPlayer ? player.current?.id ?? 0 : -1)-\(attempt)-\(phase == .background)") {
+        .task(id: "\(player.current?.id ?? 0)-\(player.showFullPlayer)-\(attempt)-\(phase == .background)") {
+            let key = "\(player.current?.id ?? 0)-\(attempt)"
+            // Lecteur fermé : les paroles restent (rouvert sur le même titre, elles sont là, à leur place ; avant, « Pas de
+            // paroles » s'affichait puis tout se rechargeait). Autre titre entre-temps : effacées, rechargées à l'ouverture.
+            guard player.showFullPlayer else {
+                if shownFor != nil, key != shownFor {
+                    shownFor = nil
+                    lyrics = nil
+                    loaded = false
+                    failed = false
+                    active = -1
+                }
+                return
+            }
             // App en arrière-plan : rien n'est demandé (personne ne les lit). Au retour, seulement si le titre a changé.
-            let key = "\(player.showFullPlayer ? player.current?.id ?? 0 : -1)-\(attempt)"
             guard phase != .background, key != shownFor else { return }
             shownFor = key
             loaded = false
             failed = false
             active = -1
             lyrics = nil
-            if player.showFullPlayer, let track = player.current, track.id != 0 {
+            if let track = player.current, track.id != 0 {
                 // Interrompu (arrière-plan, autre titre) : rien n'est affiché (les paroles de l'ancien titre remplaçaient
                 // celles du nouveau), refait au prochain affichage.
                 do {

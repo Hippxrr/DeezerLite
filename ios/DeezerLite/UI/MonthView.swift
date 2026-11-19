@@ -45,6 +45,8 @@ struct MonthView: View {
             case .failed(let text):
                 message(text)
                 Button(tr("Réessayer")) { Task { await load() } }.frame(maxWidth: .infinity)
+                // Mois d'avant encore là : affiché avec ses flèches (avant, on restait bloqué sur le mois en erreur).
+                if let stats { content(stats) }
             case .ready:
                 if let stats {
                     content(stats)
@@ -70,9 +72,10 @@ struct MonthView: View {
             }
             epoch = player.profileEpoch
         }
-        if stats == nil { phase = .loading }
+        if stats == nil { phase = .loading } else if case .failed = phase { phase = .ready }
         loading = true
-        defer { loading = false }
+        // Demande remplacée (deux appuis rapides sur les flèches) : l'indicateur reste, celle d'après l'enlève.
+        defer { if !Task.isCancelled { loading = false } }
         do {
             let s = try await core.monthStats(year: which?.year ?? 0, month: which?.month ?? 0)
             // Réponse d'une demande remplacée (autre mois, autre profil) : ignorée.
@@ -134,9 +137,9 @@ struct MonthView: View {
 
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
             tile(Self.duration(s.minutes), tr("d'écoute"), note: listenNote(s))
-            tile(Int(s.streams).formatted(), tr("écoutes"))
-            tile(Int(s.tracks).formatted(), tr("titres différents"), note: s.discovered > 0 ? tr("dont %@ découverts", "\(s.discovered)") : nil)
-            tile(Int(s.artists).formatted(), tr("artistes"))
+            tile(number(s.streams), tr("écoutes"))
+            tile(number(s.tracks), tr("titres différents"), note: s.discovered > 0 ? tr("dont %@ découverts", "\(s.discovered)") : nil)
+            tile(number(s.artists), tr("artistes"))
         }
 
         if let p = s.period {
@@ -261,7 +264,7 @@ struct MonthView: View {
 
     /// 3 660 min → « 61 h » ; moins d'une heure → « 42 min ».
     private static func duration(_ minutes: UInt32) -> String {
-        minutes >= 60 ? "\(Int((Double(minutes) / 60).rounded()).formatted()) h" : "\(minutes) min"
+        minutes >= 60 ? "\(number(Int((Double(minutes) / 60).rounded()))) h" : "\(minutes) min"
     }
 }
 
@@ -291,7 +294,7 @@ private struct MonthCard: View {
             Text(title).font(.system(size: 31, weight: .heavy)).lineLimit(1).minimumScaleFactor(0.6)
             Text(time).font(.system(size: 50, weight: .heavy)).padding(.top, 18)
             Text(tr("d'écoute")).font(.system(size: 15, weight: .semibold)).foregroundStyle(.white.opacity(0.85))
-            Text(tr("%@ écoutes · %@ titres · %@ artistes", Int(stats.streams).formatted(), Int(stats.tracks).formatted(), Int(stats.artists).formatted()))
+            Text(tr("%@ écoutes · %@ titres · %@ artistes", number(stats.streams), number(stats.tracks), number(stats.artists)))
                 .font(.system(size: 12.5, weight: .medium)).foregroundStyle(.white.opacity(0.8)).padding(.top, 8)
             if let artist = stats.topArtists.first {
                 HStack(spacing: 14) {
@@ -337,4 +340,9 @@ private struct MonthCard: View {
         .frame(width: side, height: side)
         .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
     }
+}
+
+/// Nombre écrit dans la langue de l'app (séparateur des milliers), pas celle de l'iPhone.
+private func number<T: BinaryInteger>(_ n: T) -> String {
+    Int(n).formatted(.number.locale(LanguageStore.shared.locale))
 }

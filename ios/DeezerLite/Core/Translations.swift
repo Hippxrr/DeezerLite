@@ -224,6 +224,8 @@ enum Translations {
         "Égaliseur": ("Equalizer", "Ecualizador"),
         "Préréglage précédent": ("Previous preset", "Preajuste anterior"),
         "Préréglage suivant": ("Next preset", "Preajuste siguiente"),
+        "Fermer le lecteur": ("Close player", "Cerrar reproductor"),
+        "Se connecter": ("Log in", "Iniciar sesión"),
         "Fais glisser avec les poignées à droite.": ("Drag with the handles on the right.", "Arrastra con los tiradores de la derecha."),
         "Téléchargés": ("Downloaded", "Descargados"),
         "Stats": ("Stats", "Estadísticas"),

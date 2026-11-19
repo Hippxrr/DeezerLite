@@ -7,6 +7,8 @@ import UIKit
 @MainActor
 enum NowPlaying {
     private static var shownTrack: Int64?
+    /// Grande pochette déjà demandée pour le titre affiché.
+    private static var sharpAsked = false
     private static var artwork: MPMediaItemArtwork?
     /// Position et vitesse envoyées en dernier, et quand.
     private static var sent: (elapsed: Double, rate: Double, at: Date) = (0, 0, .distantPast)
@@ -44,7 +46,10 @@ enum NowPlaying {
         if cc.previousTrackCommand.isEnabled != previous { cc.previousTrackCommand.isEnabled = previous }
     }
 
-    static func update(track: Track?, status: Status) {
+    /// `cover` : pochette à montrer (celle choisie ici pour un MP3 importé, sinon celle du titre). `sharp` faux pendant une
+    /// rafale de suivant / précédent : la grande pochette n'est demandée qu'au titre où l'on s'arrête (avant, une par titre
+    /// sauté, sans pouvoir l'annuler).
+    static func update(track: Track?, status: Status, cover: String?, sharp: Bool = true) {
         let center = MPNowPlayingInfoCenter.default()
         guard let track else {
             center.nowPlayingInfo = nil
@@ -52,28 +57,32 @@ enum NowPlaying {
             artwork = nil
             return
         }
+        let loader = CoverLoader.shared
         if shownTrack != track.id {
             shownTrack = track.id
             artwork = nil
-            if let url = track.coverUrl {
-                let loader = CoverLoader.shared
+            sharpAsked = false
+            if let url = cover {
                 // Tout de suite : la grande si elle est prête (titre suivant préparé à l'avance), sinon la meilleure en mémoire.
                 if let ready = loader.cached(url: url, pixels: 1000) ?? loader.anyCached(url: url) { artwork = makeArtwork(ready) }
-                if loader.cached(url: url, pixels: 1000) == nil {
-                    // Puis la version nette (1000 px), une seule à la fois, remplacée au titre suivant.
-                    Task {
-                        guard let image = await loader.image(url: url, pixels: 1000), shownTrack == track.id else { return }
-                        artwork = makeArtwork(image)
-                        guard var info = center.nowPlayingInfo else { return }
-                        info[MPMediaItemPropertyArtwork] = artwork
-                        let elapsed = sent.elapsed + sent.rate * Date().timeIntervalSince(sent.at)
-                        info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = elapsed
-                        sent = (elapsed, sent.rate, Date())
-                        center.nowPlayingInfo = info
-                    }
-                }
             } else if let fallback = fallbackImage {
                 artwork = makeArtwork(fallback) // titre sans pochette : l'image de secours, comme dans l'app
+            }
+        }
+        if sharp, !sharpAsked, let url = cover {
+            sharpAsked = true
+            if loader.cached(url: url, pixels: 1000) == nil {
+                // Puis la version nette (1000 px), une seule à la fois, remplacée au titre suivant.
+                Task {
+                    guard let image = await loader.image(url: url, pixels: 1000), shownTrack == track.id else { return }
+                    artwork = makeArtwork(image)
+                    guard var info = center.nowPlayingInfo else { return }
+                    info[MPMediaItemPropertyArtwork] = artwork
+                    let elapsed = sent.elapsed + sent.rate * Date().timeIntervalSince(sent.at)
+                    info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = elapsed
+                    sent = (elapsed, sent.rate, Date())
+                    center.nowPlayingInfo = info
+                }
             }
         }
         let duration = status.durationMs > 0 ? Double(status.durationMs) / 1000 : Double(track.durationS)
