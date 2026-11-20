@@ -644,7 +644,7 @@ struct NowPlayingView: View {
                     }
                     Spacer(minLength: 8)
                     titleRow
-                        .legible()
+                        .legible(grouped: true)
                         .padding(.bottom, 18)
                 }
                 VStack(spacing: 18) {
@@ -1005,7 +1005,7 @@ private struct Backdrop: View {
             if let tall {
                 image = await CoverLoader.shared.bleedBackdrop(url: url, download: open, tall: tall, inset: inset)
             } else {
-                image = await CoverLoader.shared.backdrop(url: url, download: open)
+                image = await CoverLoader.shared.backdrop(url: url, download: open, saturation: 1.15)
             }
             // Titre changé pendant la préparation : le fond de l'ancien ne s'affiche pas sous le nouveau.
             guard !Task.isCancelled else { return }
@@ -1060,7 +1060,8 @@ private struct Backdrop: View {
         } else {
             // Remplissage sans agrandir la vue : l'image carrée, à la hauteur de l'écran, est bien plus large que lui ; posée
             // telle quelle, elle donnait cette largeur au fond entier (et à ce qui est posé avec lui).
-            Color.clear.overlay { Image(uiImage: image).resizable().interpolation(.high).scaledToFill().saturation(1.15) }
+            // Saturation déjà appliquée au fond (voir `CoverLoader.backdrop`), pas à chaque image.
+            Color.clear.overlay { Image(uiImage: image).resizable().interpolation(.high).scaledToFill() }
         }
     }
 }
@@ -1406,14 +1407,30 @@ private struct QueuePanel: View {
         let index: Int
     }
 
+    /// Lignes déjà calculées, gardées tant que la file et le titre en cours ne changent pas. Avant, des milliers de
+    /// textes et un dictionnaire étaient refaits à chaque mise à jour du lecteur, panneau ouvert. Objet (pas une valeur) :
+    /// le remplir pendant l'affichage ne relance pas l'affichage.
+    private final class RowCache {
+        var start = -1
+        var ids: [Int64] = []
+        var rows: [Row] = []
+    }
+    @State private var cache = RowCache()
+
     private func rows(from start: Int) -> [Row] {
+        let ids = player.queue.map(\.id)
+        if cache.start == start, cache.ids == ids { return cache.rows }
         var seen: [Int64: Int] = [:]
-        return (start..<player.queue.count).map { i in
-            let track = player.queue[i].id
+        let rows = (start..<ids.count).map { i in
+            let track = ids[i]
             let nth = seen[track, default: 0]
             seen[track] = nth + 1
             return Row(id: "\(track)-\(nth)", index: i)
         }
+        cache.start = start
+        cache.ids = ids
+        cache.rows = rows
+        return rows
     }
 
     var body: some View {
@@ -1789,10 +1806,18 @@ private struct ShuffleIcon: View {
 /// Contour sombre très léger autour du texte et des icônes du lecteur : sur un fond clair (pochette blanche), le blanc
 /// et la couleur d'accent restent lisibles ; sur un fond sombre, il ne se voit pas. La pochette n'est pas modifiée.
 private extension View {
-    func legible() -> some View {
-        // Sans regroupement : chaque texte et chaque icône a son propre contour (le bouton AirPlay, une vue UIKit,
-        // s'affiche ainsi normalement).
-        shadow(color: .black.opacity(0.45), radius: 1.5)
-            .shadow(color: .black.opacity(0.2), radius: 6)
+    /// `grouped` : un seul contour pour tout le bloc, calculé une fois (moins de rendus hors écran à chaque image quand
+    /// on glisse le lecteur). Seulement sans vue UIKit dedans : le bloc des commandes, qui contient le bouton AirPlay
+    /// (vue UIKit), garde un contour par élément pour que ce bouton s'affiche et réponde normalement.
+    @ViewBuilder
+    func legible(grouped: Bool = false) -> some View {
+        if grouped {
+            compositingGroup()
+                .shadow(color: .black.opacity(0.45), radius: 1.5)
+                .shadow(color: .black.opacity(0.2), radius: 6)
+        } else {
+            shadow(color: .black.opacity(0.45), radius: 1.5)
+                .shadow(color: .black.opacity(0.2), radius: 6)
+        }
     }
 }

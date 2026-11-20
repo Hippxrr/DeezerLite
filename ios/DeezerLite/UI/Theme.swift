@@ -271,9 +271,31 @@ extension View {
     }
 }
 
+/// Verre d'une longue liste regroupé dans un seul conteneur (iOS 26 ; rien avant) : recommandé par Apple, le GPU le
+/// rend ensemble au lieu de carte par carte, ce qui allège le défilement. Espacement nul : les cartes ne se fondent pas.
+struct GlassGroup: ViewModifier {
+    func body(content: Content) -> some View {
+        #if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            GlassEffectContainer(spacing: 0) { content }
+        } else {
+            content
+        }
+        #else
+        content
+        #endif
+    }
+}
+
+extension View {
+    func glassGroup() -> some View { modifier(GlassGroup()) }
+}
+
 extension EnvironmentValues {
     /// `false` : le verre des surfaces ne réagit plus au doigt (pages cachées sous le grand lecteur).
     @Entry var glassReactsToTouch = true
+    /// `false` : page d'un onglet caché (laissée en place sous l'onglet affiché). Ses animations s'arrêtent.
+    @Entry var pageVisible = true
 }
 
 #if compiler(>=6.2)

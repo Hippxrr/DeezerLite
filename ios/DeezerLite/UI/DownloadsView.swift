@@ -130,8 +130,15 @@ private struct DownloadActivity: View {
     /// à chaque mise à jour, et des échecs ne cachent plus les téléchargements qui avancent.
     private var active: [DownloadUpdate] {
         let states = player.downloadStates
-        let rank = Dictionary(player.downloadQueueOrder.enumerated().map { ($1, $0) }, uniquingKeysWith: { a, _ in a })
         let visible = states.values.filter { $0.state != .queued }
+        // Rang dans la file des seules lignes visibles (quelques-unes). Avant, un dictionnaire de toute la file (des milliers
+        // de titres) était refait à chaque progression, plusieurs fois par seconde.
+        var wanted = Set(visible.map(\.id))
+        var rank: [Int64: Int] = [:]
+        for (i, id) in player.downloadQueueOrder.enumerated() {
+            if wanted.remove(id) != nil { rank[id] = i }
+            if wanted.isEmpty { break }
+        }
         let sorted = visible.sorted { a, b in
             let pa = a.state == .downloading ? 0 : 1
             let pb = b.state == .downloading ? 0 : 1

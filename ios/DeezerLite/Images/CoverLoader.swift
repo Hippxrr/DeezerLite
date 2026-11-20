@@ -149,8 +149,11 @@ final class CoverLoader: @unchecked Sendable {
     /// thread principal. Le résultat est gardé : afficher ou animer le lecteur ne recalcule aucun flou.
     /// La grande pochette déjà en mémoire (celle de l'écran verrouillé) sert si elle est là : pas de second
     /// téléchargement du même titre en 500 px. `download: false` : seulement à partir de ce qui est en mémoire.
-    func backdrop(url: String, download: Bool = true) async -> UIImage? {
-        if let hit = backdrops.object(forKey: url as NSString) { return hit }
+    /// `saturation` : appliquée ici, une fois (1 : aucune). Avant, le lecteur l'appliquait à chaque image de son
+    /// ouverture, de sa fermeture et du glissement (filtre sur une image plein écran, deux pendant un fondu).
+    func backdrop(url: String, download: Bool = true, saturation: CGFloat = 1) async -> UIImage? {
+        let key = (saturation == 1 ? url : "\(saturation)|\(url)") as NSString
+        if let hit = backdrops.object(forKey: key) { return hit }
         let inMemory = anyCached(url: url).flatMap { ($0.cgImage?.width ?? 0) >= 400 ? $0 : nil }
         let picture: UIImage?
         if let inMemory { picture = inMemory } else if download { picture = await image(url: url, pixels: 500) } else { return nil }
@@ -161,12 +164,15 @@ final class CoverLoader: @unchecked Sendable {
             let scale = 400 / CGFloat(max(source.width, source.height, 1))
             let small = input.transformed(by: CGAffineTransform(scaleX: scale, y: scale))
             // Bords étendus avant le flou : pas de halo sombre sur les côtés, puis recadrage à la taille d'origine.
-            let soft = small.clampedToExtent().applyingGaussianBlur(sigma: 22).cropped(to: small.extent)
+            var soft = small.clampedToExtent().applyingGaussianBlur(sigma: 22).cropped(to: small.extent)
+            if saturation != 1 {
+                soft = soft.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: saturation])
+            }
             guard let out = context.createCGImage(soft, from: small.extent) else { return nil }
             return UIImage(cgImage: out)
         }.value
         guard let blurred else { return nil }
-        backdrops.setObject(blurred, forKey: url as NSString)
+        backdrops.setObject(blurred, forKey: key)
         return blurred
     }
 

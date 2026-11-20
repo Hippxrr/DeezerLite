@@ -49,7 +49,10 @@ final class Player {
     /// `nil` tant que la session n'a pas été vérifiée au lancement.
     private(set) var loggedIn: Bool?
     private(set) var current: Track? {
-        didSet { if (current != nil) != hasTrack { hasTrack = current != nil } }
+        didSet {
+            if (current != nil) != hasTrack { hasTrack = current != nil }
+            syncMiniShown()
+        }
     }
     /// Un titre est affiché. Lu par la barre d'onglets et le mini-lecteur à la place de `current` : lire `current`
     /// redessinait les onglets (et leurs pages) à chaque changement de titre.
@@ -58,7 +61,17 @@ final class Player {
     /// Instant où `status` a été reçu : la position affichée est extrapolée à partir de là, sans interroger Rust.
     private(set) var statusAt = Date()
     /// Titre demandé, son pas encore arrivé (affiché tout de suite pour que l'appui réponde immédiatement).
-    private(set) var loading = false
+    private(set) var loading = false {
+        didSet { syncMiniShown() }
+    }
+    /// Mini-lecteur à montrer (un titre, ou un chargement). Ne change que quand sa valeur change : avant, les onglets et
+    /// chaque page lisaient `hasTrack || loading`, et `loading`, qui bascule à chaque lecture demandée (et même quand il
+    /// garde sa valeur), redessinait la racine de l'app deux fois par appui sur suivant, précédent ou lecture.
+    private(set) var miniShown = false
+    private func syncMiniShown() {
+        let shown = hasTrack || loading
+        if shown != miniShown { miniShown = shown }
+    }
     private(set) var queue: [Track] = []
     private(set) var queueIndex = 0
     private(set) var shuffle = false

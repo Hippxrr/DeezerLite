@@ -116,6 +116,7 @@ struct LibraryView: View {
                 }
             }
         }
+        .glassGroup()
         .animation(.snappy(duration: 0.3), value: rows.map(\.id))
         .sheet(isPresented: $reordering) {
             LibraryOrderView().environment(player).presentationDetents([.medium, .large])
@@ -327,6 +328,7 @@ struct LibrarySectionView: View {
                 }
             }
         }
+        .glassGroup()
     }
 }
 

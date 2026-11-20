@@ -241,12 +241,13 @@ struct FallbackArt: View {
 /// `playing` : faux aussi sous le grand lecteur (opaque) : l'animation ne tourne pas pour rien.
 struct PlayingBars: View {
     let playing: Bool
+    @Environment(\.pageVisible) private var visible
 
     var body: some View {
         Image(systemName: "waveform")
             .font(.system(size: 15, weight: .bold))
             .foregroundStyle(Theme.accent)
-            .symbolEffect(.variableColor.iterative, options: .repeating, isActive: playing)
+            .symbolEffect(.variableColor.iterative, options: .repeating, isActive: playing && visible)
     }
 }
 

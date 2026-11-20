@@ -237,24 +237,16 @@ struct DetailView: View {
                     .accessibilityLabel(tr("Importer un MP3"))
             }
         }
-        if let d = detail, !d.offline, player.downloadedCollection(kind: d.kind, id: d.id) != nil {
+        // Collection téléchargée : vérifié dans le bouton lui-même. Lu ici, il faisait recalculer toute la page à chaque
+        // relecture des listes de téléchargements (plusieurs fois pendant le téléchargement d'une collection).
+        if let d = detail, !d.offline {
             ToolbarItem(placement: .topBarTrailing) { DownloadRestButton(detail: d) }
         }
         if compactBar, let d = detail {
             ToolbarItem(placement: .topBarTrailing) { compactMenu(d) }
         }
         if !compactBar, let d = detail, ["album", "playlist", "loved"].contains(d.kind), !d.tracks.isEmpty {
-            ToolbarItem(placement: .topBarTrailing) {
-                let downloaded = player.downloadedCollection(kind: d.kind, id: d.id) != nil
-                // Télécharger : tout de suite. Supprimer : après confirmation (un appui accidentel effaçait tout).
-                Button {
-                    if downloaded { confirmRemoveDownload = true } else { player.toggleDownload(d) }
-                } label: {
-                    Image(systemName: downloaded ? "trash" : "arrow.down.circle")
-                        .foregroundStyle(downloaded ? .red : .primary)
-                }
-                .accessibilityLabel(downloaded ? tr("Supprimer des téléchargements") : tr("Télécharger la collection"))
-            }
+            ToolbarItem(placement: .topBarTrailing) { CollectionDownloadButton(detail: d, confirmRemove: $confirmRemoveDownload) }
         }
         if !compactBar, let d = detail, let url = deezerLink(kind: d.kind, id: d.id) {
             ToolbarItem(placement: .topBarTrailing) {
@@ -584,12 +576,32 @@ private struct ListSearch: ViewModifier {
 /// « Télécharger le reste » : collection téléchargée dont des titres manquent sans être en cours (« Tout arrêter »,
 /// annulés). Vue à part : elle seule suit la progression des téléchargements (avant, toute la page de la playlist était
 /// redessinée à chaque progression).
+/// Télécharger la collection, ou la supprimer des téléchargements. Vue à part : seule elle suit les listes de
+/// téléchargements, pas toute la page.
+private struct CollectionDownloadButton: View {
+    @Environment(Player.self) private var player
+    let detail: Detail
+    @Binding var confirmRemove: Bool
+
+    var body: some View {
+        let downloaded = player.downloadedCollection(kind: detail.kind, id: detail.id) != nil
+        // Télécharger : tout de suite. Supprimer : après confirmation (un appui accidentel effaçait tout).
+        Button {
+            if downloaded { confirmRemove = true } else { player.toggleDownload(detail) }
+        } label: {
+            Image(systemName: downloaded ? "trash" : "arrow.down.circle")
+                .foregroundStyle(downloaded ? .red : .primary)
+        }
+        .accessibilityLabel(downloaded ? tr("Supprimer des téléchargements") : tr("Télécharger la collection"))
+    }
+}
+
 private struct DownloadRestButton: View {
     @Environment(Player.self) private var player
     let detail: Detail
 
     var body: some View {
-        if detail.tracks.contains(where: { !$0.unavailable && !player.downloadedIds.contains($0.id) && player.downloadStates[$0.id] == nil }) {
+        if player.downloadedCollection(kind: detail.kind, id: detail.id) != nil, detail.tracks.contains(where: { !$0.unavailable && !player.downloadedIds.contains($0.id) && player.downloadStates[$0.id] == nil }) {
             Button { player.download(detail) } label: { Image(systemName: "arrow.down.circle") }
                 .accessibilityLabel(tr("Télécharger le reste"))
         }

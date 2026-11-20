@@ -337,8 +337,8 @@ struct MainTabs: View {
         }
         // Réduite en défilant seulement quand le mini-lecteur est là (elle lui fait de la place) : sans titre en cours,
         // la barre restait sinon réduite à l'onglet ouvert, bibliothèque cachée, pour rien.
-        .tabBarMinimizeBehavior(player.hasTrack || player.loading ? .onScrollDown : .never)
-        .tabViewBottomAccessory(isEnabled: player.hasTrack || player.loading) {
+        .tabBarMinimizeBehavior(player.miniShown ? .onScrollDown : .never)
+        .tabViewBottomAccessory(isEnabled: player.miniShown) {
             BarMiniPlayer().environment(player)
         }
     }
@@ -374,6 +374,8 @@ struct MainTabs: View {
             .opacity(tab == id ? 1 : 0)
             .allowsHitTesting(tab == id)
             .accessibilityHidden(tab != id)
+            // Animations arrêtées dans les pages cachées : avant, l'icône du titre en cours y tournait pour rien.
+            .environment(\.pageVisible, tab == id)
     }
 
     /// Barre de l'app : les pages restent en place l'une sur l'autre, et la barre est posée par-dessus. Elle ignore le
@@ -395,9 +397,9 @@ struct MainTabs: View {
             .ignoresSafeArea(.container, edges: .bottom)
             .ignoresSafeArea(.keyboard)
         }
-        .background(ScrollCollapse(active: !player.showFullPlayer && (player.hasTrack || player.loading),
+        .background(ScrollCollapse(active: !player.showFullPlayer && player.miniShown,
                                    collapsed: barCollapsed) { barCollapsed = $0 })
-        .onChange(of: !player.hasTrack && !player.loading) { _, empty in if empty { barCollapsed = false } }
+        .onChange(of: !player.miniShown) { _, empty in if empty { barCollapsed = false } }
     }
 
     @ViewBuilder
@@ -425,7 +427,7 @@ struct MainTabs: View {
                 // fermer) : le verre « interactif » des cartes réagissait au doigt à travers le lecteur (iOS le fait
                 // réagir même sous ce qui est posé dessus), et l'effet d'appui apparaissait sur la page quand il descendait.
                 .allowsHitTesting(!player.showFullPlayer)
-                .environment(\.glassReactsToTouch, !player.showFullPlayer)
+                .modifier(GlassCalm(open: player.showFullPlayer))
                 // Ici plutôt qu'avec les autres réactions plus bas : ajoutée à cette longue chaîne, elle dépassait ce que le
                 // compilateur sait vérifier.
                 .onChange(of: player.openDownloadsPage) { showDownloadsPage() }
@@ -434,7 +436,7 @@ struct MainTabs: View {
             if !MiniPlayerMetrics.inTabBar {
                 VStack {
                     Spacer()
-                    if player.hasTrack || player.loading {
+                    if player.miniShown {
                         MiniPlayer()
                             .padding(.bottom, MiniPlayerMetrics.tabBar)
                             .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -442,7 +444,7 @@ struct MainTabs: View {
                 }
                 .ignoresSafeArea(.keyboard)
                 .accessibilityHidden(player.showFullPlayer)
-                .animation(.spring(response: 0.4, dampingFraction: 0.85), value: !player.hasTrack && !player.loading)
+                .animation(.spring(response: 0.4, dampingFraction: 0.85), value: !player.miniShown)
             }
             // Le lecteur plein écran reste en place, hors de l'écran quand il est fermé : l'ouvrir ou le fermer
             // n'est qu'un déplacement (rien à construire), et il suit le doigt pendant le geste.
@@ -594,7 +596,7 @@ private struct MiniPlayerSpace: ViewModifier {
     @AppStorage("tabBarFull") private var tabBarFull = true
 
     func body(content: Content) -> some View {
-        let mini = player.hasTrack || player.loading
+        let mini = player.miniShown
         content.safeAreaInset(edge: .bottom, spacing: 0) {
             if MiniPlayerMetrics.inTabBar {
                 // Barre de l'app : la place est à laisser ici. Barre d'iOS : c'est elle qui s'en charge.
@@ -608,4 +610,22 @@ private struct MiniPlayerSpace: ViewModifier {
 
 extension View {
     func miniPlayerSpace() -> some View { modifier(MiniPlayerSpace()) }
+}
+
+/// Verre des pages « au repos » (sans réaction au doigt) pendant que le grand lecteur est ouvert, mais seulement une fois
+/// son animation d'ouverture finie. Avant, le verre de toutes les pages était reconfiguré dès la première image de
+/// l'animation (à-coup à l'ouverture). Les appuis sur les pages sont déjà bloqués dès l'ouverture (`allowsHitTesting`).
+private struct GlassCalm: ViewModifier {
+    let open: Bool
+    @State private var calm = false
+
+    func body(content: Content) -> some View {
+        content
+            .environment(\.glassReactsToTouch, !calm)
+            .task(id: open) {
+                guard open else { calm = false; return }
+                try? await Task.sleep(for: .milliseconds(450))
+                if !Task.isCancelled { calm = true }
+            }
+    }
 }

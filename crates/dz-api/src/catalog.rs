@@ -5,7 +5,7 @@
 
 use futures_util::future::BoxFuture;
 use futures_util::FutureExt;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 use crate::{DeezerClient, DeezerError, RawTrack, Result, TrackInfo};
@@ -261,6 +261,14 @@ fn image(kind: &str, md5: &str, size: u32) -> Option<String> {
         .then(|| format!("https://cdn-images.dzcdn.net/images/{kind}/{md5}/{size}x{size}-000000-80-0-0.jpg"))
 }
 
+/// Comme `data`, mais sort la liste de la réponse au lieu de la recopier (la réponse n'en a plus besoin).
+fn take_data(v: &mut Value, key: &str) -> Vec<Value> {
+    match v.get_mut(key).and_then(|x| x.get_mut("data")).map(Value::take) {
+        Some(Value::Array(list)) => list,
+        _ => Vec::new(),
+    }
+}
+
 fn data<'a>(v: &'a Value, key: &str) -> &'a [Value] {
     v.get(key)
         .and_then(|x| x.get("data"))
@@ -306,10 +314,12 @@ fn rows(v: &Value) -> Vec<Value> {
     v.get("data").and_then(Value::as_array).or_else(|| v.as_array()).cloned().unwrap_or_default()
 }
 
+/// Lu directement depuis le JSON reçu, sans le recopier. Avant, chaque titre était cloné entier avant d'être lu : pour une
+/// playlist de 3 000 titres, ~80 ms au lieu de ~15 ms, sur un des deux fils que le lecteur utilise aussi.
 fn tracks(items: &[Value]) -> Vec<TrackInfo> {
     items
         .iter()
-        .filter_map(|x| serde_json::from_value::<RawTrack>(x.clone()).ok())
+        .filter_map(|x| RawTrack::deserialize(x).ok())
         .map(Into::into)
         .collect()
 }
@@ -557,12 +567,36 @@ impl DeezerClient {
         // Plus de 500 éléments : les pages suivantes (avant, la bibliothèque s'arrêtait à 500 sans prévenir).
         let total = t.get("total").and_then(|v| v.as_u64().or_else(|| v.as_str()?.trim().parse().ok())).unwrap_or(0) as usize;
         if let Some(list) = t.get_mut("data").and_then(Value::as_array_mut) {
-            while list.len() < total && list.len() < 20_000 {
-                // Page en échec : erreur plutôt qu'une liste coupée (une synchro aurait pris les éléments manquants
-                // pour des éléments retirés, et supprimé leurs téléchargements).
+            let rows_of = |v: &Value| v.get("TAB").and_then(|t| t.get(tab)).and_then(|t| t.get("data")).and_then(Value::as_array).cloned().unwrap_or_default();
+            let limit = total.min(20_000);
+            // Pages suivantes demandées 4 à la fois (dans l'ordre), au pas de la première. Avant, une à une : chaque page
+            // attendait la précédente. Page en échec : erreur plutôt qu'une liste coupée (une synchro aurait pris les
+            // éléments manquants pour des éléments retirés, et supprimé leurs téléchargements).
+            let step = list.len();
+            let mut done = false;
+            if step > 0 && step < limit {
+                use futures_util::{stream, StreamExt, TryStreamExt};
+                let starts: Vec<usize> = (1..).map(|k| k * step).take_while(|start| *start < limit).collect();
+                let pages: Vec<Value> = stream::iter(starts).map(&page).buffered(4).try_collect().await?;
+                for more in pages {
+                    let rows = rows_of(&more);
+                    // Page vide, ou la même que la première (serveur qui ignore `start`) : on garde ce qu'on a.
+                    if rows.is_empty() || rows.first() == list.first() {
+                        done = true;
+                        break;
+                    }
+                    let short = rows.len() < step;
+                    list.extend(rows);
+                    // Page plus courte que prévu avant la fin : les suivantes ne tombent plus au bon endroit, la suite est
+                    // redemandée une à une, comme avant.
+                    if short {
+                        break;
+                    }
+                }
+            }
+            while !done && list.len() < limit {
                 let more = page(list.len()).await?;
-                let rows = more.get("TAB").and_then(|t| t.get(tab)).and_then(|t| t.get("data")).and_then(Value::as_array).cloned().unwrap_or_default();
-                // Page vide, ou la même que la première (serveur qui ignore `start`) : on garde ce qu'on a.
+                let rows = rows_of(&more);
                 if rows.is_empty() || rows.first() == list.first() {
                     break;
                 }
@@ -922,8 +956,8 @@ impl DeezerClient {
                     let body = json!({ "playlist_id": sid.clone(), "lang": "fr", "nb": PAGE, "start": start, "tags": true, "header": true });
                     async move { self.gw::<Value>("deezer.pagePlaylist", &body).await }.boxed()
                 };
-                let r: Value = page(0).await?;
-                let mut songs: Vec<Value> = data(&r, "SONGS").to_vec();
+                let mut r: Value = page(0).await?;
+                let mut songs: Vec<Value> = take_data(&mut r, "SONGS");
                 let announced = |v: &Value| {
                     let n = |x: Option<&Value>| x.and_then(|x| x.as_u64().or_else(|| x.as_str().and_then(|s| s.trim().parse().ok()))).unwrap_or(0) as usize;
                     n(v.pointer("/SONGS/total")).max(n(v.pointer("/DATA/NB_SONG")))
@@ -934,7 +968,7 @@ impl DeezerClient {
                 // indisponibles comptés par Deezer) sans échec de page reste accepté.
                 let mut failed = !collect_pages(&mut songs, total, MAX_TRACKS, |start| {
                     let fut = page(start);
-                    async move { fut.await.ok().map(|v| data(&v, "SONGS").to_vec()) }.boxed()
+                    async move { fut.await.ok().map(|mut v| take_data(&mut v, "SONGS")) }.boxed()
                 })
                 .await;
                 // Deezer plafonne parfois cette méthode (2 000 titres) : la méthode « playlist.getSongs » n'a pas ce plafond.
