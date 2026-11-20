@@ -14,6 +14,8 @@ enum NowPlaying {
     private static var sharpAsked = false
     /// Grande pochette (1000 px) déjà affichée.
     private static var sharpShown = false
+    /// Téléchargement de la grande pochette raté : nouvel essai possible à partir de cet instant.
+    private static var retryAt = Date.distantPast
     private static var artwork: MPMediaItemArtwork?
     /// Position et vitesse envoyées en dernier, et quand.
     private static var sent: (elapsed: Double, rate: Double, at: Date) = (0, 0, .distantPast)
@@ -70,6 +72,7 @@ enum NowPlaying {
             artwork = nil
             sharpAsked = false
             sharpShown = false
+            retryAt = .distantPast
             if let url = cover {
                 // Tout de suite : la grande si elle est prête (titre suivant préparé à l'avance), sinon la meilleure en mémoire.
                 if let big = loader.cached(url: url, pixels: 1000) {
@@ -88,11 +91,20 @@ enum NowPlaying {
                 // n'était jamais montrée et l'écran verrouillé restait sans pochette, ou flou, pour tout le titre.
                 artwork = makeArtwork(big)
                 sharpShown = true
-            } else if !sharpAsked {
+            } else if !sharpAsked, Date() >= retryAt {
                 sharpAsked = true
                 // Puis la version nette (1000 px), une seule à la fois, remplacée au titre suivant.
                 Task {
-                    guard let image = await loader.image(url: url, pixels: 1000), shownTrack == track.id, shownCover == url else { return }
+                    let image = await loader.image(url: url, pixels: 1000)
+                    guard shownTrack == track.id, shownCover == url else { return }
+                    guard let image else {
+                        // Échec (réseau coupé, app en arrière-plan) : nouvel essai à une prochaine mise à jour, 10 s plus
+                        // tard au plus tôt. Avant, ce titre restait sans pochette jusqu'au bout, et les suivants aussi tant
+                        // que le réseau flanchait (le cache en mémoire est vidé en arrière-plan).
+                        sharpAsked = false
+                        retryAt = Date().addingTimeInterval(10)
+                        return
+                    }
                     artwork = makeArtwork(image)
                     sharpShown = true
                     guard var info = center.nowPlayingInfo else { return }
@@ -104,6 +116,8 @@ enum NowPlaying {
                 }
             }
         }
+        // Toujours rien à montrer, mais l'app a chargé cette pochette entre-temps (à une autre taille) : reprise tout de suite.
+        if artwork == nil, let url = cover, let ready = loader.anyCached(url: url) { artwork = makeArtwork(ready) }
         let duration = status.durationMs > 0 ? Double(status.durationMs) / 1000 : Double(track.durationS)
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: track.title,
