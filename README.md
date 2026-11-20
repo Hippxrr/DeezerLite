@@ -17,7 +17,7 @@ networking, the play queue and audio.
 
 **At a glance**
 
-- 📱 **Runs on**: iPhone with iOS 17 or later (portrait). Liquid Glass and the app's own tab bar on iOS 26.1+.
+- 📱 **Runs on**: iPhone with iOS 17 or later (portrait). Liquid Glass on iOS 26, and the app's own tab bar on iOS 26.1+.
 - 🎵 **Needs**: a Deezer account. FLAC requires a subscription that includes lossless.
 - 🛠 **Built with**: a Mac and Xcode, one command (`bash scripts/build-ipa.sh`), producing an unsigned IPA.
 - 📲 **Installed by**: sideloading only (no App Store, no TestFlight, no source to add).
@@ -25,7 +25,7 @@ networking, the play queue and audio.
 | | |
 |---|---|
 | Device | iPhone, iOS 17 or later |
-| Display name | Deezer |
+| Display name | Deezer (on purpose, for a familiar home screen; not the official app) |
 | Version | 2.6.3 |
 | Bundle ID | `com.hippxrr.deezerlite` |
 | UI | SwiftUI, Observation, Liquid Glass on iOS 26 |
@@ -46,6 +46,7 @@ networking, the play queue and audio.
 6. [Building the IPA](#-building-the-ipa)
 7. [Credits](#-credits)
 8. [Disclaimer](#%EF%B8%8F-disclaimer)
+9. [License](#-license)
 
 ---
 
@@ -67,6 +68,9 @@ networking, the play queue and audio.
   message, video) and resumes only if that app allows it and music was playing. Removing earbuds pauses; putting
   them back within 30 minutes resumes.
 - **Resume on launch**: the last session comes back at the same position (can be turned off).
+- **Sleep timer**: 15, 30, 45 or 60 minutes, or the end of the current track, with a gentle fade out.
+- **Full-width artwork** option for the full player; a long press on the artwork can save it to Photos.
+- **Lyrics as an image**: pick up to 6 lines and share them as a card (Messages, Instagram, Photos…).
 
 ### 📥 Offline
 
@@ -87,7 +91,8 @@ networking, the play queue and audio.
 - 🏠 **Home**: Flow, liked tracks, pinned playlists, albums and artists, then Deezer's recommendations grouped by
   category (recently played, new releases, mixes, "Mixes inspired by"…), each one can be toggled and reordered.
 - 🔍 **Search**: results as you type, a featured artist with their latest release, tracks, albums, playlists and
-  artists; search history.
+  artists; search history. Tolerant matching: accents, punctuation and small typos are ignored, and the most followed
+  artist wins among close names ("booskap" finds Booska-P).
 - 📚 **Library**: playlists, albums, artists and stats.
 - 🎶 **Your playlists**: create one from the Library, add any track from its long press ("Add to a playlist", with
   "New playlist" right there), delete your own playlists after confirmation.
@@ -97,6 +102,8 @@ networking, the play queue and audio.
 - 📊 **Official stats**: Deezer's monthly recap (listening time, tracks, artists, genres) as a shareable image, and
   the latest listens from Deezer's history.
 - 👨‍👩‍👧 **Family accounts**: profile picker at launch ("Who's listening?") and profile switching in settings.
+- 🎙 **Your own MP3s**: upload an MP3 to your Deezer account from the app, trim its start and end, edit its title,
+  artist and album, and add a cover.
 
 ### Personalization
 
@@ -144,7 +151,8 @@ keychain, on this device only.
 
 ## 🔐 Privacy
 
-- **No tracking, no analytics, no ads, no third-party service.** The app only talks to Deezer's own servers.
+- **No tracking, no analytics, no ads.** The app talks to Deezer's own servers, plus genius.com only when the
+  optional Genius lyrics fallback is turned on.
 - **The only usage data sent to Deezer is listen reports** (which track, how long it was played, in which format,
   and when). They are what feeds your Deezer history and your official monthly and yearly stats.
 - **Everything else is either content or your own actions**: requests needed to show the catalog, search and your
@@ -177,8 +185,10 @@ The app is split into two parts that stay separate.
                           │ UniFFI (calls, data)       │ dz_render (C, real-time)
 ┌─────────────────────────┼────────── Engine (Rust) ───┼──────────────────────┐
 │  dz-ffi ── dz-core (player, queue, listens) ── dz-audio (decoding, mixing)  │
-│                 │                                     │                      │
-│              dz-api (Deezer)                    dz-stream (streams)          │
+│    │            │                                     │                      │
+│ dz-offline   dz-api (Deezer)                    dz-stream (streams)          │
+│ (downloads)                                           │                      │
+│                                               dz-decrypt (decryption)       │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -327,8 +337,8 @@ codesign --force --sign - --entitlements ios/DeezerLite/App/DeezerLite.entitleme
 ### 3. Install
 
 The app is installed by **sideloading only**: there is no App Store release, no TestFlight and no source or repo to
-add to an install app. Take the IPA from `build/` and install it on the iPhone with a sideloading tool, which signs
-it with your own Apple ID or certificate.
+add to an install app. Take the IPA from `build/` and install it on the iPhone with a sideloading tool (Sideloadly,
+AltStore…), which signs it with your own Apple ID or certificate.
 
 The IPA only carries an ad hoc signature, so it must be signed during sideloading. CarPlay only works if the signing
 profile also includes the CarPlay entitlement.

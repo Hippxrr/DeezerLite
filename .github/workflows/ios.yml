@@ -1,5 +1,4 @@
 # Construit une IPA non signée, publiée comme artefact du run (7 jours), jamais comme Release.
-# Le dépôt doit rester privé : l'IPA contient le cœur compilé.
 name: iOS (IPA non signée)
 
 # Lancé à la main seulement : onglet Actions > iOS (IPA non signée) > Run workflow.
