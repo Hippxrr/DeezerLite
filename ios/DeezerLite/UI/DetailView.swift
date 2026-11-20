@@ -459,6 +459,10 @@ struct DetailView: View {
                 }
             }
             .shadow(color: .black.opacity(0.45), radius: 20, y: 10)
+            // Nommée pour VoiceOver, qui y trouve aussi le menu (renommer, changer la pochette) : avant, elle était muette.
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(tr("Pochette"))
+            .accessibilityAddTraits(.isImage)
             // Appui long sur la pochette : la changer sur ce téléphone (playlists et titres aimés), renommer les titres aimés.
             .contextMenu {
                 if d.kind == "loved" { RenameLovedMenu() }

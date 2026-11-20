@@ -212,9 +212,11 @@ final class Player {
     }
 
     func download(_ detail: Detail) {
-        guard core != nil, !detail.tracks.isEmpty else { return }
+        guard core != nil, loggedIn == true, !loggingOut, !detail.tracks.isEmpty else { return }
         // Dans la file des modifications : passe après une suppression de cette collection demandée juste avant.
         editDownloads {
+            // Déconnexion commencée entre-temps : avant, la collection était enregistrée et téléchargée pour le compte suivant.
+            guard self.loggedIn == true, !self.loggingOut else { return }
             do {
                 let missing = try await self.storeDownloadCollection(detail)
                 if missing.isEmpty {
@@ -385,7 +387,7 @@ final class Player {
 
     func download(_ tracks: [Track]) {
         // Compte fermé (synchro encore en route pendant la déconnexion) : rien n'est ajouté pour le compte suivant.
-        guard core != nil, loggedIn == true, !tracks.isEmpty else { return }
+        guard core != nil, loggedIn == true, !loggingOut, !tracks.isEmpty else { return }
         // Redemandés par l'utilisateur : de nouveau suivis par la synchro.
         let ids = tracks.map(\.id)
         if !skippedDownloads.isDisjoint(with: ids) {
@@ -590,17 +592,6 @@ final class Player {
         if downloadedIds != lists.0 { downloadedIds = lists.0 }
         downloads = lists.1
         downloadCollections = lists.2
-        refreshDownloadBytes()
-        syncDownloadRows()
-    }
-
-    /// Mise à jour immédiate (après une action de l'utilisateur, dont la suite lit les listes tout de suite).
-    private func refreshDownloads() {
-        guard let core else { return }
-        cancelBackgroundDownloadsRefresh()
-        downloadedIds = Set(core.downloadedIds())
-        downloads = core.standaloneDownloads()
-        downloadCollections = core.downloadCollections()
         refreshDownloadBytes()
         syncDownloadRows()
     }
@@ -982,7 +973,7 @@ final class Player {
             downloadCollections = core.downloadCollections()
         } catch {
             core = nil
-            startError = "Démarrage impossible : \(error)"
+            startError = tr("Démarrage impossible : %@", "\(error)")
         }
         message = startError
         events.player = self
@@ -1371,6 +1362,10 @@ final class Player {
             KeychainAccess.allowWhileLocked()
             loggedIn = true
             sessionReady = true
+            // Comme à l'ouverture de session : listes des téléchargements relues pour ce compte. Avant, après une session
+            // expirée puis la connexion d'un autre compte, les Titres aimés téléchargés de l'ancien restaient affichés.
+            forgetOfflineDetails()
+            await refreshDownloadsInBackground()
             BackgroundDownloadManager.shared.deezerSessionIsReady()
             prefetch()
             await loadProfiles()
@@ -1421,8 +1416,13 @@ final class Player {
         message = tr("Session Deezer expirée : reconnecte-toi.")
     }
 
+    /// Déconnexion en cours : `loggedIn` reste vrai jusqu'à la fin, donc aucun téléchargement ne doit partir pendant ce temps.
+    @ObservationIgnored private var loggingOut = false
+
     func logout() async {
         guard let core else { return }
+        loggingOut = true
+        defer { loggingOut = false }
         accountGeneration += 1
         // Réponses encore en route (synchro des téléchargements…) : plus appliquées pendant la déconnexion.
         profileGeneration += 1
@@ -1430,6 +1430,8 @@ final class Player {
         BackgroundDownloadManager.shared.deezerSessionEnded()
         // Modifications des téléchargements en cours finies avant (leurs messages arrivaient après la déconnexion).
         await downloadEdits?.value
+        // Téléchargements ajoutés à la file par ces modifications (avant : écrits dans la file et repris au compte suivant).
+        BackgroundDownloadManager.shared.stopAll()
         do { try await core.logout() } catch { message = describe(error) }
         // Ouverture de session lancée pendant la déconnexion (réseau revenu, nouvel essai) : elle ne rouvre pas le compte.
         accountGeneration += 1
@@ -1904,12 +1906,15 @@ final class Player {
     func playTrackMix(_ id: UInt64) {
         guard let core else { return }
         let before = beforePlay()
+        // Titre affiché au moment de la demande (le titre provisoire de Flow s'il charge encore). Avant, c'était le titre
+        // d'avant Flow : un mix en échec pendant le chargement de Flow ne montrait aucun message, et le chargement restait 20 s.
+        let showing = current?.id
         pendingRestore = nil
         activateOutput()
         isFlow = false
         startLoading()
         Task {
-            do { try await core.playTrackMix(id: Int64(id)) } catch { playFailed(error, before: before, ifShowing: before.current?.id) }
+            do { try await core.playTrackMix(id: Int64(id)) } catch { playFailed(error, before: before, ifShowing: showing) }
         }
     }
 
@@ -2669,7 +2674,8 @@ final class Player {
     func describe(_ error: Error) -> String {
         switch error as? CoreError {
         case .Api(let m): return tr(m) // messages du cœur, en français : traduits s'ils sont connus
-        case .Keychain(let m): return m
+        // Détail du système (souvent en anglais) précédé d'un texte traduit : avant, le texte brut du cœur s'affichait seul.
+        case .Keychain(let m): return tr("Trousseau de l'iPhone inaccessible : %@", m)
         case .Player: return tr("Lecteur indisponible.")
         case .UnknownTrack: return tr("Titre inconnu : recharge la page.")
         case .SessionExpired:

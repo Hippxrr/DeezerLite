@@ -508,6 +508,33 @@ fn supersedes(cmd: &PlayerCmd) -> bool {
     )
 }
 
+/// Commandes qui peuvent recharger le titre (reprise sur moteur vide, autre qualité) : lentes sur réseau faible, elles
+/// s'effacent devant une demande de lecture (voir `race`).
+fn reloads(cmd: &PlayerCmd) -> bool {
+    matches!(cmd, PlayerCmd::Resume | PlayerCmd::Quality { .. })
+}
+
+/// Attend `work` en lisant les commandes qui arrivent : une demande de lecture (voir `supersedes`) l'abandonne et est
+/// renvoyée (`Some(Some(c))`) ; les autres sont gardées dans `later`, pour après. `Some(None)` : canal fermé.
+async fn race(
+    work: impl std::future::Future<Output = ()>,
+    rx: &mut mpsc::Receiver<PlayerCmd>,
+    later: &mut Vec<PlayerCmd>,
+) -> Option<Option<PlayerCmd>> {
+    tokio::pin!(work);
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut work => return None,
+            c = rx.recv() => match c {
+                Some(c) if supersedes(&c) => return Some(Some(c)),
+                Some(c) => later.push(c),
+                None => return Some(None),
+            },
+        }
+    }
+}
+
 /// Réveil de la boucle du lecteur en pause ou à l'arrêt : en pratique jamais (une commande ou un événement arrive avant).
 const IDLE_TICK_S: u64 = 24 * 3600;
 
@@ -527,9 +554,14 @@ impl Actor {
                     Some(c) => if !self.run_cmd(c, &mut rx).await { return },
                     None => return,
                 },
-                Some(ev) = erx.recv() => self.on_engine(ev).await,
+                Some(ev) = erx.recv() => if !self.run_event(ev, &mut rx).await { return },
                 _ = tokio::time::sleep_until(next_tick) => {
-                    self.maybe_recover().await;
+                    // Relance après coupure : abandonnée si une demande de lecture arrive (voir `run_event`).
+                    let mut waiting = Vec::new();
+                    let replaced = race(self.maybe_recover(), &mut rx, &mut waiting).await;
+                    if !self.after_race(replaced, waiting, &mut rx).await {
+                        return;
+                    }
                     // Préparation du titre suivant (réseau, parfois lente) : une commande qui arrive pendant ce temps
                     // (suivant, saut, pause…) passe avant. La préparation est abandonnée et refaite au tour suivant.
                     // Avant, les commandes attendaient la fin de la préparation (jusqu'à une minute sur réseau faible).
@@ -564,7 +596,9 @@ impl Actor {
                         self.on_cmd(c).await;
                     }
                     if let Some(ev) = engine_ev {
-                        self.on_engine(ev).await;
+                        if !self.run_event(ev, &mut rx).await {
+                            return;
+                        }
                     }
                     if let Some(cmd) = interrupted {
                         self.prefetched = None;
@@ -678,26 +712,12 @@ impl Actor {
     /// Faux : plus aucune commande ne viendra.
     async fn run_cmd(&mut self, mut cmd: PlayerCmd, rx: &mut mpsc::Receiver<PlayerCmd>) -> bool {
         loop {
-            if !supersedes(&cmd) {
+            if !supersedes(&cmd) && !reloads(&cmd) {
                 self.on_cmd(cmd).await;
                 return true;
             }
             let mut later = Vec::new();
-            let replaced = {
-                let play = self.on_cmd(cmd);
-                tokio::pin!(play);
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = &mut play => break None,
-                        c = rx.recv() => match c {
-                            Some(c) if supersedes(&c) => break Some(Some(c)),
-                            Some(c) => later.push(c),
-                            None => break Some(None),
-                        },
-                    }
-                }
-            };
+            let replaced = race(self.on_cmd(cmd), rx, &mut later).await;
             for c in later {
                 self.on_cmd(c).await;
             }
@@ -706,6 +726,27 @@ impl Actor {
                 Some(None) => return false,
                 Some(Some(c)) => cmd = c,
             }
+        }
+    }
+
+    /// Événement du moteur (fin de titre, saut dans un titre fini, titre préparé perdu) : le rechargement qu'il déclenche
+    /// peut être lent sur réseau faible. Une demande de lecture arrivée pendant ce temps l'abandonne et passe tout de suite.
+    /// Avant, elle attendait la fin du rechargement (jusqu'à ~1 min). Faux : canal fermé.
+    async fn run_event(&mut self, ev: EngineEvent, rx: &mut mpsc::Receiver<PlayerCmd>) -> bool {
+        let mut later = Vec::new();
+        let replaced = race(self.on_engine(ev), rx, &mut later).await;
+        self.after_race(replaced, later, rx).await
+    }
+
+    /// Suite de `race` : commandes gardées pour après, puis la demande de lecture qui a interrompu. Faux : canal fermé.
+    async fn after_race(&mut self, replaced: Option<Option<PlayerCmd>>, later: Vec<PlayerCmd>, rx: &mut mpsc::Receiver<PlayerCmd>) -> bool {
+        for c in later {
+            self.on_cmd(c).await;
+        }
+        match replaced {
+            None => true,
+            Some(None) => false,
+            Some(Some(c)) => self.run_cmd(c, rx).await,
         }
     }
 
@@ -1565,6 +1606,18 @@ mod tests {
             listens_waiting: false,
             streams: Vec::new(),
         }
+    }
+
+    /// Relance lente abandonnée pour une demande de lecture ; les autres commandes arrivées entre-temps sont gardées.
+    #[tokio::test]
+    async fn race_drops_slow_work_for_a_play_request_and_keeps_other_commands() {
+        let (tx, mut rx) = mpsc::channel(8);
+        tx.send(PlayerCmd::Pause).await.unwrap();
+        tx.send(PlayerCmd::Stop).await.unwrap();
+        let mut later = Vec::new();
+        let replaced = race(std::future::pending::<()>(), &mut rx, &mut later).await;
+        assert!(matches!(replaced, Some(Some(PlayerCmd::Stop))));
+        assert!(matches!(later.as_slice(), [PlayerCmd::Pause]));
     }
 
     #[tokio::test]

@@ -236,8 +236,10 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         // avant, il attendait une fin qui ne venait jamais et finissait par limiter les relances de l'app.
         guard core != nil else { completionHandler(); return }
         backgroundCompletion = completionHandler
-        backgroundEventsFinished = false
         _ = session
+        // La session est créée au lancement de l'app : iOS peut avoir déjà livré tous ses événements avant cet appel. Avant,
+        // le drapeau était remis à faux ici, et iOS n'était jamais prévenu de la fin (il peut alors limiter les relances).
+        finishBackgroundEventsIfPossible()
     }
 
     func enqueue(_ tracks: [Track]) -> [Track] {
@@ -400,7 +402,7 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
 
     private func start(_ prepared: PreparedDownload, job: Job) {
         guard jobs[job.id] != nil, let url = URL(string: prepared.url) else {
-            if jobs[job.id] != nil { fail(job.id, message: "Adresse du téléchargement invalide") }
+            if jobs[job.id] != nil { fail(job.id, message: tr("Adresse du téléchargement invalide")) }
             return
         }
         var job = job
@@ -472,7 +474,7 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
             return
         }
         guard let file else {
-            fail(id, message: "Fichier téléchargé introuvable")
+            fail(id, message: tr("Fichier téléchargé introuvable"))
             return
         }
         job.incomingPath = file.path
@@ -709,14 +711,16 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         guard let raw = downloadTask.taskDescription, let id = Int64(raw) else { return }
         let destination = Self.incomingURL(id: id, taskIdentifier: downloadTask.taskIdentifier)
         do {
+            // Messages traduits ici : ils s'affichent tels quels dans la liste des téléchargements (avant : en français
+            // quelle que soit la langue choisie).
             if let response = downloadTask.response as? HTTPURLResponse, !(200..<300).contains(response.statusCode) {
                 throw NSError(domain: Self.errorDomain, code: response.statusCode,
-                              userInfo: [NSLocalizedDescriptionKey: "Le serveur a répondu HTTP \(response.statusCode)"])
+                              userInfo: [NSLocalizedDescriptionKey: tr("Le serveur a répondu HTTP %@", String(response.statusCode))])
             }
             let expected = downloadTask.countOfBytesExpectedToReceive
             if expected > 0, downloadTask.countOfBytesReceived != expected {
                 throw NSError(domain: Self.errorDomain, code: 1,
-                              userInfo: [NSLocalizedDescriptionKey: "Le fichier téléchargé est incomplet"])
+                              userInfo: [NSLocalizedDescriptionKey: tr("Le fichier téléchargé est incomplet")])
             }
             try FileManager.default.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? FileManager.default.removeItem(at: destination)

@@ -7,8 +7,13 @@ import UIKit
 @MainActor
 enum NowPlaying {
     private static var shownTrack: Int64?
+    /// Adresse de la pochette affichée : une pochette réparée ou changée pendant l'écoute remplace l'ancienne (avant,
+    /// l'ancienne restait jusqu'au titre suivant).
+    private static var shownCover: String?
     /// Grande pochette déjà demandée pour le titre affiché.
     private static var sharpAsked = false
+    /// Grande pochette (1000 px) déjà affichée.
+    private static var sharpShown = false
     private static var artwork: MPMediaItemArtwork?
     /// Position et vitesse envoyées en dernier, et quand.
     private static var sent: (elapsed: Double, rate: Double, at: Date) = (0, 0, .distantPast)
@@ -54,28 +59,42 @@ enum NowPlaying {
         guard let track else {
             center.nowPlayingInfo = nil
             shownTrack = nil
+            shownCover = nil
             artwork = nil
             return
         }
         let loader = CoverLoader.shared
-        if shownTrack != track.id {
+        if shownTrack != track.id || shownCover != cover {
             shownTrack = track.id
+            shownCover = cover
             artwork = nil
             sharpAsked = false
+            sharpShown = false
             if let url = cover {
                 // Tout de suite : la grande si elle est prête (titre suivant préparé à l'avance), sinon la meilleure en mémoire.
-                if let ready = loader.cached(url: url, pixels: 1000) ?? loader.anyCached(url: url) { artwork = makeArtwork(ready) }
+                if let big = loader.cached(url: url, pixels: 1000) {
+                    artwork = makeArtwork(big)
+                    sharpShown = true
+                } else if let ready = loader.anyCached(url: url) {
+                    artwork = makeArtwork(ready)
+                }
             } else if let fallback = fallbackImage {
                 artwork = makeArtwork(fallback) // titre sans pochette : l'image de secours, comme dans l'app
             }
         }
-        if sharp, !sharpAsked, let url = cover {
-            sharpAsked = true
-            if loader.cached(url: url, pixels: 1000) == nil {
+        if sharp, !sharpShown, let url = cover {
+            if let big = loader.cached(url: url, pixels: 1000) {
+                // Grande pochette arrivée entre-temps (rafale de suivant, lecteur ouvert) : reprise tout de suite. Avant, elle
+                // n'était jamais montrée et l'écran verrouillé restait sans pochette, ou flou, pour tout le titre.
+                artwork = makeArtwork(big)
+                sharpShown = true
+            } else if !sharpAsked {
+                sharpAsked = true
                 // Puis la version nette (1000 px), une seule à la fois, remplacée au titre suivant.
                 Task {
-                    guard let image = await loader.image(url: url, pixels: 1000), shownTrack == track.id else { return }
+                    guard let image = await loader.image(url: url, pixels: 1000), shownTrack == track.id, shownCover == url else { return }
                     artwork = makeArtwork(image)
+                    sharpShown = true
                     guard var info = center.nowPlayingInfo else { return }
                     info[MPMediaItemPropertyArtwork] = artwork
                     let elapsed = sent.elapsed + sent.rate * Date().timeIntervalSince(sent.at)

@@ -390,8 +390,10 @@ impl OfflineStore {
         if let Some(listen) = &reopened {
             listens.queue.push(listen.clone());
         }
-        // Liste illisible mise de côté : rien n'est effacé comme orphelin à ce lancement (fichiers audio intacts).
-        if !damaged {
+        // Liste illisible mise de côté, à ce lancement ou à un précédent (`.corrupt` encore là) : rien n'est effacé comme
+        // orphelin (fichiers audio intacts). Avant, au lancement suivant, la liste vide faisait supprimer tout l'audio.
+        let set_aside = ["downloads.json.corrupt", "collections.json.corrupt"].iter().any(|name| root.join(name).exists());
+        if !damaged && !set_aside {
             remove_orphans(&root, &entries, &collections);
         }
         let store = Self {
@@ -2017,6 +2019,12 @@ mod tests {
         assert_eq!(std::fs::read(root.join("downloads.json.corrupt")).unwrap(), b"{broken");
         assert!(audio_path(&root, 42, "mp3").exists());
         drop(store);
+
+        // Lancement suivant, journal déjà intégré et liste encore vide : avant, tout l'audio était effacé comme orphelin.
+        let _ = std::fs::remove_file(root.join(JOURNAL));
+        std::fs::write(root.join("downloads.json"), b"{}").unwrap();
+        drop(OfflineStore::open(root.clone()).unwrap());
+        assert!(audio_path(&root, 42, "mp3").exists(), "fichier audio gardé tant que la liste abîmée est là");
         std::fs::remove_dir_all(root).unwrap();
     }
 

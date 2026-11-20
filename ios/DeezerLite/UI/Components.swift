@@ -401,14 +401,19 @@ struct TrackRow: View {
                 if let update = downloadUpdate {
                     if update.state == .downloading || update.state == .queued {
                         ProgressView(value: update.progress).controlSize(.small)
+                            .accessibilityLabel(tr("Téléchargement en cours"))
                     } else if update.state == .failed {
+                        // États lus par VoiceOver avec la ligne : avant, ces icônes n'avaient pas de nom.
                         Image(systemName: "exclamationmark.circle").font(.caption).foregroundStyle(.red)
+                            .accessibilityLabel(tr("Échec du téléchargement"))
                     }
                 } else if isDownloaded {
                     Image(systemName: "arrow.down.circle.fill").font(.caption).foregroundStyle(Theme.accent)
+                        .accessibilityLabel(tr("Téléchargé"))
                 }
                 if player.lovedIds.contains(track.id) {
                     Image(systemName: "heart.fill").font(.caption).foregroundStyle(Theme.accent).transition(.scale.combined(with: .opacity))
+                        .accessibilityLabel(tr("Aimé"))
                 }
                 Text(formatTime(Double(track.durationS))).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
             }

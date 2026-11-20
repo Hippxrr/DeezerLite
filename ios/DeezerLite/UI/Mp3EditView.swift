@@ -241,7 +241,10 @@ extension Mp3EditView {
         // Relancé au retour du cadrage de la pochette : refait seulement si la forme d'onde n'était pas finie.
         guard let file = edit.file, peaks.isEmpty else { return }
         if listener == nil {
-            guard let audio = try? AVAudioPlayer(contentsOf: file) else { return }
+            // Hors du fil principal : AVAudioPlayer lit le fichier à sa création. Avant, un gros mix figeait un instant
+            // l'ouverture de la fenêtre d'import.
+            let opened = await Task.detached(priority: .userInitiated) { try? AVAudioPlayer(contentsOf: file) }.value
+            guard let audio = opened, !Task.isCancelled else { return }
             listener = audio
             length = audio.duration
             to = audio.duration

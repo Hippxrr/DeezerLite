@@ -815,18 +815,14 @@ impl DeezerClient {
         }
     }
 
-    /// `song.getFavoriteIds` puis détails par lots ; à défaut, onglet du profil. Le booléen : liste sûrement complète
+    /// `song.getFavoriteIds` puis détails par lots ; s'ils ne donnent rien, onglet du profil. Le booléen : liste sûrement complète
     /// (faux pour l'onglet du profil, qui peut s'arrêter à sa première page).
     async fn fetch_loved(&self) -> Result<(Vec<TrackInfo>, bool)> {
-        let ids_result = self.favorite_ids().await;
-        // Favoris coupés par le réseau en cours de route : erreur, pas l'onglet du profil à la place (ses 500 premiers
-        // titres seulement : la synchro des titres aimés téléchargés aurait supprimé tous les autres).
-        if let Err(DeezerError::Gateway(m)) = &ids_result {
-            if m == LOVED_INCOMPLETE {
-                return Err(DeezerError::Gateway(LOVED_INCOMPLETE.into()));
-            }
-        }
-        if let Ok(ids) = &ids_result {
+        // Favoris en échec (réseau coupé, délai, erreur HTTP) : l'erreur remonte, l'app montre alors la copie hors ligne.
+        // Avant, seule une coupure en cours de route remontait : les autres échecs passaient à l'onglet du profil, qui peut
+        // s'arrêter à ses 500 premiers titres, et la synchro des titres aimés téléchargés supprimait tous les autres.
+        let ids = self.favorite_ids().await?;
+        {
             let lots: Vec<Vec<i64>> = ids.chunks(100).map(|chunk| chunk.iter().map(|p| p.0).collect()).collect();
             let batches = lots.into_iter().map(|list| async move {
                 let r: Value = self.gw("song.getListData", &json!({ "sng_ids": list })).await?;
@@ -858,7 +854,8 @@ impl DeezerClient {
         }
         match self.profile_tab("loved").await {
             Ok(t) => Ok((tracks(t.get("data").and_then(Value::as_array).map_or(&[][..], Vec::as_slice)), false)),
-            Err(e) => ids_result.map(|_| (Vec::new(), true)).or(Err(e)),
+            // Aucun favori : liste vide, sûre. Des favoris dont aucun détail n'est revenu : erreur, pas une liste vide.
+            Err(e) => if ids.is_empty() { Ok((Vec::new(), true)) } else { Err(e) },
         }
     }
 
