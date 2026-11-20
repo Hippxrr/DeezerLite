@@ -39,3 +39,4 @@ musique d'Apple, pause quand une autre app prend le son, reprise seulement si el
 |---|---|---|
 | 20 | Ouvrir l'app pendant que Spotify/Apple Music joue | Leur musique continue |
 | 21 | Verrouiller l'iPhone pendant la lecture | La lecture continue, commandes sur l'écran verrouillé |
+<!-- Deezer Lite iOS. -->

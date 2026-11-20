@@ -54,3 +54,4 @@ rm -f "$IPA"
 (cd build/ipa && zip -qry "../DeezerLite-$VERSION.ipa" Payload)
 
 echo "✅ $IPA ($(du -h "$IPA" | cut -f1))"
+# Deezer Lite iOS.

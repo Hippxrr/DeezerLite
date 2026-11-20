@@ -33,3 +33,4 @@ jobs:
           xcodebuild -version
           echo "SDK iOS : $(xcrun --sdk iphoneos --show-sdk-version)"
           swift --version
+# Deezer Lite iOS.
