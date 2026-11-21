@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version de l'app, format 1.0.6 (vide = celle du projet)"
+        description: "Version de l'app, format 1.0.6 ou 1.0.6.1 pour un petit correctif (vide = celle du projet)"
         type: string
         default: ""
 
@@ -45,8 +45,9 @@ jobs:
           BUILD: ${{ github.run_number }}
         run: |
           if [ -n "$VERSION" ]; then
-            if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-              echo "::error::Version invalide « $VERSION » : utilise trois nombres séparés par des points, par exemple 1.0.6"
+            # Trois nombres, ou quatre pour un petit correctif (2.6.3.1) : avant, seulement trois.
+            if ! echo "$VERSION" | grep -Eq '^[0-9]+(\.[0-9]+){2,3}$'; then
+              echo "::error::Version invalide « $VERSION » : utilise trois ou quatre nombres séparés par des points, par exemple 1.0.6 ou 1.0.6.1"
               exit 1
             fi
             sed -i '' -E "s/(MARKETING_VERSION: )\"[^\"]*\"/\1\"$VERSION\"/" ios/project.yml
