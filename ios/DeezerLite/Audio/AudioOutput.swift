@@ -24,10 +24,19 @@ enum AudioOutput {
         // écouteurs débranchés déclenchent aussi une pause, qui doit arriver avant (pas de redémarrage pour rien).
         NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: nil, queue: nil) { _ in
             queue.asyncAfter(deadline: .now() + 0.3) {
-                guard wanted else { return }
+                // En pause : arrêté pour de bon (un moteur seulement suspendu repartirait sur l'ancienne sortie) ; la
+                // reprise le reconstruit sur la nouvelle.
+                guard wanted else { engine?.stop(); return }
                 startID += 1
                 start(id: startID)
             }
+        }
+        // Coupure (appel, vocal, autre app) : moteur arrêté pour de bon. Seulement suspendu, il pouvait rester muet à la
+        // reprise (iOS a détaché le matériel) ; arrêté, il repart proprement.
+        NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) { note in
+            guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                  AVAudioSession.InterruptionType(rawValue: raw) == .began else { return }
+            queue.async { engine?.stop() }
         }
         // Service audio d'iOS redémarré : l'ancien moteur n'est plus utilisable, un neuf est créé à la prochaine
         // lecture. Pas de redémarrage ici : la session audio n'est pas encore reconfigurée (le lecteur s'en charge,
@@ -40,22 +49,32 @@ enum AudioOutput {
         }
     }
 
+    /// Pause plus longue que ça : le moteur est arrêté pour de bon (batterie), comme la sortie du bureau.
+    private static let pauseKeep: Double = 60
+
     fileprivate static func request(_ run: Bool) {
         queue.async {
             wanted = run
-            // En pause, le moteur est arrêté (pas de silence envoyé) : iOS sait que rien ne joue. `stop` plutôt que
-            // `pause` : après une coupure (vocal, appel), iOS a détaché le matériel ; un moteur seulement en pause
-            // pouvait rester muet à la reprise, un moteur arrêté repart proprement.
+            // En pause, le moteur ne tourne plus (pas de silence envoyé) : iOS sait que rien ne joue.
             startID += 1
             if run {
                 start(id: startID)
             } else {
-                // Arrêt 0,15 s plus tard : le cœur fait descendre le son en 5 ms, mais iOS joue encore le tampon déjà
-                // rendu (jusqu'à 0,1 s écran verrouillé). Arrêté tout de suite, ce tampon était coupé net : un petit clic
-                // à la pause, sur certains titres. Une reprise entre-temps annule l'arrêt.
+                // Suspendu 0,15 s plus tard : le cœur fait descendre le son en 5 ms, mais iOS joue encore le tampon déjà
+                // rendu (jusqu'à 0,1 s écran verrouillé). Suspendu tout de suite, ce tampon était coupé net : un petit clic
+                // à la pause, sur certains titres. Une reprise entre-temps annule la suspension.
+                // `pause` (le moteur garde ce qu'il a préparé) : la reprise est immédiate. Avant, `stop` libérait tout et
+                // `start` devait tout reconstruire : le son mettait un moment à revenir, et le Centre de contrôle montrait
+                // « pause » pendant ce temps (iOS n'y affiche « lecture » que quand le son sort vraiment).
+                // Arrêt complet après `pauseKeep`, et dès une coupure (voir `install`) : un moteur seulement suspendu
+                // pouvait rester muet après un appel ou un vocal (iOS a détaché le matériel).
                 let id = startID
                 queue.asyncAfter(deadline: .now() + 0.15) {
-                    if id == startID, !wanted { engine?.stop() }
+                    guard id == startID, !wanted else { return }
+                    engine?.pause()
+                    queue.asyncAfter(deadline: .now() + pauseKeep) {
+                        if id == startID, !wanted { engine?.stop() }
+                    }
                 }
             }
         }

@@ -67,6 +67,8 @@ private final class ScrollMemory {
     /// Pas de recherche tapée : la position est celle de la liste complète.
     var tracking = true
     var toggledAt = Date.distantPast
+    /// Loupe ouverte ou non lors du dernier affichage de la liste (voir `DetailView.pageWithPosition`).
+    var searching = false
 }
 
 /// Signale la première ligne visible de la liste (iOS 18 et plus ; avant, la position n'est pas gardée à l'ouverture de
@@ -330,11 +332,19 @@ struct DetailView: View {
                 // depuis le mini-lecteur…) et la liste sautait ailleurs.
                 .modifier(TopRowTracker { index in
                     memory.top = index
-                    // Positions de la liste complète seulement (pas des résultats filtrés), et pas pendant la reconstruction.
-                    if memory.tracking, Date().timeIntervalSince(memory.toggledAt) > 0.5 { memory.kept = index }
+                    // Positions de la liste complète seulement (pas des résultats filtrés), et pas pendant la reconstruction
+                    // (liste recréée par la loupe, pas encore remise à sa place : elle signalerait la ligne du haut).
+                    if memory.tracking, memory.searching == searching, Date().timeIntervalSince(memory.toggledAt) > 0.5 { memory.kept = index }
                 })
                 .onChange(of: query.isEmpty, initial: true) { _, empty in memory.tracking = empty }
-                .onChange(of: searching) { restorePosition(proxy) }
+                // Ouvrir ou fermer la loupe ajoute ou retire la recherche : toute la page est alors recréée, et la nouvelle
+                // liste partait en haut. La position est remise ici, dans la nouvelle liste. Avant, c'était fait par
+                // l'ancienne, déjà retirée : la liste restait en haut en annulant une recherche.
+                .onAppear {
+                    guard memory.searching != searching else { return }
+                    memory.searching = searching
+                    restorePosition(proxy)
+                }
         }
     }
 
@@ -342,9 +352,12 @@ struct DetailView: View {
         let memory = scrollMemory
         memory.toggledAt = Date()
         guard let target = memory.kept else { return }
+        // Tout de suite, sans animation : la liste ne s'affiche pas d'abord en haut avant de sauter. Puis une seconde fois,
+        // la mise en page faite, seulement si elle n'y est pas encore (longue liste pas encore prête).
+        proxy.scrollTo(target, anchor: .top)
         Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(60))
-            proxy.scrollTo(target, anchor: .top)
+            if memory.top != target { proxy.scrollTo(target, anchor: .top) }
         }
     }
 
