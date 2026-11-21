@@ -112,6 +112,10 @@ struct ListensFile {
     queue: Vec<PendingListen>,
     #[serde(default)]
     open: Option<PendingListen>,
+    /// Dernier compte ou profil ouvert (0 : aucun depuis la dernière déconnexion) : une écoute faite avant l'ouverture de
+    /// la session (lancement sans réseau) lui revient.
+    #[serde(default)]
+    user: u64,
 }
 
 /// Écoutes gardées au plus (les plus anciennes sont oubliées au-delà).
@@ -801,6 +805,23 @@ impl OfflineStore {
         }
         self.persist_listens()?;
         Ok(true)
+    }
+
+    /// Dernier compte ou profil ouvert (voir `ListensFile::user`).
+    pub fn last_user(&self) -> u64 {
+        self.listens.read().map(|l| l.user).unwrap_or(0)
+    }
+
+    /// Retient le compte ou profil ouvert ; écrit seulement s'il change. Rien après une déconnexion (voir `generation`).
+    pub fn set_last_user(&self, user: u64, generation: u64) -> io::Result<()> {
+        {
+            let mut listens = self.listens.write().map_err(|_| io::Error::other("écoutes verrouillées"))?;
+            if self.generation() != generation || listens.user == user {
+                return Ok(());
+            }
+            listens.user = user;
+        }
+        self.persist_listens()
     }
 
     /// Écoutes en attente d'envoi, de la plus ancienne à la plus récente.
@@ -2723,6 +2744,23 @@ mod tests {
         assert_eq!(restored.pending_listens(), vec![listen(1, 100), listen(2, 200)]);
         restored.remove_listen(&listen(1, 100)).unwrap();
         assert_eq!(restored.pending_listens(), vec![listen(2, 200)]);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn last_listener_survives_restart_and_is_forgotten_at_logout() {
+        let root = root("listens-user");
+        let store = OfflineStore::open(root.clone()).unwrap();
+        assert_eq!(store.last_user(), 0);
+        store.set_last_user(42, store.generation()).unwrap();
+        drop(store);
+        let store = OfflineStore::open(root.clone()).unwrap();
+        assert_eq!(store.last_user(), 42, "app relancée sans réseau : écoutes rendues au dernier compte ouvert");
+        let before = store.generation();
+        store.clear().unwrap();
+        assert_eq!(store.last_user(), 0, "déconnexion : plus aucun compte retenu");
+        store.set_last_user(42, before).unwrap();
+        assert_eq!(store.last_user(), 0, "compte d'avant la déconnexion jamais réécrit");
         std::fs::remove_dir_all(root).unwrap();
     }
 

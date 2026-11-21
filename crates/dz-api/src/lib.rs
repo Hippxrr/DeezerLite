@@ -641,10 +641,6 @@ impl DeezerClient {
         Ok(())
     }
 
-    async fn token(&self) -> Result<String> {
-        Ok(self.ensure_session().await?.check_form)
-    }
-
     /// Session courante, ou ouverte une seule fois si plusieurs chargements la demandent en même temps (démarrage).
     async fn ensure_session(&self) -> Result<Session> {
         if let Some(s) = self.session.read().await.as_ref() {
@@ -671,6 +667,14 @@ impl DeezerClient {
     /// ajout à une playlist, création…) n'est renvoyée que si elle n'a pas pu partir (connexion impossible) : après un
     /// délai dépassé, Deezer a peut-être déjà fait le travail, la refaire compterait deux fois.
     pub async fn gw<T: DeserializeOwned>(&self, method: &str, body: &Value) -> Result<T> {
+        self.gw_as(method, body, 0).await
+    }
+
+    /// Comme `gw`, mais seulement sur la session du compte ou profil `user` (0 : celle qui est ouverte). Un autre profil
+    /// ouvert entre deux essais (changement de profil pendant un nouvel essai après une coupure) : rien n'est envoyé, et
+    /// l'erreur « session à rouvrir » garde l'écoute pour le bon profil. Avant, l'essai suivant partait sur la session du
+    /// nouveau profil : une écoute faite sur A pouvait être comptée chez B.
+    pub async fn gw_as<T: DeserializeOwned>(&self, method: &str, body: &Value, user: u64) -> Result<T> {
         let write = Self::is_write(method);
         let mut refreshed = false;
         // 3 essais, plus un après le renouvellement du jeton s'il arrive au dernier.
@@ -678,7 +682,11 @@ impl DeezerClient {
             if attempt == 3 && !refreshed {
                 break;
             }
-            let token = self.token().await?;
+            let session = self.ensure_session().await?;
+            if user != 0 && session.user_id != user {
+                return Err(DeezerError::SessionExpired);
+            }
+            let token = session.check_form;
             let sent = self
                 .http()
                 .post(GW_URL)

@@ -827,6 +827,15 @@ impl Core {
     /// Ouvre le profil `id` (bibliothèque, titres aimés, recommandations deviennent les siens). Refusé : le profil
     /// d'avant reste ouvert et l'erreur l'explique.
     pub async fn switch_profile(&self, id: u64) -> Result<(), CoreError> {
+        // Écoutes du profil qui s'en va : l'écoute en cours se termine là (la suite du titre ne compte pour personne) et
+        // tout ce qui attend part tant que sa session est ouverte (3 s au plus ; aucune requête s'il n'y a rien). Avant,
+        // elles restaient bloquées jusqu'à ce que ce profil soit rouvert, et la déconnexion les effaçait sans les envoyer.
+        let ended = Arc::new(tokio::sync::Notify::new());
+        if self.player.send(PlayerCmd::EndListen(ended.clone())).is_ok() {
+            let _ = self.run(async move { tokio::time::timeout(std::time::Duration::from_secs(1), ended.notified()).await }).await;
+        }
+        let (api, store) = (self.api.clone(), self.offline.clone());
+        let _ = self.run(async move { tokio::time::timeout(std::time::Duration::from_secs(3), dz_core::send_pending_listens(api, store)).await }).await;
         let api = self.api.clone();
         self.run(async move { api.switch_profile(id).await.map(|_| ()) }).await??;
         self.forget_account_copies(); // celles du profil d'avant

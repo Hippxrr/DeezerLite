@@ -87,6 +87,9 @@ pub enum PlayerCmd {
     /// Prévient quand toutes les commandes envoyées avant celle-ci ont été traitées, écoute en cours comprise (après un
     /// `Close`, elle est alors terminée et gardée sur le disque) : voir `logout` dans dz-ffi.
     Sync(Arc<tokio::sync::Notify>),
+    /// Changement de profil : l'écoute en cours se termine (elle revient au profil qui s'en va, la suite du titre ne compte
+    /// pour personne) et elle est gardée sur le disque avant que `done` soit prévenu. Voir `switch_profile` dans dz-ffi.
+    EndListen(Arc<tokio::sync::Notify>),
 }
 
 /// Événements pour l'UI (émis en une fois par changement de piste, pas à chaque tick).
@@ -225,7 +228,7 @@ pub fn spawn_player(
         cmd_tx, flow: false, flow_fetching: false,
         api, decryptors, offline, engine, events, changed, snap: snapshot,
         quality: Quality::Flac, shuffle: false, repeat: RepeatMode::Off, original: Vec::new(), rng: seed(), prefetched_idx: None, retries: 0, recover_at: None, queue: Vec::new(), index: 0, infos: HashMap::new(), prefetched: None, enriched: std::collections::HashSet::new(), covers_checked: std::collections::HashSet::new(),
-        formats: HashMap::new(), listen: None, restart: false, reload_id: None, listens_waiting: false, streams: Vec::new(),
+        formats: HashMap::new(), listen: None, restart: false, reload_id: None, listens_waiting: false, end_listen: false, no_listen_for: None, streams: Vec::new(),
     };
     tokio::spawn(actor.run(rx, erx));
     handle
@@ -272,6 +275,10 @@ struct Actor {
     reload_id: Option<i64>,
     /// Écoutes terminées, déjà gardées sur le disque, dont l'envoi attend le prochain échange réseau (voir `finish_listen`).
     listens_waiting: bool,
+    /// Changement de profil demandé (voir `EndListen`) : l'écoute en cours se termine au prochain relevé.
+    end_listen: bool,
+    /// Titre dont la suite ne compte pour personne (écoute arrêtée par un changement de profil), jusqu'au titre suivant.
+    no_listen_for: Option<i64>,
     /// Flux réseau confiés au moteur audio (titre en cours, suivant préchargé). Le moteur lit et traite les commandes
     /// sur le même thread : une lecture bloquée sur un réseau figé le rendait sourd (suivant, stop) jusqu'à ~1 min.
     /// Ils sont annulés quand ils sont remplacés ou arrêtés, ce qui rend la main au moteur tout de suite.
@@ -308,6 +315,21 @@ const LISTEN_SAVE_EVERY: Duration = Duration::from_secs(20);
 /// pause et toutes les `LISTEN_SAVE_EVERY` de lecture.
 fn save_due(played: Duration, min: Duration, paused_now: bool, playing: bool, saved_at: Option<Instant>, now: Instant) -> bool {
     played >= min && (paused_now || (playing && saved_at.is_none_or(|t| now.duration_since(t) >= LISTEN_SAVE_EVERY)))
+}
+
+/// Temps entendu depuis le dernier relevé (`elapsed`). Pendant l'écoute : pas plus que l'avance de la position (son
+/// bloqué ; un saut ne compte pas plus que le temps réel). À sa fin (autre titre, répétition, arrêt), la position peut
+/// déjà être celle du titre suivant : ce qui restait du titre sert aussi de limite, et la fin du fondu enchaîné
+/// (`fade_tail`, titre sortant encore audible sous le suivant) s'ajoute. Avant, ces secondes étaient perdues : avec un
+/// fondu de 10 s, un titre de 35 s écouté en entier comptait 25 s (jamais envoyé), et sans fondu un titre de 15 s
+/// n'était parfois pas compté.
+fn heard(elapsed: Duration, last_pos: u64, pos: u64, duration_s: u64, ending: bool, fade_tail: Duration) -> Duration {
+    let advanced = pos.saturating_sub(last_pos);
+    if !ending {
+        return elapsed.min(Duration::from_millis(advanced));
+    }
+    let left = (duration_s * 1000).saturating_sub(last_pos);
+    elapsed.min(Duration::from_millis(advanced.max(left))) + fade_tail
 }
 
 /// Temps d'écoute à partir duquel l'écoute compte : 30 s, ou 90 % d'un titre plus court.
@@ -386,7 +408,7 @@ async fn send_listen(api: Arc<DeezerClient>, store: Option<OfflineStore>, mut li
         return;
     }
     listen.user_id = api.session().await.map_or(0, |s| s.user_id);
-    match api.log_listen(listen.track_id, &listen.format, listen.started_at, listen.listened_s).await {
+    match api.log_listen(listen.track_id, &listen.format, listen.started_at, listen.listened_s, listen.user_id).await {
         Ok(()) => {
             if let Some(store) = store {
                 flush_listens(api, store).await;
@@ -410,6 +432,7 @@ async fn flush_listens(api: Arc<DeezerClient>, store: OfflineStore) {
     // sortait tout de suite et les écoutes du nouveau profil restaient étiquetées avec l'ancien.
     if let Some(me) = api.session().await.map(|s| s.user_id) {
         remember_user(me, store.generation());
+        let _ = store.set_last_user(me, store.generation());
     }
     if FLUSHING.swap(true, Ordering::AcqRel) {
         return;
@@ -429,6 +452,7 @@ async fn flush_listens(api: Arc<DeezerClient>, store: OfflineStore) {
         let Some(me) = api.session().await.map(|s| s.user_id) else { return };
         let generation = store.generation();
         remember_user(me, generation);
+        let _ = store.set_last_user(me, generation);
         let batch: Vec<PendingListen> = store.pending_listens().into_iter().filter(|l| l.user_id == 0 || l.user_id == me).collect();
         if batch.is_empty() {
             return;
@@ -438,7 +462,7 @@ async fn flush_listens(api: Arc<DeezerClient>, store: OfflineStore) {
             if store.generation() != generation || api.session().await.map(|s| s.user_id) != Some(me) {
                 continue 'flush;
             }
-            match api.log_listen(listen.track_id, &listen.format, listen.started_at, listen.listened_s).await {
+            match api.log_listen(listen.track_id, &listen.format, listen.started_at, listen.listened_s, me).await {
                 Err(e) if not_delivered(&e) => return, // toujours pas de réseau : la suite attend
                 // Envoyée, ou refusée par Deezer (inutile de la garder). Si elle ne peut pas être retirée (disque plein),
                 // on s'arrête : la renvoyer en boucle la compterait plusieurs fois.
@@ -629,22 +653,34 @@ impl Actor {
         let cur = self.engine.shared.current_id.load(Ordering::Relaxed);
         let playing = self.engine.shared.playing.load(Ordering::Relaxed);
         let restart = std::mem::take(&mut self.restart);
+        // Changement de profil (voir `EndListen`) : l'écoute se termine ici, et la suite de ce titre ne compte pour personne.
+        let profile_change = std::mem::take(&mut self.end_listen);
         let pos = self.engine.shared.position_ms.load(Ordering::Relaxed);
         let now = Instant::now();
+        // Fin du fondu enchaîné (voir dz-audio) : lue à chaque nouveau départ, qu'elle serve ou non, pour ne jamais être
+        // ajoutée plus tard à une autre écoute.
+        let fade_tail = if restart { self.engine.shared.fade_tail_ms.swap(0, Ordering::Relaxed) } else { 0 };
+        if restart || self.no_listen_for.is_some_and(|id| id != cur) {
+            self.no_listen_for = None;
+        }
+        if profile_change {
+            self.no_listen_for = Some(cur);
+        }
+        let generation = self.offline.as_ref().map_or(0, |s| s.generation());
+        let listener = self.listener(generation);
         if let Some(l) = self.listen.as_mut() {
+            let ending = l.id != cur || restart || profile_change;
             if l.playing {
-                // Temps écoulé, mais pas plus que ce que la lecture a avancé (son bloqué) ; une avance par saut
-                // (recherche) ne compte pas plus que le temps réel.
-                l.played += (now - l.last).min(Duration::from_millis(pos.saturating_sub(l.last_pos)));
+                l.played += heard(now - l.last, l.last_pos, pos, l.duration_s, ending, Duration::from_millis(fade_tail));
             }
             l.last = now;
             l.last_pos = pos;
             let paused_now = l.playing && !playing;
             l.playing = playing;
-            if l.user == 0 {
-                l.user = current_user(l.generation);
+            if l.user == 0 && l.generation == generation {
+                l.user = listener;
             }
-            if l.id == cur && !restart {
+            if !ending {
                 // L'app peut être fermée en plein titre (par l'utilisateur ou par iOS) : l'écoute est mise de côté sur
                 // le disque à chaque pause et régulièrement pendant la lecture, et comptée au prochain lancement.
                 if save_due(l.played, listen_min(l.duration_s), paused_now, playing, l.saved_at, now) {
@@ -659,12 +695,20 @@ impl Actor {
         if let Some(done) = self.listen.take() {
             self.finish_listen(done);
         }
-        if let Some(format) = self.formats.get(&cur).filter(|_| cur > 0 && cur != LOCAL_ID) {
+        if let Some(format) = self.formats.get(&cur).filter(|_| cur > 0 && cur != LOCAL_ID && self.no_listen_for != Some(cur)) {
             let started_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-            let generation = self.offline.as_ref().map_or(0, |s| s.generation());
             let duration_s = self.infos.get(&cur).map_or(0, |i| i.duration_s);
-            let user = current_user(generation);
-            self.listen = Some(Listen { id: cur, format: format.clone(), started_at, played: Duration::ZERO, last: now, playing, generation, saved_at: None, duration_s, user, last_pos: pos });
+            self.listen = Some(Listen { id: cur, format: format.clone(), started_at, played: Duration::ZERO, last: now, playing, generation, saved_at: None, duration_s, user: listener, last_pos: pos });
+        }
+    }
+
+    /// Compte ou profil qui écoute : celui de la session, sinon le dernier ouvert, gardé sur le disque. Avant, une app
+    /// lancée sans réseau notait « inconnu », et l'écoute partait sur le compte connecté ensuite, même un autre compte
+    /// après un ARL expiré.
+    fn listener(&self, generation: u64) -> u64 {
+        match current_user(generation) {
+            0 => self.offline.as_ref().map_or(0, |s| s.last_user()),
+            user => user,
         }
     }
 
@@ -1004,6 +1048,11 @@ impl Actor {
                 self.reset_prefetch();
             }
             PlayerCmd::Sync(done) => done.notify_one(),
+            PlayerCmd::EndListen(done) => {
+                self.end_listen = true;
+                self.track_listen();
+                done.notify_one();
+            }
             PlayerCmd::FlushListens => {
                 if let Some(store) = self.offline.clone() {
                     tokio::spawn(flush_listens(self.api.clone(), store));
@@ -1411,6 +1460,9 @@ impl Actor {
                     self.index = i;
                     self.play_prefetched_or_current().await;
                 } else {
+                    // Fin de la file : l'écoute du dernier titre se termine là et part tout de suite. Avant, elle attendait
+                    // le titre suivant ou le lancement suivant (absente de « Écoutés récemment » en attendant).
+                    self.restart = true;
                     let _ = self.events.send(CoreEvent::Stopped);
                 }
             }
@@ -1604,6 +1656,8 @@ mod tests {
             restart: false,
             reload_id: None,
             listens_waiting: false,
+            end_listen: false,
+            no_listen_for: None,
             streams: Vec::new(),
         }
     }
@@ -1833,6 +1887,22 @@ mod tests {
         assert!(!save_due(s(40), min, false, false, Some(now), now + s(60)));
         // Titre de 20 s : compte (et est gardé) dès 18 s.
         assert!(save_due(s(18), listen_min(20), false, true, None, now));
+    }
+
+    #[test]
+    fn end_of_a_listen_counts_the_last_seconds_and_the_crossfade() {
+        let (s, ms) = (Duration::from_secs, Duration::from_millis);
+        // En cours : pas plus que l'avance de la position (son bloqué).
+        assert_eq!(heard(s(1), 10_000, 10_400, 200, false, s(0)), ms(400));
+        // Titre suivant (position déjà à 0:00) : la seconde écoulée compte, sans dépasser ce qui restait du titre.
+        assert_eq!(heard(s(1), 14_400, 0, 15, true, s(0)), ms(600));
+        assert_eq!(heard(s(1), 5_000, 0, 200, true, s(0)), s(1));
+        // Durée inconnue : rien de plus que ce que la position montre.
+        assert_eq!(heard(s(1), 5_000, 0, 0, true, s(0)), s(0));
+        // Titre de 35 s, fondu de 10 s : relevé à 24,5 s, suivant annoncé 0,5 s plus tard, sortant encore audible 10 s.
+        let total = ms(24_500) + heard(ms(500), 24_500, 0, 35, true, s(10));
+        assert_eq!(total, s(35));
+        assert!(total >= listen_min(35), "écouté en entier avec un fondu : compté");
     }
 
     #[test]

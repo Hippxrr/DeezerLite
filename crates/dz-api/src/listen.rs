@@ -7,8 +7,9 @@ use crate::{DeezerClient, DeezerError, Result};
 
 impl DeezerClient {
     /// Signale l'écoute du titre `track_id`, commencée à `started_at` (secondes Unix) et entendue `listened_s` secondes,
-    /// dans le format reçu (`MP3_128`, `MP3_320`, `FLAC`).
-    pub async fn log_listen(&self, track_id: i64, format: &str, started_at: u64, listened_s: u64) -> Result<()> {
+    /// dans le format reçu (`MP3_128`, `MP3_320`, `FLAC`), sur la session du compte ou profil `user` seulement (0 : celle
+    /// qui est ouverte, voir `gw_as`).
+    pub async fn log_listen(&self, track_id: i64, format: &str, started_at: u64, listened_s: u64, user: u64) -> Result<()> {
         let body = json!({
             "params": {
                 "__type__": "ListenData",
@@ -21,7 +22,7 @@ impl DeezerClient {
                 "payload": {},
             }
         });
-        match self.gw::<Value>("log.listen", &body).await {
+        match self.gw_as::<Value>("log.listen", &body, user).await {
             // Deezer ne renvoie rien d'utile : seule une erreur compte.
             Ok(_) | Err(DeezerError::EmptyResults) => Ok(()),
             Err(e) => Err(e),

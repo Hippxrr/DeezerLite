@@ -71,6 +71,10 @@ pub struct Shared {
     pub paused: AtomicBool,
     /// Durée du fondu enchaîné en ms (0 = désactivé).
     pub crossfade_ms: AtomicU64,
+    /// Fondu enchaîné commencé : temps (ms) pendant lequel le titre sortant s'entend encore une fois le suivant annoncé
+    /// dans `current_id`. Le lecteur l'ajoute à l'écoute du titre sortant (voir dz-core) ; remis à 0 par un vidage (saut,
+    /// autre titre).
+    pub fade_tail_ms: AtomicU64,
     /// Volume 0.0..=1.0, stocké sous forme de bits f32.
     pub volume: AtomicU32,
     /// Gain supplémentaire (facteur linéaire, de ~0,32 à ~4, bits f32) ; au-dessus de 1, un limiteur doux l'accompagne.
@@ -97,6 +101,7 @@ impl Default for Shared {
             current_id: AtomicI64::new(0),
             paused: AtomicBool::new(false),
             crossfade_ms: AtomicU64::new(0),
+            fade_tail_ms: AtomicU64::new(0),
             volume: AtomicU32::new(0.5f32.to_bits()), // moitié par défaut
             boost: AtomicU32::new(1.0f32.to_bits()),
             eq: std::array::from_fn(|_| AtomicI32::new(0)),
@@ -1176,6 +1181,7 @@ impl Worker {
         self.leftover_off = 0;
         self.written = 0;
         self.segments.clear();
+        self.shared.fade_tail_ms.store(0, Ordering::Relaxed); // fondu abandonné
         if !self.ensure_output() {
             return false;
         }
@@ -1247,6 +1253,7 @@ impl Worker {
         self.leftover_off = 0;
         self.written = 0;
         self.segments.clear();
+        self.shared.fade_tail_ms.store(0, Ordering::Relaxed); // fondu abandonné
         let Some(o) = self.out.as_mut() else { return };
         // Son en cours (lecture, sortie en marche) : il descend à zéro en 5 ms avant le remplacement. Avant, il était coupé
         // net à chaque saut, titre ou arrêt : un clic. Au plus 0,12 s d'attente (un tour de rendu écran verrouillé).
@@ -1278,6 +1285,7 @@ impl Worker {
         self.leftover_off = 0;
         self.written = 0;
         self.segments.clear();
+        self.shared.fade_tail_ms.store(0, Ordering::Relaxed); // fondu abandonné
         // Le vidage est fait par le callback audio : flux arrêté (pause), on le relance le temps du vidage
         // (il ne produit que du silence tant que la pause est active), puis on l'arrête de nouveau.
         let stopped = self.out.as_ref().is_some_and(|o| !o.running);
@@ -1629,6 +1637,8 @@ impl Worker {
                                 Ok(t) => {
                                     self.fade_total = remaining.max(1);
                                     self.fade_pos = 0;
+                                    // Le titre sortant s'entend encore tout ce temps une fois le suivant annoncé (écoute).
+                                    self.shared.fade_tail_ms.store(remaining * 1000 / u64::from(rate), Ordering::Relaxed);
                                     let seq = self.next_seq;
                                     self.next_seq += 1;
                                     self.segments.push_back(Segment {
