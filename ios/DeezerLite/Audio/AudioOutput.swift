@@ -36,7 +36,11 @@ enum AudioOutput {
         NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) { note in
             guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
                   AVAudioSession.InterruptionType(rawValue: raw) == .began else { return }
-            queue.async { engine?.stop() }
+            // App suspendue pendant une pause (raison 1) : iOS ne l'annonce qu'au réveil, souvent juste après l'appui sur
+            // lecture qui l'a réveillée. Avant, le moteur que cet appui venait de relancer était arrêté : silence, puis le
+            // son ne revenait qu'au relancement suivant (environ 1 s). Arrêté seulement s'il est encore en pause.
+            let suspended = (note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt) == 1
+            queue.async { if !(suspended && wanted) { engine?.stop() } }
         }
         // Service audio d'iOS redémarré : l'ancien moteur n'est plus utilisable, un neuf est créé à la prochaine
         // lecture. Pas de redémarrage ici : la session audio n'est pas encore reconfigurée (le lecteur s'en charge,
@@ -80,6 +84,21 @@ enum AudioOutput {
         }
     }
 
+    /// Reprise par l'utilisateur : moteur lancé d'ici, sans attendre l'aller-retour par les fils du cœur (qui le demandera
+    /// ensuite, sans effet). `wait` (écran verrouillé, Centre de contrôle) : attendu 0,5 s au plus, pour que le son tourne
+    /// déjà quand la commande rend la main. Avant, iOS voyait encore le moteur arrêté et le Centre de contrôle repassait
+    /// sur « lecture » avant « pause ».
+    static func resumeNow(wait: Bool) {
+        let done = DispatchSemaphore(value: 0)
+        queue.async {
+            wanted = true
+            startID += 1
+            start(id: startID)
+            done.signal()
+        }
+        if wait { _ = done.wait(timeout: .now() + 0.5) }
+    }
+
     /// Démarre le moteur. Juste après une coupure, iOS peut refuser un court instant (l'autre app rend encore le son) :
     /// nouvel essai jusqu'à 5 fois, toutes les 0,3 s, tant que le cœur veut toujours jouer.
     /// `id` : la demande à laquelle répond cette série d'essais (voir `startID`).
@@ -88,6 +107,10 @@ enum AudioOutput {
         engine = e
         guard !e.isRunning else { return }
         dz_output_restarting() // le son repart en fondu (iOS a pu arrêter le moteur sans le laisser descendre)
+        // Session réactivée juste avant le premier essai (ici, hors du fil principal) : après une pause, iOS suspend l'app et
+        // coupe sa session. Avant, le premier démarrage échouait alors, et le son ne revenait qu'au nouvel essai, 0,3 s plus
+        // tard (et le Centre de contrôle restait sur « pause » pendant ce temps). Sans effet si elle est déjà active.
+        if attempt == 1 { try? AVAudioSession.sharedInstance().setActive(true) }
         do {
             try e.start()
         } catch {

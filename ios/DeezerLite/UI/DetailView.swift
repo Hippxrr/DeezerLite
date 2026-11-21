@@ -332,11 +332,18 @@ struct DetailView: View {
                 // depuis le mini-lecteur…) et la liste sautait ailleurs.
                 .modifier(TopRowTracker { index in
                     memory.top = index
-                    // Positions de la liste complète seulement (pas des résultats filtrés), et pas pendant la reconstruction
-                    // (liste recréée par la loupe, pas encore remise à sa place : elle signalerait la ligne du haut).
-                    if memory.tracking, memory.searching == searching, Date().timeIntervalSince(memory.toggledAt) > 0.5 { memory.kept = index }
+                    // Positions de la liste complète seulement (pas des résultats filtrés, ni loupe ouverte), et pas pendant
+                    // la reconstruction (liste recréée par la loupe, pas encore remise à sa place : elle signalerait la ligne
+                    // du haut). Avant, en touchant Annuler, iOS vide d'abord le texte puis ferme la loupe un instant après :
+                    // entre les deux, la liste complète revenue en haut était enregistrée comme position, et on y retournait.
+                    if memory.tracking, !searching, memory.searching == searching, Date().timeIntervalSince(memory.toggledAt) > 0.5 { memory.kept = index }
                 })
-                .onChange(of: query.isEmpty, initial: true) { _, empty in memory.tracking = empty }
+                .onChange(of: query.isEmpty, initial: true) { _, empty in
+                    memory.tracking = empty
+                    // Recherche effacée, loupe encore ouverte (Annuler, ou champ vidé) : la liste complète revient tout de
+                    // suite à sa place, sans attendre que la loupe se ferme.
+                    if empty, searching { restorePosition(proxy) }
+                }
                 // Ouvrir ou fermer la loupe ajoute ou retire la recherche : toute la page est alors recréée, et la nouvelle
                 // liste partait en haut. La position est remise ici, dans la nouvelle liste. Avant, c'était fait par
                 // l'ancienne, déjà retirée : la liste restait en haut en annulant une recherche.

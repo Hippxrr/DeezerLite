@@ -1961,6 +1961,11 @@ final class Player {
         } else {
             attempt { try $0.resume() }
         }
+        // Le cœur a quelque chose à jouer : moteur lancé tout de suite (voir `AudioOutput.resumeNow`). Hors de l'app, attendu
+        // avant de mettre l'écran verrouillé à jour : iOS y montre l'état réel du son.
+        if core?.status().playing == true {
+            AudioOutput.resumeNow(wait: UIApplication.shared.applicationState != .active)
+        }
         refreshStatus()
     }
 
