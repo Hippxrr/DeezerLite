@@ -1515,6 +1515,11 @@ private struct LyricsPanel: View {
                 ScrollViewReader { proxy in
                     ScrollView(showsIndicators: false) {
                         VStack(alignment: .leading, spacing: 18) {
+                            // Paroles de secours : Genius précisé en haut, comme sur ordinateur (rien pour celles de Deezer).
+                            // Avant, la mention n'était qu'en bas, après toutes les lignes.
+                            if lyrics.fromGenius {
+                                Text(tr("Paroles : Genius")).font(.footnote.weight(.semibold)).foregroundStyle(.white.opacity(0.6))
+                            }
                             ForEach(lyrics.lines.indices, id: \.self) { i in
                                 let line = lyrics.lines[i]
                                 Text(line.text.trimmingCharacters(in: .whitespaces).isEmpty ? "♪" : line.text)

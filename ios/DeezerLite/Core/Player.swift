@@ -755,7 +755,7 @@ final class Player {
         guard let core, noLyrics[id].map({ Date().timeIntervalSince($0) > 30 * 60 }) ?? true else { return nil }
         var found = try await core.lyrics(id: id)
         if found == nil, geniusLyrics, let genius = try await core.geniusLyrics(title: track.title, artist: track.artist) {
-            found = Lyrics(synced: false, lines: genius.lines, copyright: tr("Paroles : Genius"))
+            found = genius // marquées comme venant de Genius : la mention est en haut des paroles (voir `LyricsPanel`)
         }
         guard let lyrics = found else {
             noLyrics[id] = Date()

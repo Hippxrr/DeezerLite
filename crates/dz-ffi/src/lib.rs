@@ -314,12 +314,14 @@ pub struct Mp3Tags {
     pub album: Option<String>,
 }
 
-/// Paroles de Deezer (uniquement Deezer, pas de source de secours).
+/// Paroles d'un titre : celles de Deezer, ou celles de Genius en secours (`from_genius`).
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct Lyrics {
     pub synced: bool,
     pub lines: Vec<LyricLine>,
     pub copyright: String,
+    /// Paroles de secours venues de Genius : l'app le précise en haut des paroles (rien pour celles de Deezer).
+    pub from_genius: bool,
 }
 
 /// Qualité audio demandée (Deezer se rabat sur la meilleure disponible pour le compte).
@@ -1288,6 +1290,7 @@ impl Core {
             synced: false,
             lines: l.lines.into_iter().map(|x| LyricLine { ms: x.ms, text: x.text }).collect(),
             copyright: l.copyright,
+            from_genius: true,
         }))
     }
 
@@ -1296,6 +1299,7 @@ impl Core {
             synced: l.synced,
             lines: l.lines.into_iter().map(|x| LyricLine { ms: x.ms, text: x.text }).collect(),
             copyright: l.copyright,
+            from_genius: false,
         };
         let stored = self.offline.lyrics(id);
         if let Some(Some(l)) = &stored {

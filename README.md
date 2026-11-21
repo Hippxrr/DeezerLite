@@ -1,6 +1,6 @@
 # 🎧 Deezer Lite · iOS
 
-![Version](https://img.shields.io/badge/version-2.6.3.1-a238ff)
+![Version](https://img.shields.io/badge/version-2.6.4-a238ff)
 ![iOS](https://img.shields.io/badge/iOS-17%2B-black?logo=apple)
 ![Swift](https://img.shields.io/badge/SwiftUI-native-F05138?logo=swift&logoColor=white)
 ![Rust](https://img.shields.io/badge/engine-Rust-B7410E?logo=rust&logoColor=white)
@@ -26,7 +26,7 @@ networking, the play queue and audio.
 |---|---|
 | Device | iPhone, iOS 17 or later |
 | Display name | Deezer (on purpose, for a familiar home screen; not the official app) |
-| Version | 2.6.3.1 |
+| Version | 2.6.4 |
 | Bundle ID | `com.hippxrr.deezerlite` |
 | UI | SwiftUI, Observation, Liquid Glass on iOS 26 |
 | Engine | Rust (2021 edition), bridged to Swift with UniFFI 0.29 |
@@ -345,7 +345,7 @@ profile also includes the CarPlay entitlement.
 
 ### Versioning
 
-The app version is fixed in the code: `MARKETING_VERSION` in `ios/project.yml`, currently **2.6.3.1**. A build made
+The app version is fixed in the code: `MARKETING_VERSION` in `ios/project.yml`, currently **2.6.4**. A build made
 on the Mac always carries that version, there is nothing to choose.
 
 ### If something goes wrong
