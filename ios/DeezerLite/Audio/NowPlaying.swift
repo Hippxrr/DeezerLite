@@ -16,6 +16,8 @@ enum NowPlaying {
     private static var sharpShown = false
     /// Téléchargement de la grande pochette raté : nouvel essai possible à partir de cet instant.
     private static var retryAt = Date.distantPast
+    /// Essais ratés de la grande pochette pour le titre affiché (voir `requestSharp`).
+    private static var sharpTries = 0
     private static var artwork: MPMediaItemArtwork?
     /// Position et vitesse envoyées en dernier, et quand.
     private static var sent: (elapsed: Double, rate: Double, at: Date) = (0, 0, .distantPast)
@@ -73,6 +75,7 @@ enum NowPlaying {
             sharpAsked = false
             sharpShown = false
             retryAt = .distantPast
+            sharpTries = 0
             if let url = cover {
                 // Tout de suite : la grande si elle est prête (titre suivant préparé à l'avance), sinon la meilleure en mémoire.
                 if let big = loader.cached(url: url, pixels: 1000) {
@@ -92,28 +95,8 @@ enum NowPlaying {
                 artwork = makeArtwork(big)
                 sharpShown = true
             } else if !sharpAsked, Date() >= retryAt {
-                sharpAsked = true
                 // Puis la version nette (1000 px), une seule à la fois, remplacée au titre suivant.
-                Task {
-                    let image = await loader.image(url: url, pixels: 1000)
-                    guard shownTrack == track.id, shownCover == url else { return }
-                    guard let image else {
-                        // Échec (réseau coupé, app en arrière-plan) : nouvel essai à une prochaine mise à jour, 10 s plus
-                        // tard au plus tôt. Avant, ce titre restait sans pochette jusqu'au bout, et les suivants aussi tant
-                        // que le réseau flanchait (le cache en mémoire est vidé en arrière-plan).
-                        sharpAsked = false
-                        retryAt = Date().addingTimeInterval(10)
-                        return
-                    }
-                    artwork = makeArtwork(image)
-                    sharpShown = true
-                    guard var info = center.nowPlayingInfo else { return }
-                    info[MPMediaItemPropertyArtwork] = artwork
-                    let elapsed = sent.elapsed + sent.rate * Date().timeIntervalSince(sent.at)
-                    info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = elapsed
-                    sent = (elapsed, sent.rate, Date())
-                    center.nowPlayingInfo = info
-                }
+                requestSharp(trackID: track.id, url: url)
             }
         }
         // Toujours rien à montrer, mais l'app a chargé cette pochette entre-temps (à une autre taille) : reprise tout de suite.
@@ -133,6 +116,37 @@ enum NowPlaying {
         if let artwork { info[MPMediaItemPropertyArtwork] = artwork }
         center.nowPlayingInfo = info
         sent = (Double(status.positionMs) / 1000, status.playing ? 1 : 0, Date())
+    }
+
+    /// Grande pochette (1000 px) téléchargée, puis posée sur l'écran verrouillé si le titre affiché n'a pas changé.
+    private static func requestSharp(trackID: Int64, url: String) {
+        sharpAsked = true
+        Task {
+            let image = await CoverLoader.shared.image(url: url, pixels: 1000)
+            guard shownTrack == trackID, shownCover == url else { return }
+            guard let image else {
+                // Échec (réseau, serveur lent, app en arrière-plan) : nouvel essai tout seul 10 s plus tard, 3 essais au plus
+                // par titre (et à toute mise à jour après ce délai). Avant, seule une mise à jour (pause, titre suivant) le
+                // relançait : un titre commencé écran verrouillé restait sans pochette jusqu'au bout, puis la retrouvait à
+                // l'ouverture de l'app.
+                sharpAsked = false
+                retryAt = Date().addingTimeInterval(10)
+                sharpTries += 1
+                guard sharpTries < 3 else { return }
+                try? await Task.sleep(for: .seconds(10))
+                if shownTrack == trackID, shownCover == url, !sharpShown, !sharpAsked { requestSharp(trackID: trackID, url: url) }
+                return
+            }
+            artwork = makeArtwork(image)
+            sharpShown = true
+            let center = MPNowPlayingInfoCenter.default()
+            guard var info = center.nowPlayingInfo else { return }
+            info[MPMediaItemPropertyArtwork] = artwork
+            let elapsed = sent.elapsed + sent.rate * Date().timeIntervalSince(sent.at)
+            info[MPNowPlayingInfoPropertyElapsedPlaybackTime] = elapsed
+            sent = (elapsed, sent.rate, Date())
+            center.nowPlayingInfo = info
+        }
     }
 
     /// Image de secours dessinée une seule fois (titre sans pochette).

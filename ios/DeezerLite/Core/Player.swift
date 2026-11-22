@@ -1009,7 +1009,13 @@ final class Player {
         // (redemandées au besoin) ; en arrière-plan, l'app ne garde que le strict nécessaire pour jouer.
         for name in [UIApplication.didReceiveMemoryWarningNotification, UIApplication.didEnterBackgroundNotification] {
             NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor in self?.trimMemory() }
+                Task { @MainActor in
+                    self?.trimMemory()
+                    // Les pochettes en mémoire viennent d'être vidées (voir `CoverLoader`) : celle du titre suivant est reprise
+                    // tout de suite (depuis le disque en général) pour l'écran verrouillé. Avant, le premier titre qui commençait
+                    // écran verrouillé devait la télécharger à ce moment-là, et restait sans pochette si ça ratait.
+                    self?.prefetchCovers()
+                }
             }
         }
         // iOS peut fermer l'app en arrière-plan : la dernière écoute est gardée pour la reprendre au lancement.
