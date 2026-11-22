@@ -227,7 +227,7 @@ pub fn spawn_player(
     let actor = Actor {
         cmd_tx, flow: false, flow_fetching: false,
         api, decryptors, offline, engine, events, changed, snap: snapshot,
-        quality: Quality::Flac, shuffle: false, repeat: RepeatMode::Off, original: Vec::new(), rng: seed(), prefetched_idx: None, retries: 0, recover_at: None, queue: Vec::new(), index: 0, infos: HashMap::new(), prefetched: None, enriched: std::collections::HashSet::new(), covers_checked: std::collections::HashSet::new(),
+        quality: Quality::Flac, shuffle: false, repeat: RepeatMode::Off, original: Vec::new(), rng: seed(), prefetched_idx: None, retries: 0, recover_at: None, queue: Vec::new(), index: 0, infos: HashMap::new(), prefetched: None, enriched: std::collections::HashSet::new(), ahead_asked: std::collections::HashSet::new(), covers_checked: std::collections::HashSet::new(),
         formats: HashMap::new(), listen: None, restart: false, reload_id: None, listens_waiting: false, end_listen: false, no_listen_for: None, streams: Vec::new(),
     };
     tokio::spawn(actor.run(rx, erx));
@@ -263,6 +263,8 @@ struct Actor {
     prefetched: Option<i64>,
     /// Titres dont la fiche complète a déjà été redemandée (une seule fois par session).
     enriched: std::collections::HashSet<i64>,
+    /// Titres déjà demandés par `enrich_ahead` (une seule fois chacun).
+    ahead_asked: std::collections::HashSet<i64>,
     /// Titres dont la pochette a déjà été vérifiée (une seule fois par session, voir `check_cover`).
     covers_checked: std::collections::HashSet<i64>,
     /// Format reçu de Deezer pour chaque titre lu en streaming (le rapport d'écoute le donne).
@@ -857,6 +859,7 @@ impl Actor {
                 }
                 self.reset_prefetch();
                 self.emit_edit(QueueEdit::Insert { at, tracks: added, index: self.index });
+                self.enrich_ahead(); // titres ajoutés (suite du Flow, ajout à la file)
             }
             PlayerCmd::PlayQueue { tracks, index } => {
                 if tracks.is_empty() {
@@ -874,6 +877,7 @@ impl Actor {
                 }
                 self.reset_prefetch();
                 self.emit_queue();
+                self.enrich_ahead(); // pendant la préparation du premier titre
                 self.play_current().await;
             }
             PlayerCmd::QueueAdd { tracks, next } => {
@@ -893,6 +897,7 @@ impl Actor {
                 }
                 self.reset_prefetch();
                 self.emit_edit(QueueEdit::Insert { at, tracks: added, index: self.index });
+                self.enrich_ahead(); // titres ajoutés (suite du Flow, ajout à la file)
             }
             PlayerCmd::QueueRemove { index } => {
                 // Le titre en cours ne se retire pas (on passerait au suivant avec « suivant »).
@@ -1104,6 +1109,44 @@ impl Actor {
         tokio::spawn(async move {
             if let Some(cover) = api.repaired_track_cover(&url, album, id).await {
                 let _ = tx.send(PlayerCmd::CoverFixed { id, cover }).await;
+            }
+        });
+    }
+
+    /// Artistes complets (feats) des 100 prochains titres de la file, en une seule requête, dès que la file est connue (et à
+    /// chaque suite du Flow). Flow, mixes et accueil ne donnent que l'artiste principal : avant, chaque titre n'était complété
+    /// qu'à son lancement, et son feat apparaissait un instant après le titre. Chaque titre n'est demandé qu'une fois ici.
+    fn enrich_ahead(&mut self) {
+        let ids: Vec<i64> = self
+            .queue
+            .iter()
+            .skip(self.index)
+            .take(100)
+            .copied()
+            .filter(|&id| {
+                id > 0 && id != LOCAL_ID && !self.enriched.contains(&id) && !self.ahead_asked.contains(&id)
+                && !self.offline.as_ref().is_some_and(|s| s.contains(id))
+                    && !self.infos.get(&id).is_some_and(|i| i.artists.len() > 1)
+            })
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        if self.ahead_asked.len() > 5000 {
+            self.ahead_asked.clear();
+        }
+        self.ahead_asked.extend(ids.iter().copied());
+        let (api, tx) = (self.api.clone(), self.cmd_tx.clone());
+        tokio::spawn(async move {
+            // Pas de session (lancement hors ligne) : rien à demander, le lancement de chaque titre s'en charge comme avant.
+            if api.session().await.is_none() {
+                return;
+            }
+            if let Ok(Ok(infos)) = tokio::time::timeout(Duration::from_secs(10), api.tracks_info(&ids)).await {
+                // Seulement ceux qui ont un feat : pour les autres, rien ne change (le lancement les revérifie comme avant).
+                for info in infos.into_iter().filter(|i| i.artists.len() > 1) {
+                    let _ = tx.send(PlayerCmd::Enrich { info }).await;
+                }
             }
         });
     }
@@ -1649,7 +1692,7 @@ mod tests {
             index,
             infos: HashMap::new(),
             prefetched: None,
-            enriched: std::collections::HashSet::new(),
+            enriched: std::collections::HashSet::new(), ahead_asked: std::collections::HashSet::new(),
             covers_checked: std::collections::HashSet::new(),
             formats: HashMap::new(),
             listen: None,
@@ -1704,6 +1747,20 @@ mod tests {
         a.apply_shuffle(false);
         assert_eq!(a.queue, ids, "ordre d'origine rétabli");
         assert_eq!(a.queue[a.index], cur, "on reste sur le même titre");
+    }
+
+    #[tokio::test]
+    async fn upcoming_tracks_get_their_featured_artists_in_one_request() {
+        let mut a = actor(vec![1, 2, 3, 4], 1);
+        let mut feat = track(3);
+        feat.artists = vec![dz_api::ArtistRef { id: 1, name: "A".into() }, dz_api::ArtistRef { id: 2, name: "B".into() }];
+        a.seed_infos(vec![track(1), track(2), feat, track(4)]);
+        a.enrich_ahead();
+        let mut asked: Vec<i64> = a.ahead_asked.iter().copied().collect();
+        asked.sort_unstable();
+        assert_eq!(asked, vec![2, 4], "titres à venir seulement, sans ceux qui ont déjà leurs feats");
+        a.enrich_ahead();
+        assert_eq!(a.ahead_asked.len(), 2, "jamais redemandés");
     }
 
     fn track(id: i64) -> TrackInfo {
