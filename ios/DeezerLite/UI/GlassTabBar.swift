@@ -191,7 +191,7 @@ private struct TabPress: ButtonStyle {
     }
 }
 
-/// Réduit la barre quand on descend dans une page et la rouvre quand on remonte (même distance) ou en haut, sans rien ajouter aux pages :
+/// Réduit la barre quand on descend dans une page et la rouvre seulement de retour en haut, sans rien ajouter aux pages :
 /// un geste posé sur la fenêtre repère la liste sous le doigt, puis sa position est suivie (lancer compris). Ce geste ne
 /// prend aucun appui et ne gêne donc ni les listes ni les boutons.
 struct ScrollCollapse: UIViewRepresentable {
@@ -199,7 +199,7 @@ struct ScrollCollapse: UIViewRepresentable {
     let collapsed: Bool
     let onChange: (Bool) -> Void
 
-    /// Défilement à faire vers le bas avant de réduire la barre, et vers le haut avant de la rouvrir.
+    /// Défilement à faire vers le bas, depuis le début du geste, avant de réduire la barre.
     private static let threshold: CGFloat = 48
 
     @MainActor
@@ -242,24 +242,16 @@ struct ScrollCollapse: UIViewRepresentable {
 
         private func scrolled(_ view: UIScrollView) {
             guard pan.isEnabled else { return }
-            // Rebond sous le bas de la liste ignoré : sa remontée ne compte pas comme un geste vers le haut.
-            let bottom = view.contentSize.height + view.adjustedContentInset.bottom - view.bounds.height
-            let y = min(view.contentOffset.y, max(bottom, -view.adjustedContentInset.top))
-            // Haut de la page : barre entière.
+            let y = view.contentOffset.y
+            // Haut de la page : la seule façon de retrouver la barre entière en défilant.
             if y <= -view.adjustedContentInset.top + 4 {
                 anchor = y
                 set(false)
                 return
             }
-            if collapsed {
-                // Remontée de la même distance que la descente qui la réduit : la barre revient entière. Avant, il fallait
-                // remonter tout en haut de la page.
-                if y > anchor { anchor = y }
-                if anchor - y > ScrollCollapse.threshold { anchor = y; set(false) }
-                return
-            }
+            guard !collapsed else { return }
             if y < anchor { anchor = y }
-            if y - anchor > ScrollCollapse.threshold { anchor = y; set(true) }
+            if y - anchor > ScrollCollapse.threshold { set(true) }
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {

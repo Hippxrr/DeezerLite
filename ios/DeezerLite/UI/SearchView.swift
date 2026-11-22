@@ -86,7 +86,10 @@ struct SearchView: View {
             }
         HStack(spacing: 0) {
             HStack(spacing: 8) {
+                // Loupe et bord gauche de la bulle : comme un appui sur le champ (avant, ils ne réagissaient pas).
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
+                    .padding(.leading, 14).frame(maxHeight: .infinity).contentShape(Rectangle())
+                    .onTapGesture { typing = true }
                 TextField(tr("Titre, artiste, album"), text: $query)
                     .focused($typing)
                     .submitLabel(.search)
@@ -106,7 +109,6 @@ struct SearchView: View {
                     .accessibilityLabel(tr("Tout effacer"))
                 }
             }
-            .padding(.leading, 14)
             .padding(.trailing, 6)
             .frame(height: 44)
             .surface(Capsule(), interactive: false, material: true)
