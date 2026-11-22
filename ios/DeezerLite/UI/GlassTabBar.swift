@@ -93,14 +93,15 @@ struct GlassTabBar: View {
                 .frame(width: size, height: moves ? GlassBarMetrics.small : GlassBarMetrics.barHeight)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.pressable)
+        .buttonStyle(TabPress())
         .accessibilityLabel(title(id))
         // Très grande taille de texte : appui long sur un onglet = son nom en grand, comme la barre d'iOS (le nom affiché
         // reste petit pour tenir dans la barre).
         .accessibilityShowsLargeContentViewer()
         .accessibilityAddTraits(id == tab ? .isSelected : [])
-        // Elle réapparaît une fois le mini-lecteur remonté (il passait dessus en même temps).
-        .animation(.easeOut(duration: 0.15).delay(visible && !isSearch ? 0.12 : 0)) { $0.opacity(visible ? 1 : 0) }
+        // Elle réapparaît juste après le départ du mini-lecteur (il passait dessus en même temps). Avant : 0,12 s d'attente
+        // puis 0,15 s de fondu, la barre semblait lente à revenir.
+        .animation(.easeOut(duration: 0.12).delay(visible && !isSearch ? 0.06 : 0)) { $0.opacity(visible ? 1 : 0) }
         .allowsHitTesting(visible)
         .accessibilityHidden(!visible)
         .offset(x: x)
@@ -131,8 +132,8 @@ struct GlassTabBar: View {
                     view.scaleEffect(x: stretch, y: 2 - stretch)
                 } keyframes: { _ in
                     KeyframeTrack {
-                        CubicKeyframe(1.16, duration: 0.16)
-                        SpringKeyframe(1, duration: 0.34, spring: .bouncy(duration: 0.34, extraBounce: 0.1))
+                        CubicKeyframe(1.14, duration: 0.1)
+                        SpringKeyframe(1, duration: 0.24, spring: .bouncy(duration: 0.24, extraBounce: 0.1))
                     }
                 }
                 .offset(x: third * CGFloat(slot) + 5, y: -6)
@@ -173,14 +174,25 @@ struct GlassTabBar: View {
         .frame(height: GlassBarMetrics.barHeight + GlassBarMetrics.gap + GlassBarMetrics.small)
         .padding(.horizontal, GlassBarMetrics.side)
         .padding(.bottom, GlassBarMetrics.bottom)
-        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: folded)
-        .animation(.spring(response: 0.4, dampingFraction: 0.85), value: hasMini)
+        // Plus vifs qu'avant (0,4 à 0,5 s), proches de la barre d'iOS : la barre paraissait lente.
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: folded)
+        .animation(.spring(response: 0.32, dampingFraction: 0.86), value: hasMini)
         // Changement d'onglet : la pastille glisse d'un onglet à l'autre, en souplesse.
-        .animation(.spring(response: 0.46, dampingFraction: 0.8), value: tab)
+        .animation(.spring(response: 0.32, dampingFraction: 0.8), value: tab)
     }
 }
 
-/// Réduit la barre quand on descend dans une page et la rouvre seulement de retour en haut, sans rien ajouter aux pages :
+/// Appui sur un onglet : l'effet suit le doigt tout de suite. Avant, le style des listes attendait 80 ms (pour laisser le
+/// défilement prendre la main), inutile dans une barre qui ne défile pas : l'appui paraissait mou.
+private struct TabPress: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.9 : 1)
+            .animation(.spring(response: 0.2, dampingFraction: 0.7), value: configuration.isPressed)
+    }
+}
+
+/// Réduit la barre quand on descend dans une page et la rouvre quand on remonte (même distance) ou en haut, sans rien ajouter aux pages :
 /// un geste posé sur la fenêtre repère la liste sous le doigt, puis sa position est suivie (lancer compris). Ce geste ne
 /// prend aucun appui et ne gêne donc ni les listes ni les boutons.
 struct ScrollCollapse: UIViewRepresentable {
@@ -188,7 +200,7 @@ struct ScrollCollapse: UIViewRepresentable {
     let collapsed: Bool
     let onChange: (Bool) -> Void
 
-    /// Défilement à faire vers le bas, depuis le début du geste, avant de réduire la barre.
+    /// Défilement à faire vers le bas avant de réduire la barre, et vers le haut avant de la rouvrir.
     private static let threshold: CGFloat = 48
 
     @MainActor
@@ -231,16 +243,24 @@ struct ScrollCollapse: UIViewRepresentable {
 
         private func scrolled(_ view: UIScrollView) {
             guard pan.isEnabled else { return }
-            let y = view.contentOffset.y
-            // Haut de la page : la seule façon de retrouver la barre entière en défilant.
+            // Rebond sous le bas de la liste ignoré : sa remontée ne compte pas comme un geste vers le haut.
+            let bottom = view.contentSize.height + view.adjustedContentInset.bottom - view.bounds.height
+            let y = min(view.contentOffset.y, max(bottom, -view.adjustedContentInset.top))
+            // Haut de la page : barre entière.
             if y <= -view.adjustedContentInset.top + 4 {
                 anchor = y
                 set(false)
                 return
             }
-            guard !collapsed else { return }
+            if collapsed {
+                // Remontée de la même distance que la descente qui la réduit : la barre revient entière. Avant, il fallait
+                // remonter tout en haut de la page.
+                if y > anchor { anchor = y }
+                if anchor - y > ScrollCollapse.threshold { anchor = y; set(false) }
+                return
+            }
             if y < anchor { anchor = y }
-            if y - anchor > ScrollCollapse.threshold { set(true) }
+            if y - anchor > ScrollCollapse.threshold { anchor = y; set(true) }
         }
 
         func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
