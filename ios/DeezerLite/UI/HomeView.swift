@@ -60,8 +60,8 @@ struct HomeView: View {
     private func row(_ item: HomeItem, count: Int) -> some View {
         switch item {
         case .flow:
-            Button { player.playFlow() } label: {
-                ItemRow(title: "Flow", subtitle: "", trailing: nil) { FlowArt() }
+            Button { player.tapFlow() } label: {
+                ItemRow(title: "Flow", subtitle: "", trailing: nil) { FlowArt().overlay { FlowPulse() } }
             }
             .buttonStyle(.pressable)
             .contextMenu {

@@ -135,7 +135,7 @@ struct LibraryView: View {
         switch row {
         case .flow:
             // Flow et Titres aimés retirés de l'accueil : ils sont ici, parmi les playlists.
-            Button { player.playFlow() } label: {
+            Button { player.tapFlow() } label: {
                 ItemRow(title: "Flow", subtitle: "", trailing: "play.fill") { FlowArt() }
             }
             .buttonStyle(.pressable)

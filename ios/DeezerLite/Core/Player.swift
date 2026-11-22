@@ -1900,6 +1900,13 @@ final class Player {
         showToast(describe(error), seconds: 4)
     }
 
+    /// Appui sur Flow (accueil, bibliothèque) : Flow déjà en cours, pause ou reprise ; en chargement, rien. Avant, un nouveau
+    /// Flow repartait de zéro.
+    func tapFlow() {
+        guard isFlow, current != nil else { playFlow(); return }
+        if !loading { toggle() }
+    }
+
     func playFlow() {
         guard let core else { return }
         let before = beforePlay()

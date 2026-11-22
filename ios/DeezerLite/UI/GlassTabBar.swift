@@ -66,15 +66,22 @@ struct GlassTabBar: View {
         }
     }
 
-    private func item(_ id: Int) -> some View {
-        VStack(spacing: 2) {
-            icon(id).frame(width: 28, height: 28)
-            if !labelsHidden && !folded {
-                Text(title(id)).font(.system(size: 10, weight: .semibold)).lineLimit(1).minimumScaleFactor(0.8)
-                    .transition(.opacity.animation(.easeOut(duration: 0.12)))
+    /// `labelShift` : déplacement inverse de celui de l'onglet quand la barre se réduit. Son nom s'efface là où il était, comme
+    /// celui de l'accueil, au lieu de partir avec l'icône (avant, « Recherche » glissait vers la droite en disparaissant).
+    private func item(_ id: Int, labelShift: CGFloat) -> some View {
+        let label = !labelsHidden && !folded
+        return icon(id)
+            .frame(width: 28, height: 28)
+            .overlay(alignment: .top) {
+                if !labelsHidden {
+                    Text(title(id)).font(.system(size: 10, weight: .semibold)).lineLimit(1).fixedSize()
+                        .offset(x: labelShift, y: 30)
+                        .animation(.easeOut(duration: 0.12)) { $0.opacity(label ? 1 : 0) }
+                }
             }
-        }
-        .foregroundStyle(id == tab ? Theme.accent : Color.primary)
+            // Icône et nom centrés ensemble dans la barre entière ; l'icône seule au centre du rond de la barre réduite.
+            .offset(y: label ? -7 : 0)
+            .foregroundStyle(id == tab ? Theme.accent : Color.primary)
     }
 
     /// Un onglet, à sa place dans la barre entière ou réduite.
@@ -89,7 +96,7 @@ struct GlassTabBar: View {
         return Button {
             if folded && !isSearch { onExpand() } else { onSelect(id) }
         } label: {
-            item(id)
+            item(id, labelShift: moves ? third * CGFloat(slot) + third / 2 - (x + size / 2) : 0) // centre d'avant moins centre d'arrivée
                 .frame(width: size, height: moves ? GlassBarMetrics.small : GlassBarMetrics.barHeight)
                 .contentShape(Rectangle())
         }
@@ -127,15 +134,6 @@ struct GlassTabBar: View {
             Capsule()
                 .fill(Color.black.opacity(scheme == .dark ? 0.4 : 0.08))
                 .frame(width: third - 10, height: GlassBarMetrics.barHeight - 12)
-                // Pendant le trajet, elle s'étire comme une goutte puis reprend sa forme.
-                .keyframeAnimator(initialValue: CGFloat(1), trigger: tab) { view, stretch in
-                    view.scaleEffect(x: stretch, y: 2 - stretch)
-                } keyframes: { _ in
-                    KeyframeTrack {
-                        CubicKeyframe(1.14, duration: 0.1)
-                        SpringKeyframe(1, duration: 0.24, spring: .bouncy(duration: 0.24, extraBounce: 0.1))
-                    }
-                }
                 .offset(x: third * CGFloat(slot) + 5, y: -6)
                 .opacity(folded ? 0 : 1)
         }
@@ -177,8 +175,9 @@ struct GlassTabBar: View {
         // Plus vifs qu'avant (0,4 à 0,5 s), proches de la barre d'iOS : la barre paraissait lente.
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: folded)
         .animation(.spring(response: 0.32, dampingFraction: 0.86), value: hasMini)
-        // Changement d'onglet : la pastille glisse d'un onglet à l'autre, en souplesse.
-        .animation(.spring(response: 0.32, dampingFraction: 0.8), value: tab)
+        // Changement d'onglet : la pastille glisse d'un onglet à l'autre, sans rebond ni déformation. Avant, elle s'étirait en
+        // s'aplatissant puis rebondissait à l'arrivée : le changement d'onglet paraissait bizarre.
+        .animation(.spring(response: 0.3, dampingFraction: 0.9), value: tab)
     }
 }
 

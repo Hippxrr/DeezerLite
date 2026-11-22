@@ -860,6 +860,48 @@ struct FlowArt: View {
     }
 }
 
+/// Flow en cours : petit nuage blanc posé sur sa pochette (accueil). Animé pendant la lecture, en points en pause. Il ne bouge
+/// que si l'accueil est vraiment à l'écran : onglet ouvert, page du dessus, grand lecteur fermé, app au premier plan. Sinon
+/// l'horloge de l'animation est arrêtée (rien n'est recalculé).
+struct FlowPulse: View {
+    @Environment(Player.self) private var player
+    @Environment(\.pageVisible) private var pageVisible
+    @Environment(\.scenePhase) private var phase
+    @State private var onScreen = false
+    var side: CGFloat = 64
+
+    /// Largeur et hauteur (part du côté de la pochette), demi-période du mouvement et décalage (s), forme en pause (part de la
+    /// hauteur : des points, celle du milieu en ovale).
+    private static let bubbles: [(w: CGFloat, h: CGFloat, d: Double, delay: Double, rest: CGFloat)] = [
+        (0.045, 0.13, 0.46, 0.10, 0.346), (0.065, 0.21, 0.52, 0.30, 0.310), (0.085, 0.29, 0.44, 0.20, 0.293),
+        (0.13, 0.38, 0.50, 0.00, 0.205), (0.085, 0.29, 0.48, 0.35, 0.293), (0.065, 0.21, 0.42, 0.15, 0.310),
+        (0.045, 0.13, 0.50, 0.25, 0.346),
+    ]
+
+    var body: some View {
+        if player.isFlow {
+            let moving = player.status.playing && onScreen && pageVisible && phase == .active && !player.showFullPlayer
+            TimelineView(.animation(minimumInterval: 1 / 30, paused: !moving)) { context in
+                let t = context.date.timeIntervalSinceReferenceDate
+                HStack(spacing: side * 0.008) {
+                    ForEach(Self.bubbles.indices, id: \.self) { i in
+                        let b = Self.bubbles[i]
+                        // De 30 % à 100 % de sa hauteur, chacune à son rythme.
+                        let wave = CGFloat(0.65 + 0.35 * sin((t + b.delay) * .pi / b.d))
+                        Ellipse().fill(.white)
+                            .frame(width: side * b.w, height: side * b.h * (moving ? wave : b.rest))
+                    }
+                }
+                .animation(.easeOut(duration: 0.25), value: moving)
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+            .onAppear { onScreen = true }
+            .onDisappear { onScreen = false }
+        }
+    }
+}
+
 /// Glissement d'une ligne vers la droite, sans gêner le défilement de la liste.
 /// Un `DragGesture` posé sur chaque ligne entre en concurrence avec le défilement depuis iOS 18 :
 /// la liste peut rester bloquée un moment avant de défiler. Ici, un geste UIKit qui ne démarre
