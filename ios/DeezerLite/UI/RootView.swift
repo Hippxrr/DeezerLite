@@ -14,30 +14,26 @@ private struct WindowStyle: UIViewRepresentable {
     func updateUIView(_ uiView: Probe, context: Context) {}
 }
 
-/// Au lancement : le logo de l'écran de démarrage d'iOS, repris exactement au même endroit. Il se contracte un instant,
-/// puis file vers l'avant en s'effaçant pendant que le fond disparaît sur l'app, déjà remplie (les copies du
-/// téléphone sont lues pendant ce temps) et immobile. Moins d'une seconde, jamais bloqué.
+/// Au lancement : le logo de l'écran de démarrage d'iOS, repris exactement au même endroit, pendant que les copies du
+/// téléphone sont lues. Puis les barres du cœur se séparent et ondulent comme une onde, se resserrent en une ligne de
+/// points en léger arc et s'effacent, pendant que le fond disparaît sur l'app déjà remplie et immobile. Avant : le cœur se
+/// contractait puis filait vers l'avant en se floutant. Moins d'une seconde, jamais bloqué.
 /// « Réduire les animations » : simple fondu.
 private struct LaunchCover: View {
     @Environment(Player.self) private var player
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let done: () -> Void
-    @State private var logoScale: CGFloat = 1
+    /// 0 : le logo tel quel ; 1 : barres séparées qui ondulent ; 2 : ligne de points.
+    @State private var phase = 0
     @State private var logoOpacity: Double = 1
-    @State private var logoBlur: CGFloat = 0
     @State private var backgroundOpacity: Double = 1
     @State private var coverOpacity: Double = 1
     @State private var leaving = false
 
-    /// Même taille et même place que sur l'écran de démarrage d'iOS (image centrée, 120 points).
-    private var logo: some View {
-        Image("LaunchLogo").resizable().frame(width: 120, height: 120)
-    }
-
     var body: some View {
         ZStack {
             Color("LaunchBackground").opacity(backgroundOpacity)
-            logo.scaleEffect(logoScale).blur(radius: logoBlur).opacity(logoOpacity)
+            LaunchBars(phase: phase).opacity(logoOpacity)
         }
         .ignoresSafeArea()
         .opacity(coverOpacity)
@@ -58,20 +54,56 @@ private struct LaunchCover: View {
                 done()
                 return
             }
-            // 1. Le cœur prend son élan : il se contracte.
-            withAnimation(.easeInOut(duration: 0.2)) { logoScale = 0.86 }
+            // 1. Les barres se séparent et ondulent.
+            withAnimation(.easeOut(duration: 0.18)) { phase = 1 }
+            try? await Task.sleep(for: .milliseconds(180))
+            // 2. Elles se resserrent en une ligne de points ; l'app apparaît derrière.
+            withAnimation(.easeIn(duration: 0.2)) { phase = 2 }
+            withAnimation(.easeOut(duration: 0.35).delay(0.1)) { backgroundOpacity = 0 }
             try? await Task.sleep(for: .milliseconds(200))
-            // 2. Il file vers l'avant (vers soi) en se floutant et s'efface ; le fond disparaît juste derrière lui.
-            // L'app ne bouge pas : réduite pendant l'animation, la barre d'onglets se décalait puis sautait en place.
-            withAnimation(.timingCurve(0.5, 0, 0.75, 0.4, duration: 0.45)) {
-                logoScale = 2.4
-                logoBlur = 6
-            }
-            withAnimation(.easeIn(duration: 0.3)) { logoOpacity = 0 }
-            withAnimation(.easeOut(duration: 0.4).delay(0.05)) { backgroundOpacity = 0 }
-            try? await Task.sleep(for: .milliseconds(470))
+            // 3. Les points s'effacent.
+            withAnimation(.easeOut(duration: 0.15)) { logoOpacity = 0 }
+            try? await Task.sleep(for: .milliseconds(170))
             done()
         }
+    }
+}
+
+/// Le logo (120 points, comme l'écran de démarrage d'iOS) redessiné en ses 9 barres ovales (mesurées sur l'image), qui
+/// bougent chacune seule. Au repos, la vraie image est posée par-dessus : le départ est identique au logo d'iOS.
+private struct LaunchBars: View {
+    let phase: Int
+
+    /// Centre, largeur et hauteur de chaque barre (points).
+    private static let bars: [(x: CGFloat, y: CGFloat, w: CGFloat, h: CGFloat)] = [
+        (3, 35.83, 6.67, 27.67), (14.67, 38.83, 12, 62.33), (26.67, 44.17, 19.67, 88.33), (42.33, 55.5, 18.5, 96.33),
+        (59.33, 71.83, 23, 95.67), (76.33, 55.5, 18.5, 96.33), (91.67, 44.17, 19.67, 88.33), (105, 38.83, 12, 62.33),
+        (116, 35.83, 6.67, 27.67),
+    ]
+    /// Onde : hauteur de chaque barre (part de la sienne) quand elles se séparent.
+    private static let wave: [CGFloat] = [0.85, 0.6, 0.8, 0.5, 0.7, 0.5, 0.8, 0.6, 0.85]
+    /// Ligne de points : hauteur où finit chaque point (le milieu plus bas, en léger arc).
+    private static let dotY: [CGFloat] = [52, 56, 60, 64, 68, 64, 60, 56, 52]
+    /// Dégradé du logo (relevé sur l'image).
+    private static let fill = LinearGradient(colors: [Color(red: 0.72, green: 0.42, blue: 0.98), Color(red: 0.56, green: 0.27, blue: 0.94)],
+                                             startPoint: .topLeading, endPoint: .bottomTrailing)
+
+    var body: some View {
+        ZStack {
+            ForEach(Self.bars.indices, id: \.self) { i in
+                let b = Self.bars[i]
+                let scaleY = phase == 0 ? 1 : phase == 1 ? Self.wave[i] : 4 / b.h
+                Self.fill
+                    .mask { Ellipse().frame(width: b.w, height: b.h).position(x: b.x, y: b.y) }
+                    .scaleEffect(x: phase == 2 ? 0.4 : 1, y: scaleY, anchor: UnitPoint(x: b.x / 120, y: b.y / 120))
+                    .offset(x: phase == 0 ? 0 : CGFloat(i - 4) * 2.5, y: phase == 2 ? Self.dotY[i] - b.y : 0)
+            }
+            // Image d'iOS au repos, retirée d'un coup au départ (les barres dessous ont la même forme).
+            Image("LaunchLogo").resizable()
+                .opacity(phase == 0 ? 1 : 0)
+                .transaction { $0.animation = nil }
+        }
+        .frame(width: 120, height: 120)
     }
 }
 
