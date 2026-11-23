@@ -59,8 +59,17 @@ final class Player {
     private(set) var hasTrack = false
     private(set) var status = Status(playing: false, positionMs: 0, durationMs: 0) {
         // Journal de test (voir `FlowLog`) : chaque passage lecture ↔ pause de l'état affiché.
-        didSet { if oldValue.playing != status.playing { FlowLog.note("état affiché : \(oldValue.playing ? "lecture" : "pause") → \(status.playing ? "lecture" : "pause")") } }
+        didSet {
+            guard oldValue.playing != status.playing else { return }
+            FlowLog.note("état affiché : \(oldValue.playing ? "lecture" : "pause") → \(status.playing ? "lecture" : "pause")")
+            // Boutons lecture / pause redessinés encore une fois, juste après, avec l'état final. Avant, SwiftUI les
+            // redessinait parfois au moment même du changement, avec l'ancienne valeur, puis plus du tout : l'icône
+            // restait sur pause alors que le son était arrêté (vu dans le journal de test, barre d'onglets complète).
+            Task { @MainActor [weak self] in self?.playingSettled &+= 1 }
+        }
     }
+    /// Change juste après chaque passage lecture ↔ pause : lu par `PlayButton` (voir `status`).
+    private(set) var playingSettled = 0
     /// Instant où `status` a été reçu : la position affichée est extrapolée à partir de là, sans interroger Rust.
     private(set) var statusAt = Date()
     /// Titre demandé, son pas encore arrivé (affiché tout de suite pour que l'appui réponde immédiatement).

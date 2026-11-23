@@ -473,6 +473,7 @@ struct PlayButton: View {
     }
 
     var body: some View {
+        let _ = player.playingSettled // redessin de rattrapage (voir `Player.status`)
         let _ = record()
         Button {
             taps += 1
