@@ -152,6 +152,7 @@ struct RootView: View {
         .background(Theme.background.ignoresSafeArea())
         .background(WindowStyle())
         .onChange(of: phase) { _, now in
+            FlowLog.note("app : \(now)")
             if now == .active { ThemeStore.applyStyle(ThemeStore.shared.appearance.style) }
         }
         .tint(Theme.accent)
@@ -385,6 +386,7 @@ struct MainTabs: View {
             default: libraryPop += 1
             }
         }
+        FlowLog.note("onglet : \(new)")
         visited.insert(new)
         if new != 1 { lastPage = new }
         tab = new
@@ -430,7 +432,7 @@ struct MainTabs: View {
             .ignoresSafeArea(.keyboard)
         }
         .background(ScrollCollapse(active: !player.showFullPlayer && player.miniShown,
-                                   collapsed: barCollapsed) { barCollapsed = $0 })
+                                   collapsed: barCollapsed) { FlowLog.note("barre : \($0 ? "réduite" : "entière")"); barCollapsed = $0 })
         .onChange(of: !player.miniShown) { _, empty in if empty { barCollapsed = false } }
     }
 

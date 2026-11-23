@@ -348,6 +348,8 @@ struct SettingsView: View {
     @AppStorage("miniProgress") private var miniProgress = true
     @AppStorage("fullBleedCover") private var fullBleedCover = false
     @AppStorage("saveCoverOnLongPress") private var saveCoverOnLongPress = false
+    @AppStorage("flowLogOn") private var flowLogOn = false
+    @AppStorage("playIconPlain") private var playIconPlain = false
 
     enum SettingsTab: String, CaseIterable {
         case general, look, sound, quality
@@ -428,7 +430,59 @@ struct SettingsView: View {
             .buttonStyle(.plain)
         }
         lecture
+        testGroup
         account
+    }
+
+    /// Version test : journal de Flow et de lecture / pause à copier (voir `FlowLog`), et icône sans animation pour comparer.
+    @ViewBuilder
+    private var testGroup: some View {
+        group(tr("Test (Flow / pause)")) {
+            Toggle(isOn: Binding(get: { flowLogOn }, set: { on in
+                if !on { FlowLog.note("journal désactivé") }
+                flowLogOn = on
+                FlowLog.on = on
+                if on { FlowLog.note("journal activé") }
+            })) {
+                HStack(spacing: 12) {
+                    Image(systemName: "list.bullet.rectangle").foregroundStyle(Theme.accent).frame(width: 26)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(tr("Journal de test"))
+                        Text(tr("Note tout ce qui touche à Flow et à lecture / pause, avec des contrôles automatiques")).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .tint(Theme.accent)
+            .padding(14)
+            divider
+            Toggle(isOn: Binding(get: { playIconPlain }, set: { playIconPlain = $0; FlowLog.note("icône sans animation : \($0)") })) {
+                HStack(spacing: 12) {
+                    Image(systemName: "play.fill").foregroundStyle(Theme.accent).frame(width: 26)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(tr("Icône lecture sans animation"))
+                        Text(tr("Pour comparer : l'icône lecture / pause change d'un coup")).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .tint(Theme.accent)
+            .padding(14)
+            divider
+            Button {
+                UIPasteboard.general.string = FlowLog.header(player: player) + "\n" + FlowLog.text
+                player.showToast(tr("Journal copié"))
+            } label: {
+                row("doc.on.doc", tr("Copier le journal")) { EmptyView() }
+            }
+            .buttonStyle(.plain)
+            divider
+            Button {
+                FlowLog.clear()
+                player.showToast(tr("Journal effacé"))
+            } label: {
+                row("trash", tr("Effacer le journal")) { EmptyView() }
+            }
+            .buttonStyle(.plain)
+        }
     }
 
     /// Langue de l'app : changée tout de suite, sans relancer.
