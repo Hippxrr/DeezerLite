@@ -58,13 +58,11 @@ final class Player {
     /// redessinait les onglets (et leurs pages) à chaque changement de titre.
     private(set) var hasTrack = false
     private(set) var status = Status(playing: false, positionMs: 0, durationMs: 0) {
-        // Journal de test (voir `FlowLog`) : chaque passage lecture ↔ pause de l'état affiché.
         didSet {
             guard oldValue.playing != status.playing else { return }
-            FlowLog.note("état affiché : \(oldValue.playing ? "lecture" : "pause") → \(status.playing ? "lecture" : "pause")")
             // Boutons lecture / pause redessinés encore une fois, juste après, avec l'état final. Avant, SwiftUI les
             // redessinait parfois au moment même du changement, avec l'ancienne valeur, puis plus du tout : l'icône
-            // restait sur pause alors que le son était arrêté (vu dans le journal de test, barre d'onglets complète).
+            // restait sur pause alors que le son était arrêté (barre d'onglets complète surtout).
             Task { @MainActor [weak self] in self?.playingSettled &+= 1 }
         }
     }
@@ -74,10 +72,7 @@ final class Player {
     private(set) var statusAt = Date()
     /// Titre demandé, son pas encore arrivé (affiché tout de suite pour que l'appui réponde immédiatement).
     private(set) var loading = false {
-        didSet {
-            syncMiniShown()
-            if oldValue != loading { FlowLog.note("chargement : \(loading)") }
-        }
+        didSet { syncMiniShown() }
     }
     /// Mini-lecteur à montrer (un titre, ou un chargement). Ne change que quand sa valeur change : avant, les onglets et
     /// chaque page lisaient `hasTrack || loading`, et `loading`, qui bascule à chaque lecture demandée (et même quand il
@@ -93,9 +88,7 @@ final class Player {
     private(set) var repeatMode: Repeat = .off
     /// Identifiants des titres aimés (pas les fiches : elles restent dans Rust).
     private(set) var lovedIds: Set<Int64> = []
-    var showFullPlayer = false {
-        didSet { if oldValue != showFullPlayer { FlowLog.note("grand lecteur : \(showFullPlayer ? "ouvert" : "fermé")") } }
-    }
+    var showFullPlayer = false
     /// Titre affiché dans la file : pendant une rafale de suivant / précédent il devance le cœur
     /// (sert aux pochettes voisines du lecteur plein écran).
     private(set) var shownIndex = 0
@@ -1920,8 +1913,6 @@ final class Player {
     /// Appui sur Flow (accueil, bibliothèque) : Flow déjà en cours, pause ou reprise ; en chargement, rien. Avant, un nouveau
     /// Flow repartait de zéro.
     func tapFlow() {
-        FlowLog.note("— appui Flow : Flow=\(isFlow) titre=\(current.map { "\($0.id)" } ?? "aucun") chargement=\(loading) affiché=\(status.playing ? "lecture" : "pause") moteur=\(core.map { $0.status().playing ? "lecture" : "pause" } ?? "?") → \(!(isFlow && current != nil) ? "nouveau Flow" : loading ? "ignoré (chargement)" : "lecture/pause")")
-        FlowLog.checkLater("appui Flow", player: self)
         guard isFlow, current != nil else { playFlow(); return }
         if !loading { toggle() }
     }
@@ -1967,8 +1958,6 @@ final class Player {
     /// même si l'affichage a une fraction de seconde de retard.
     func toggle() {
         let playing = core?.status().playing ?? status.playing
-        FlowLog.note("toggle : moteur=\(playing ? "lecture" : "pause") affiché=\(status.playing ? "lecture" : "pause") → \(playing ? "pause()" : "resume()")")
-        FlowLog.checkLater("toggle", player: self)
         if playing { pause() } else { resume() }
     }
 
@@ -2001,7 +1990,6 @@ final class Player {
             AudioOutput.resumeNow(wait: UIApplication.shared.applicationState != .active)
         }
         refreshStatus()
-        FlowLog.note("resume() fini : affiché=\(status.playing ? "lecture" : "pause") reprise gardée=\(pendingRestore != nil)")
     }
 
     /// Le moteur audio d'iOS a refusé de redémarrer : pause côté cœur, sans effacer les reprises automatiques prévues
@@ -2016,7 +2004,6 @@ final class Player {
         defer { saveLastSession() } // position de la pause gardée pour la reprise au lancement
         attempt { try $0.pause() }
         refreshStatus()
-        FlowLog.note("pause() fini : affiché=\(status.playing ? "lecture" : "pause")")
     }
     func next() { skip(1) }
 
@@ -2693,7 +2680,6 @@ final class Player {
         let shownMs = position(at: Date()) * 1000
         let drift = abs(Double(truth.positionMs) - shownMs)
         guard truth.playing != status.playing || truth.durationMs != status.durationMs || drift > 2000 else { return }
-        FlowLog.note("contrôle 1 s : affichage corrigé (affiché=\(status.playing ? "lecture" : "pause") moteur=\(truth.playing ? "lecture" : "pause"))")
         status = truth
         statusAt = Date()
         showOnLockScreen(status)
@@ -2714,7 +2700,7 @@ final class Player {
     private func syncStatus() {
         // Dernière écoute affichée mais pas encore relancée : le moteur ne joue rien, son état (0:00) ne doit pas
         // remplacer la position gardée.
-        guard let core, pendingRestore == nil else { FlowLog.note("syncStatus ignoré (reprise gardée)"); return }
+        guard let core, pendingRestore == nil else { return }
         status = core.status()
         statusAt = Date()
         core.refreshState()
@@ -2745,17 +2731,6 @@ final class Player {
     // MARK: Événements du cœur
 
     func handle(_ event: Event) {
-        if FlowLog.on {
-            switch event {
-            case .track(let t): FlowLog.note("cœur : titre \(t.id)")
-            case .started: FlowLog.note("cœur : son lancé")
-            case .state(let s): if s.playing != status.playing { FlowLog.note("cœur : état \(s.playing ? "lecture" : "pause")\(pendingRestore != nil ? " (ignoré : reprise gardée)" : "")") }
-            case .error(let m): FlowLog.note("cœur : erreur \(m)")
-            case .stopped: FlowLog.note("cœur : arrêté")
-            case .closed: FlowLog.note("cœur : fermé")
-            default: break
-            }
-        }
         // Dernière écoute pas encore relancée : le premier état envoyé par le moteur (« en pause, 0:00 ») est ignoré,
         // sinon la reprise partirait du début.
         if pendingRestore != nil {

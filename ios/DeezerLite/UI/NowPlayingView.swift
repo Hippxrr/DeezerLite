@@ -459,25 +459,11 @@ struct PlayButton: View {
     @Environment(Player.self) private var player
     let size: CGFloat
     @State private var taps = 0
-    /// Réglages › Test : icône changée d'un coup, pour comparer avec l'animation (voir `FlowLog`).
-    @AppStorage("playIconPlain") private var plain = false
-
-    private var place: String { size >= 30 ? "grand" : size == 16 ? "barre" : "mini" }
-
-    /// Journal de test : ce que ce bouton dessine, à chaque fois que SwiftUI le redessine.
-    private func record() {
-        guard FlowLog.on else { return }
-        if player.loading { FlowLog.note("dessin \(place) : chargement"); return }
-        FlowLog.drawn[place] = player.status.playing
-        FlowLog.note("dessin \(place) : \(player.status.playing ? "⏸" : "▶︎")")
-    }
 
     var body: some View {
         let _ = player.playingSettled // redessin de rattrapage (voir `Player.status`)
-        let _ = record()
         Button {
             taps += 1
-            FlowLog.note("— appui bouton \(place)")
             player.toggle()
         } label: {
             ZStack {
@@ -486,7 +472,7 @@ struct PlayButton: View {
                 } else {
                     Image(systemName: player.status.playing ? "pause.fill" : "play.fill")
                         .font(.system(size: size, weight: .semibold))
-                        .contentTransition(plain ? ContentTransition.identity : ContentTransition.symbolEffect(.replace))
+                        .contentTransition(.symbolEffect(.replace))
                 }
             }
             // Au moins 44 pt de large (mini-lecteur : 32) : un appui un peu à côté ouvrait le lecteur.
@@ -496,8 +482,6 @@ struct PlayButton: View {
         .buttonStyle(.pressable)
         .sensoryFeedback(.impact(weight: .light), trigger: taps)
         .accessibilityLabel(player.status.playing ? tr("Pause") : tr("Lecture"))
-        .onAppear { FlowLog.note("bouton \(place) affiché") }
-        .onDisappear { FlowLog.note("bouton \(place) retiré"); FlowLog.drawn[place] = nil }
     }
 }
 
