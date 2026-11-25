@@ -109,7 +109,11 @@ final class Player {
     @ObservationIgnored private var details: [Route: Detail] = [:]
     @ObservationIgnored private var detailOrder: [Route] = []
     private let maxDetails = 12
-    var message: String?
+    var message: String? {
+        didSet { if message == nil { offerSessionLog = false } }
+    }
+    /// Message de déconnexion affiché : il propose de copier le journal de connexion (voir `SessionLog`, temporaire).
+    private(set) var offerSessionLog = false
     /// Qualité audio en Wi-Fi et en données mobiles (Réglages, gardées sur le téléphone).
     private(set) var quality: AudioQuality = Player.savedQuality("quality")
     private(set) var cellularQuality: AudioQuality = Player.savedQuality("cellularQuality")
@@ -979,7 +983,12 @@ final class Player {
         // Premier lancement après une installation : le dossier de l'app n'existe pas encore (créé juste en dessous, à
         // chaque lancement ; une mise à jour le garde). Une session laissée dans le trousseau par une installation
         // supprimée est alors effacée : supprimer l'app efface vraiment tout.
-        if !files.fileExists(atPath: storage.deletingLastPathComponent().path) {
+        let folderExisted = files.fileExists(atPath: storage.deletingLastPathComponent().path)
+        SessionLog.launch(folderExisted: folderExisted, sessionSaved: UserDefaults.standard.bool(forKey: Self.sessionSavedKey))
+        if !folderExisted {
+            // Journal : ce que contenait le trousseau juste avant l'effacement (lu ici, avant qu'il ne soit vidé).
+            let before = SessionLog.keychain()
+            SessionLog.note("nouvelle installation repérée, avant effacement : \(before)")
             KeychainAccess.forgetSession()
         }
         do {
@@ -1034,10 +1043,7 @@ final class Player {
         // iOS peut fermer l'app en arrière-plan : la dernière écoute est gardée pour la reprendre au lancement.
         for name in [UIApplication.didEnterBackgroundNotification, UIApplication.willTerminateNotification] {
             NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated {
-                    self?.saveLastSession()
-                    self?.noteArlReplacement()
-                }
+                MainActor.assumeIsolated { self?.saveLastSession() }
             }
         }
         // Verrouillage, Centre de contrôle, passage en arrière-plan : l'écran verrouillé repart de l'état réel du moteur.
@@ -1064,6 +1070,7 @@ final class Player {
                                                               object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated {
                     if let observer { NotificationCenter.default.removeObserver(observer) }
+                    SessionLog.note("iPhone déverrouillé : nouvel essai d'ouverture de session")
                     KeychainAccess.allowWhileLocked()
                     guard let self, !self.sessionReady else { return }
                     if let core = self.core, self.loggedIn != true, core.hasSavedLogin() {
@@ -1330,6 +1337,7 @@ final class Player {
         let account = accountGeneration
         do {
             let ok = try await core.restoreSession()
+            SessionLog.note(ok ? "ouverture de session : réussie" : "ouverture de session : pas rouverte")
             // Déconnexion pendant l'attente : la réponse ne rouvre pas le compte.
             guard account == accountGeneration else { return }
             loggedIn = ok
@@ -1343,7 +1351,6 @@ final class Player {
                 sessionRetryTask?.cancel()
                 sessionRetryTask = nil
                 sessionReady = true
-                noteArlReplacement()
                 forgetOfflineDetails()
                 // Profil ouvert maintenant connu : la liste des téléchargements montre ses Titres aimés à lui. Relue hors du
                 // fil principal (avant : l'app se figeait juste après l'animation de lancement avec une grosse bibliothèque).
@@ -1353,6 +1360,7 @@ final class Player {
                 await loadProfiles()
             }
         } catch {
+            SessionLog.note("ouverture de session : erreur \(error)")
             guard account == accountGeneration else { return }
             // Réseau absent : on garde la copie locale si on en a une, sans message (l'erreur n'apparaît que si l'on
             // demande quelque chose qui a besoin du réseau). La session est rouverte dès que le réseau revient.
@@ -1379,40 +1387,17 @@ final class Player {
         if core.hasSavedLogin() {
             // Le cœur garde l'ARL quand Deezer le refuse : encore là, c'est donc un refus.
             message = tr("Deezer a refusé la session enregistrée sur ce téléphone (ARL expiré ou remplacé) : reconnecte-toi.")
-                + "\n\n" + lostSessionDetail
+            offerSessionLog = true
+            SessionLog.note { "message : session refusée par Deezer · \(SessionLog.keychain())" }
         } else if UserDefaults.standard.bool(forKey: Self.sessionSavedKey) {
-            message = tr("La session enregistrée sur ce téléphone est introuvable (trousseau de l'iPhone) : reconnecte-toi.")
+            // Le trousseau est lié à la signature de l'app : réinstallée ou signée avec un autre certificat, elle ne voit plus
+            // l'ARL rangé avant (les autres données de l'app, elles, restent). Rien à réparer : on se reconnecte, comme
+            // dans toute app installée hors App Store.
+            message = tr("Session introuvable sur ce téléphone (app réinstallée ou certificat changé) : reconnecte-toi.")
+            offerSessionLog = true
+            SessionLog.note { "message : session introuvable · \(SessionLog.keychain())" }
         }
         UserDefaults.standard.set(false, forKey: Self.sessionSavedKey)
-    }
-
-    // MARK: Diagnostic temporaire des déconnexions (à retirer une fois la cause trouvée)
-
-    /// Date d'enregistrement de l'ARL (connexion) et date où Deezer en a envoyé un autre pendant une session.
-    private static let arlSavedAtKey = "arlSavedAt"
-    private static let arlReplacedAtKey = "arlReplacedAt"
-
-    /// Deezer a-t-il remplacé l'ARL depuis la connexion ? Relevé à l'ouverture de session et au passage en arrière-plan
-    /// (une lecture du trousseau), une seule fois : la première date reste.
-    private func noteArlReplacement() {
-        let d = UserDefaults.standard
-        guard let core, sessionReady, UIApplication.shared.isProtectedDataAvailable, d.object(forKey: Self.arlReplacedAtKey) == nil,
-              core.arlReplaced() else { return }
-        d.set(Date(), forKey: Self.arlReplacedAtKey)
-    }
-
-    /// Ligne ajoutée aux messages de session refusée : depuis quand l'ARL était enregistré, et si Deezer l'avait remplacé.
-    private var lostSessionDetail: String {
-        let d = UserDefaults.standard
-        let format = Date.FormatStyle(date: .abbreviated, time: .shortened).locale(LanguageStore.shared.locale)
-        var parts: [String] = []
-        if let saved = d.object(forKey: Self.arlSavedAtKey) as? Date { parts.append(tr("ARL enregistré le %@.", saved.formatted(format))) }
-        if let replaced = d.object(forKey: Self.arlReplacedAtKey) as? Date {
-            parts.append(tr("Deezer l'a remplacé le %@ ; l'app gardait l'ancien.", replaced.formatted(format)))
-        } else {
-            parts.append(tr("Deezer ne l'a pas remplacé pendant les sessions."))
-        }
-        return tr("Diagnostic : %@", parts.joined(separator: " "))
     }
 
     @ObservationIgnored private var sessionRetries = 0
@@ -1447,11 +1432,10 @@ final class Player {
         guard let core else { return }
         do {
             try await core.login(arl: arl)
+            let arlPrint = SessionLog.fingerprint(arl.trimmingCharacters(in: .whitespacesAndNewlines))
+            SessionLog.note { "connexion réussie, ARL \(arlPrint) · \(SessionLog.keychain())" }
             KeychainAccess.allowWhileLocked()
             UserDefaults.standard.set(true, forKey: Self.sessionSavedKey)
-            // Nouvel ARL : diagnostic repris de zéro.
-            UserDefaults.standard.set(Date(), forKey: Self.arlSavedAtKey)
-            UserDefaults.standard.removeObject(forKey: Self.arlReplacedAtKey)
             loggedIn = true
             sessionReady = true
             // Comme à l'ouverture de session : listes des téléchargements relues pour ce compte. Avant, après une session
@@ -1461,7 +1445,10 @@ final class Player {
             BackgroundDownloadManager.shared.deezerSessionIsReady()
             prefetch()
             await loadProfiles()
-        } catch { message = describe(error) }
+        } catch {
+            SessionLog.note("connexion échouée : \(error)")
+            message = describe(error)
+        }
     }
 
     /// Session expirée : les copies affichées au lancement ne restent pas en mémoire (la connexion suivante peut être
@@ -1505,7 +1492,9 @@ final class Player {
         // Retour à l'écran de connexion (avant, l'app restait sur des onglets vides et chaque chargement réaffichait l'alerte).
         sessionReady = false
         loggedIn = false
-        message = tr("Session Deezer expirée : reconnecte-toi.") + "\n\n" + lostSessionDetail
+        message = tr("Session Deezer expirée : reconnecte-toi.")
+        offerSessionLog = true
+        SessionLog.note { "message : session expirée pendant l'utilisation · \(SessionLog.keychain())" }
     }
 
     /// Déconnexion en cours : `loggedIn` reste vrai jusqu'à la fin, donc aucun téléchargement ne doit partir pendant ce temps.
@@ -1524,10 +1513,9 @@ final class Player {
         await downloadEdits?.value
         // Téléchargements ajoutés à la file par ces modifications (avant : écrits dans la file et repris au compte suivant).
         BackgroundDownloadManager.shared.stopAll()
+        SessionLog.note("déconnexion demandée")
         do { try await core.logout() } catch { message = describe(error) }
         UserDefaults.standard.set(false, forKey: Self.sessionSavedKey) // déconnexion voulue : rien à expliquer au lancement
-        UserDefaults.standard.removeObject(forKey: Self.arlSavedAtKey)
-        UserDefaults.standard.removeObject(forKey: Self.arlReplacedAtKey)
         // Ouverture de session lancée pendant la déconnexion (réseau revenu, nouvel essai) : elle ne rouvre pas le compte.
         accountGeneration += 1
         // Profil choisi oublié : un autre compte peut se connecter.
@@ -2788,6 +2776,7 @@ final class Player {
         case .SessionExpired:
             // ARL expiré ou révoqué pendant que l'app restait ouverte : retour à l'écran de connexion. Avant, tout
             // échouait avec ce message jusqu'à ce que l'app soit tuée. Fait après coup : l'appelant finit d'abord.
+            SessionLog.note("réponse « ARL invalide » de Deezer (connecté : \(loggedIn == true ? "oui" : "non"))")
             if loggedIn == true { Task { [weak self] in self?.sessionExpired() } }
             return tr("ARL invalide ou expiré.")
         case nil: return error.localizedDescription

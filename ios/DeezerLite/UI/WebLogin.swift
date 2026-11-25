@@ -81,6 +81,9 @@ private struct WebLoginView: UIViewRepresentable {
                       let arl = cookies.first(where: { $0.name == "arl" && Self.isDeezer($0.domain) && !$0.value.isEmpty })?.value
                 else { return }
                 self.done = true
+                // Journal de connexion (temporaire) : cookies arl vus à ce moment-là, et empreinte de celui qui est pris.
+                let seen = cookies.filter { $0.name == "arl" }.map { "\($0.domain) \(SessionLog.fingerprint($0.value))" }
+                SessionLog.note("page Deezer : \(seen.count) cookie(s) arl [\(seen.joined(separator: ", "))], pris \(SessionLog.fingerprint(arl))")
                 self.parent.onArl(arl)
             }
         }

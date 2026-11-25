@@ -167,6 +167,10 @@ struct RootView: View {
         }
         .alert("Deezer Lite", isPresented: Binding(get: { player.message != nil }, set: { if !$0 { player.message = nil } })) {
             Button("OK", role: .cancel) {}
+            // Diagnostic temporaire des déconnexions (voir `SessionLog`).
+            if player.offerSessionLog {
+                Button(tr("Copier le journal")) { UIPasteboard.general.string = SessionLog.text() }
+            }
         } message: {
             Text(player.message ?? "")
         }
@@ -241,6 +245,10 @@ struct LoginView: View {
                                 .surface(RoundedRectangle(cornerRadius: 14, style: .continuous), interactive: false)
                                 .transition(.opacity.combined(with: .move(edge: .top)))
                             }
+                            // Diagnostic temporaire des déconnexions (voir `SessionLog`) : aussi ici, si le message a été fermé.
+                            Button(tr("Copier le journal de connexion")) { UIPasteboard.general.string = SessionLog.text() }
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
                         }
                         .padding(.bottom, 12)
                     }
@@ -252,11 +260,17 @@ struct LoginView: View {
             }
         }
         .sheet(isPresented: $web) {
-            WebLoginSheet { cookie in login(cookie) }
+            WebLoginSheet { cookie in
+                SessionLog.note("connexion par la page Deezer")
+                login(cookie)
+            }
         }
     }
 
-    private func loginWithArl() { login(arl) }
+    private func loginWithArl() {
+        SessionLog.note("connexion par cookie arl collé")
+        login(arl)
+    }
 
     private func login(_ value: String) {
         let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
