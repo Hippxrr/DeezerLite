@@ -2814,8 +2814,15 @@ final class Player {
             // Un titre téléchargé arrive d'abord avec son image enregistrée puis avec celle de Deezer : changer
             // d'adresse relançait le fondu du fond du lecteur en plein milieu (saut d'image).
             // Deux adresses Deezer différentes, en revanche : pochette réparée par le cœur (l'ancienne n'existait plus).
-            if let shown = current, shown.id == track.id, let cover = shown.coverUrl,
-               !(cover.hasPrefix("http") && track.coverUrl?.hasPrefix("http") == true) { track.coverUrl = cover }
+            // Titre téléchargé atteint par la file (suivant, glissement) : il était affiché avec l'adresse Deezer de la file, et
+            // gardait celle-ci au lieu de son image enregistrée. Réseau faible ou absent : pas de pochette (ou celle d'avant
+            // sur l'écran verrouillé) malgré le son. Son image enregistrée remplace donc l'adresse Deezer, sauf si celle-ci
+            // est déjà en mémoire (rien à recharger, pas de saut d'image).
+            if let shown = current, shown.id == track.id, let cover = shown.coverUrl {
+                let local = track.coverUrl.map { !$0.hasPrefix("http") } ?? false
+                let takeLocal = local && cover.hasPrefix("http") && CoverLoader.shared.anyCached(url: cover) == nil
+                if !takeLocal, !(cover.hasPrefix("http") && track.coverUrl?.hasPrefix("http") == true) { track.coverUrl = cover }
+            }
             if current.map({ !Self.sameTrack($0, track) }) ?? true { current = track }
             // Aussi pour les enchaînements automatiques (fin de titre), qui n'ont pas de signal « son lancé ».
             scheduleCheck()

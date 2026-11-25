@@ -173,7 +173,16 @@ struct CoverView: View {
                 try? await Task.sleep(for: .milliseconds(60))
                 guard !Task.isCancelled else { return }
             }
-            guard load, phase != .background, let sharp = await loader.image(url: url, pixels: pixels) else { return }
+            guard load, phase != .background else { return }
+            var loaded = await loader.image(url: url, pixels: pixels)
+            // Échec (réseau faible) : nouvel essai après 2, 5 puis 15 s, tant que la vue montre cette pochette. Avant, elle
+            // restait vide jusqu'au titre suivant ou au relancement de l'app.
+            for delay in [2, 5, 15] where loaded == nil {
+                try? await Task.sleep(for: .seconds(delay))
+                guard !Task.isCancelled else { return }
+                loaded = await loader.image(url: url, pixels: pixels)
+            }
+            guard let sharp = loaded else { return }
             // Ligne passée à un autre titre pendant le téléchargement (tri, recherche) : l'ancienne image ne l'écrase pas.
             guard !Task.isCancelled else { return }
             image = sharp

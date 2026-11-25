@@ -1009,14 +1009,24 @@ private struct Backdrop: View {
             guard phase != .background else { return }
             // Titre sans pochette (image de secours) : fondu vers le noir.
             guard let url else { fadeToBlack(); return }
-            let image: UIImage?
-            if let tall {
-                image = await CoverLoader.shared.bleedBackdrop(url: url, download: open, tall: tall, inset: inset)
-            } else {
-                image = await CoverLoader.shared.backdrop(url: url, download: open, saturation: 1.15)
+            func make() async -> UIImage? {
+                if let tall { return await CoverLoader.shared.bleedBackdrop(url: url, download: open, tall: tall, inset: inset) }
+                return await CoverLoader.shared.backdrop(url: url, download: open, saturation: 1.15)
             }
+            var image = await make()
             // Titre changé pendant la préparation : le fond de l'ancien ne s'affiche pas sous le nouveau.
             guard !Task.isCancelled else { return }
+            // Lecteur ouvert, échec (réseau faible) : fondu vers le noir (pas le fond du titre d'avant), puis nouvel essai
+            // après 2, 5 puis 15 s. Avant, le fond restait noir jusqu'au titre suivant ou au relancement de l'app.
+            if image == nil, open {
+                fadeToBlack()
+                for delay in [2, 5, 15] where image == nil {
+                    try? await Task.sleep(for: .seconds(delay))
+                    guard !Task.isCancelled else { return }
+                    image = await make()
+                }
+                guard !Task.isCancelled else { return }
+            }
             guard let img = image else {
                 // Lecteur fermé et pochette pas encore en mémoire : le fond sera fait à l'ouverture. Pleine largeur : celui de
                 // l'ancien titre est oublié (il se voyait sous la nouvelle pochette en rouvrant le lecteur) ; le fond flouté

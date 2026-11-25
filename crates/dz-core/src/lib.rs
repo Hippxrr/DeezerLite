@@ -1097,9 +1097,6 @@ impl Actor {
         });
     }
 
-    /// Artistes complets (feats) des 100 prochains titres de la file, en une seule requête, dès que la file est connue (et à
-    /// chaque suite du Flow). Flow, mixes et accueil ne donnent que l'artiste principal : avant, chaque titre n'était complété
-    /// qu'à son lancement, et son feat apparaissait un instant après le titre. Chaque titre n'est demandé qu'une fois ici.
     /// Fiche plus complète d'un titre (artistes en feat) : gardée, puis envoyée à la file et, s'il est affiché, au lecteur.
     fn apply_enrich(&mut self, info: TrackInfo) {
         let id = info.id;
@@ -1119,6 +1116,9 @@ impl Actor {
         self.emit_edit(QueueEdit::Update { track: now, index: self.index });
     }
 
+    /// Artistes complets (feats) des 100 prochains titres de la file, en une seule requête, dès que la file est connue (et à
+    /// chaque suite du Flow). Flow, mixes et accueil ne donnent que l'artiste principal : avant, chaque titre n'était complété
+    /// qu'à son lancement, et son feat apparaissait un instant après le titre. Chaque titre n'est demandé qu'une fois ici.
     fn enrich_ahead(&mut self) {
         // Titres téléchargés : leur fiche enregistrée (artistes complets) complète la file tout de suite, sans réseau.
         // Avant, ils étaient seulement écartés de la demande groupée : la file les montrait sans leurs feats jusqu'à leur
