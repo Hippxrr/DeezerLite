@@ -51,9 +51,12 @@ final class Player {
     private(set) var current: Track? {
         didSet {
             if (current != nil) != hasTrack { hasTrack = current != nil }
+            if current?.id != currentId { currentId = current?.id }
             syncMiniShown()
         }
     }
+    /// Identifiant du titre affiché, changé seulement quand le titre change : lu par les lignes de titres (voir `TrackRow`).
+    private(set) var currentId: Int64?
     /// Un titre est affiché. Lu par la barre d'onglets et le mini-lecteur à la place de `current` : lire `current`
     /// redessinait les onglets (et leurs pages) à chaque changement de titre.
     private(set) var hasTrack = false
@@ -2873,7 +2876,9 @@ final class Player {
             // Dernière écoute gardée à chaque changement de titre : iOS peut fermer l'app suspendue sans prévenir
             // (et ne prévient pas non plus quand CarPlay l'a lancée en arrière-plan). Nouveau titre : gardé à son
             // début ; l'état du moteur peut encore être celui du précédent (fin du titre), qui arrive séparément.
-            saveLastSession(atStart: changed)
+            // Seulement si le titre a changé : avant, aussi pour un index inchangé (encodage et écriture pour rien, au
+            // moment du changement de titre). Les modifications de file sont gardées à la pause et en arrière-plan.
+            if changed { saveLastSession(atStart: true) }
         case .queueInsert(let at, let tracks, let index):
             queue.insert(contentsOf: tracks, at: min(Int(at), queue.count))
             queueIndex = Int(index)

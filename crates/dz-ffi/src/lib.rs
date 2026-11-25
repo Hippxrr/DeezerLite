@@ -1341,7 +1341,10 @@ impl Core {
     /// Lance une file à partir d'identifiants déjà reçus (recherche, playlist...).
     pub fn play(&self, ids: Vec<i64>, index: u32) -> Result<(), CoreError> {
         self.new_play();
-        let tracks = self.lookup(&ids)?;
+        // Fiches en mémoire seulement : s'il en manque, `UnknownTrack`, et l'app passe par `restore_queue` (hors du fil de
+        // l'interface), qui lit aussi les titres téléchargés. Avant, chaque titre absent de la mémoire était relu ici sur le
+        // disque, sur le fil de l'interface (titres téléchargés seuls : de 15 à 45 ms pour 3 000 titres, à l'appui).
+        let tracks = self.lookup_known(&ids)?;
         self.mark_play();
         self.send(PlayerCmd::PlayQueue { tracks, index: index as usize })
     }
@@ -1688,6 +1691,12 @@ impl Core {
     }
 
     /// Fiches des titres demandés ; les titres hors ligne sont lus sur le disque hors du verrou du cache.
+    /// Comme `lookup`, sans lire les titres téléchargés sur le disque.
+    fn lookup_known(&self, ids: &[i64]) -> Result<Vec<TrackInfo>, CoreError> {
+        let known = self.known.lock().map_err(|_| CoreError::Player)?;
+        ids.iter().map(|id| known.get(id).cloned()).collect::<Option<Vec<_>>>().ok_or(CoreError::UnknownTrack)
+    }
+
     fn lookup(&self, ids: &[i64]) -> Result<Vec<TrackInfo>, CoreError> {
         let cached: Vec<Option<TrackInfo>> = {
             let known = self.known.lock().map_err(|_| CoreError::Player)?;

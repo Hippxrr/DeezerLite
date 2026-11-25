@@ -163,8 +163,9 @@ struct MiniPlayer: View {
                 row
                     .padding(.horizontal, 8)
                     .padding(.vertical, 8)
-                    // Bulle flottante (verre qui réagit au doigt sur iOS 26).
-                    .surface(bubble, material: true)
+                    // Bulle flottante : verre en fond, le contenu dessiné par-dessus. Contenu dans le verre, celui-ci était
+                    // recalculé à chaque image quand le titre glisse (iOS 26.0), comme dans la barre de l'app (`GlassTabBar`).
+                    .background { Color.clear.surface(bubble, interactive: false, material: true) }
                     .overlay { progress(bubble) },
                 bubble
             )

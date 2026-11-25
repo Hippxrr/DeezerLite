@@ -115,19 +115,23 @@ private struct ToastOverlay: ViewModifier {
     func body(content: Content) -> some View {
         content
             .overlay(alignment: .top) {
-                if let text = player.toast {
-                    Text(text)
-                        .font(.subheadline.weight(.semibold))
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .surface(Capsule(), interactive: false, material: true)
-                        .shadow(color: .black.opacity(0.3), radius: 10, y: 4)
-                        .padding(.top, 40)
-                        .transition(.move(edge: .top).combined(with: .opacity))
-                        .id(text)
+                ZStack {
+                    if let text = player.toast {
+                        Text(text)
+                            .font(.subheadline.weight(.semibold))
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                            .surface(Capsule(), interactive: false, material: true)
+                            .shadow(color: .black.opacity(0.3), radius: 10, y: 4)
+                            .padding(.top, 40)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                            .id(text)
+                    }
                 }
+                // Sur le message seul : posée sur toute l'app, ce qui changeait en même temps qu'un message (playlist
+                // supprimée, erreur de lecture…) s'animait aussi en ressort.
+                .animation(.spring(response: 0.35, dampingFraction: 0.85), value: player.toast)
             }
-            .animation(.spring(response: 0.35, dampingFraction: 0.85), value: player.toast)
     }
 }
 

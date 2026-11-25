@@ -381,7 +381,9 @@ struct TrackRow: View {
     }
 
     var body: some View {
-        let isCurrent = player.current?.id == track.id
+        // Identifiant seul : `current` est réécrit plusieurs fois par changement de titre (qualité, feats), et chaque ligne en
+        // mémoire se recalculait à chaque fois, parfois en plein glissement.
+        let isCurrent = player.currentId == track.id
         Button {
             guard !swiped else { return }
             activate()
@@ -892,7 +894,8 @@ struct FlowPulse: View {
     var body: some View {
         if player.isFlow {
             let moving = player.status.playing && onScreen && pageVisible && phase == .active && !player.showFullPlayer
-            TimelineView(.animation(minimumInterval: 1 / 30, paused: !moving)) { context in
+            // Cadence de l'écran (60 ou 120 images/s). Avant, 30 : sur un écran 120 Hz, chaque pas durait 4 images (saccades).
+            TimelineView(.animation(minimumInterval: nil, paused: !moving)) { context in
                 let t = context.date.timeIntervalSinceReferenceDate
                 HStack(spacing: side * 0.008) {
                     ForEach(Self.bubbles.indices, id: \.self) { i in
@@ -909,6 +912,21 @@ struct FlowPulse: View {
             .accessibilityHidden(true)
             .onAppear { onScreen = true }
             .onDisappear { onScreen = false }
+            .modifier(ScrollVisibility(visible: $onScreen))
+        }
+    }
+}
+
+/// Visible ou non dans la page qui défile (iOS 18 et plus). L'accueil n'est pas une liste paresseuse : `onDisappear` n'y
+/// arrive pas quand la carte sort de l'écran en faisant défiler, et l'animation de Flow continuait hors de l'écran.
+private struct ScrollVisibility: ViewModifier {
+    @Binding var visible: Bool
+
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content.onScrollVisibilityChange(threshold: 0.01) { visible = $0 }
+        } else {
+            content
         }
     }
 }

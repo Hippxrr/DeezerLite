@@ -298,15 +298,7 @@ struct DetailView: View {
         let url = deezerLink(kind: d.kind, id: d.id)
         if downloadable || url != nil || pinCard != nil {
             Menu {
-                if downloadable {
-                    let downloaded = player.downloadedCollection(kind: d.kind, id: d.id) != nil
-                    Button(role: downloaded ? .destructive : nil) {
-                        if downloaded { confirmRemoveDownload = true } else { player.toggleDownload(d) }
-                    } label: {
-                        Label(downloaded ? tr("Supprimer des téléchargements") : tr("Télécharger la collection"),
-                              systemImage: downloaded ? "trash" : "arrow.down.circle")
-                    }
-                }
+                if downloadable { CompactDownloadItem(detail: d, confirmRemove: $confirmRemoveDownload) }
                 if let url {
                     ShareLink(item: url, subject: Text(d.title), message: Text(d.title)) { Label(tr("Partager"), systemImage: "square.and.arrow.up") }
                 }
@@ -624,6 +616,25 @@ private struct DownloadRestButton: View {
         if player.downloadedCollection(kind: detail.kind, id: detail.id) != nil, detail.tracks.contains(where: { !$0.unavailable && !player.downloadedIds.contains($0.id) && player.downloadStates[$0.id] == nil }) {
             Button { player.download(detail) } label: { Image(systemName: "arrow.down.circle") }
                 .accessibilityLabel(tr("Télécharger le reste"))
+        }
+    }
+}
+
+/// Télécharger ou supprimer, dans le menu compact (petits iPhone) : vue à part, seule à lire les téléchargements. Lus dans
+/// le menu lui-même, ils faisaient recalculer toute la page à chaque relecture des listes de téléchargements (environ une
+/// fois par seconde pendant le téléchargement d'une collection), même en plein défilement (voir `DownloadRestButton`).
+private struct CompactDownloadItem: View {
+    @Environment(Player.self) private var player
+    let detail: Detail
+    @Binding var confirmRemove: Bool
+
+    var body: some View {
+        let downloaded = player.downloadedCollection(kind: detail.kind, id: detail.id) != nil
+        Button(role: downloaded ? .destructive : nil) {
+            if downloaded { confirmRemove = true } else { player.toggleDownload(detail) }
+        } label: {
+            Label(downloaded ? tr("Supprimer des téléchargements") : tr("Télécharger la collection"),
+                  systemImage: downloaded ? "trash" : "arrow.down.circle")
         }
     }
 }

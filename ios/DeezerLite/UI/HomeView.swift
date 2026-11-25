@@ -61,7 +61,10 @@ struct HomeView: View {
         switch item {
         case .flow:
             Button { player.tapFlow() } label: {
-                ItemRow(title: "Flow", subtitle: "", trailing: nil) { FlowArt().overlay { FlowPulse() } }
+                // Nuage posé par-dessus la carte, hors de son verre : dedans, le verre était recalculé à chaque image de
+                // l'animation (iOS 26). Même place qu'avant : la pochette de 64 points, à 10 points du bord.
+                ItemRow(title: "Flow", subtitle: "", trailing: nil) { FlowArt() }
+                    .overlay(alignment: .leading) { FlowPulse().frame(width: 64, height: 64).padding(.leading, 10) }
             }
             .buttonStyle(.pressable)
             .contextMenu {
