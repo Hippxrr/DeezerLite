@@ -95,6 +95,9 @@ struct MiniPlayer: View {
     var compact = false
     /// Réglages > Apparence : barre de progression en bas du mini-lecteur (affichée de base).
     @AppStorage("miniProgress") private var showProgress = true
+    /// Titres d'avance pris par le carrousel, transmis au lecteur une fois le geste posé (voir `CarouselSteps`). Ici
+    /// plutôt que dans le carrousel : le cœur suit le titre affiché au centre (voir `row`).
+    @State private var steps = CarouselSteps()
 
     init(inBar: Bool = false, compact: Bool = false) {
         self.inBar = inBar
@@ -103,13 +106,15 @@ struct MiniPlayer: View {
 
     private var row: some View {
         HStack(spacing: 8) {
-            MiniCarousel(cover: inBar ? 34 : 44)
+            MiniCarousel(cover: inBar ? 34 : 44, steps: steps)
                 // Place fixe : au-delà de ces tailles de texte, le titre et l'artiste étaient coupés.
                 .dynamicTypeSize(...(inBar ? DynamicTypeSize.large : DynamicTypeSize.xLarge))
                 .frame(height: inBar ? 40 : 46)
                 .clipped()
             PlayButton(size: inBar ? 16 : 19)
-            if let t = player.current, t.id != 0, !compact {
+            // Cœur du titre affiché au centre du carrousel. Avant, celui du lecteur : juste après un glissement, il restait
+            // un instant celui du titre d'avant (vide, puis plein en même temps que la suite).
+            if let t = steps.current(player), t.id != 0, !compact {
                 // S'efface tout de suite : il ne suit pas le mini-lecteur qui rétrécit.
                 LikeButton(track: t, size: inBar ? 16 : 18).frame(width: 36, height: 40)
                     .transition(.opacity.animation(.easeOut(duration: 0.1)))
@@ -192,9 +197,9 @@ private struct HalfGapLayout: Layout {
 private struct MiniCarousel: View {
     @Environment(Player.self) private var player
     let cover: CGFloat
+    /// Titres d'avance pris par le carrousel (gardés par le mini-lecteur, voir `MiniPlayer.steps`).
+    let steps: CarouselSteps
     @State private var slide = SlideState()
-    /// Titres d'avance pris par le carrousel, transmis au lecteur une fois le geste posé (voir `CarouselSteps`).
-    @State private var steps = CarouselSteps()
     /// Doigt posé : revient à `false` même si le système annule le geste, sans `onEnded`.
     @GestureState private var swiping = false
 

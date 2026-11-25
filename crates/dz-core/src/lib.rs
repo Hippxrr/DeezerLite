@@ -809,23 +809,7 @@ impl Actor {
                 Box::pin(self.on_cmd(PlayerCmd::PlayQueue { tracks, index: 0 })).await;
                 self.set_flow(true); // après PlayQueue, qui remet le drapeau à zéro
             }
-            PlayerCmd::Enrich { info } => {
-                let id = info.id;
-                let before = self.infos.get(&id).map(|i| i.artist.clone());
-                self.seed_infos(vec![info]); // la liste d'artistes la plus complète l'emporte
-                let Some(now) = self.infos.get(&id).cloned() else { return };
-                if before.as_deref() == Some(now.artist.as_str()) {
-                    return; // rien de nouveau
-                }
-                // Titre affiché en ce moment : le lecteur, la barre et la zone de lecture du système se mettent à jour.
-                if self.engine.shared.current_id.load(Ordering::Relaxed) == id || self.queue.get(self.index) == Some(&id) {
-                    if let Ok(mut s) = self.snap.lock() {
-                        s.current = Some(now.clone());
-                    }
-                    let _ = self.events.send(CoreEvent::TrackUpdated(now.clone()));
-                }
-                self.emit_edit(QueueEdit::Update { track: now, index: self.index });
-            }
+            PlayerCmd::Enrich { info } => self.apply_enrich(info),
             PlayerCmd::CoverFixed { id, cover } => {
                 let Some(info) = self.infos.get_mut(&id) else { return };
                 info.cover_url = Some(cover);
@@ -1116,7 +1100,45 @@ impl Actor {
     /// Artistes complets (feats) des 100 prochains titres de la file, en une seule requête, dès que la file est connue (et à
     /// chaque suite du Flow). Flow, mixes et accueil ne donnent que l'artiste principal : avant, chaque titre n'était complété
     /// qu'à son lancement, et son feat apparaissait un instant après le titre. Chaque titre n'est demandé qu'une fois ici.
+    /// Fiche plus complète d'un titre (artistes en feat) : gardée, puis envoyée à la file et, s'il est affiché, au lecteur.
+    fn apply_enrich(&mut self, info: TrackInfo) {
+        let id = info.id;
+        let before = self.infos.get(&id).map(|i| i.artist.clone());
+        self.seed_infos(vec![info]); // la liste d'artistes la plus complète l'emporte
+        let Some(now) = self.infos.get(&id).cloned() else { return };
+        if before.as_deref() == Some(now.artist.as_str()) {
+            return; // rien de nouveau
+        }
+        // Titre affiché en ce moment : le lecteur, la barre et la zone de lecture du système se mettent à jour.
+        if self.engine.shared.current_id.load(Ordering::Relaxed) == id || self.queue.get(self.index) == Some(&id) {
+            if let Ok(mut s) = self.snap.lock() {
+                s.current = Some(now.clone());
+            }
+            let _ = self.events.send(CoreEvent::TrackUpdated(now.clone()));
+        }
+        self.emit_edit(QueueEdit::Update { track: now, index: self.index });
+    }
+
     fn enrich_ahead(&mut self) {
+        // Titres téléchargés : leur fiche enregistrée (artistes complets) complète la file tout de suite, sans réseau.
+        // Avant, ils étaient seulement écartés de la demande groupée : la file les montrait sans leurs feats jusqu'à leur
+        // lancement (le mini-lecteur affichait « ZZ » puis « ZZ, Timal » en arrivant sur le titre).
+        let saved: Vec<TrackInfo> = match self.offline.as_ref() {
+            Some(store) => self
+                .queue
+                .iter()
+                .skip(self.index)
+                .take(100)
+                .filter(|&id| !self.ahead_asked.contains(id) && !self.infos.get(id).is_some_and(|i| i.artists.len() > 1))
+                .filter_map(|&id| store.saved_info(id))
+                .filter(|i| i.artists.len() > 1)
+                .collect(),
+            None => Vec::new(),
+        };
+        for info in saved {
+            self.ahead_asked.insert(info.id);
+            self.apply_enrich(info);
+        }
         let ids: Vec<i64> = self
             .queue
             .iter()

@@ -437,6 +437,12 @@ impl OfflineStore {
         })
     }
 
+    /// Fiche enregistrée d'un titre téléchargé, sans regarder son fichier ni sa pochette (aucun accès disque) : ses artistes
+    /// complètent une file d'attente avant le lancement du titre.
+    pub fn saved_info(&self, id: i64) -> Option<TrackInfo> {
+        self.entries.read().ok()?.get(&id).map(|e| e.info.clone())
+    }
+
     /// Titre téléchargé et son fichier complet sur le téléphone. Sans copier la fiche ni chercher sa pochette (avant, via
     /// `local` : deux copies et deux accès disque, à chaque titre lancé, préparé ou téléchargé).
     pub fn contains(&self, id: i64) -> bool {
@@ -1931,6 +1937,16 @@ mod tests {
         for name in names {
             std::fs::remove_dir_all(root.join(format!("{name}.tmp"))).unwrap();
         }
+    }
+
+    #[test]
+    fn saved_info_reads_the_stored_track_without_its_file() {
+        let root = root("saved-info");
+        let store = OfflineStore::open(root.clone()).unwrap();
+        insert_file(&store, 42);
+        assert_eq!(store.saved_info(42).map(|i| i.id), Some(42));
+        assert!(store.saved_info(7).is_none(), "titre pas téléchargé : rien");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
