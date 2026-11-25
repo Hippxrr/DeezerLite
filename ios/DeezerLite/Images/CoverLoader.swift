@@ -229,7 +229,7 @@ final class CoverLoader: @unchecked Sendable {
                 .composited(over: placed.clampedToExtent())
             // Force du flou, ligne par ligne (0 : net ; 1 : rayon maximal). Derrière l'heure, léger (le reflet du haut ressemble
             // au début de la pochette : plus de limite visible, avant il était aussi flou que le fond habituel) ; nul sous la
-            // pochette (cachée ou en train de s'effacer) et sur son reflet ; puis après le reflet, il part de presque rien
+            // pochette (cachée ou en train de s'effacer), en montée douce dans son reflet ; puis après le reflet, il part de presque rien
             // et monte doucement sur les trois quarts de la hauteur restante (avant : la moitié, plus vite au départ, le flou
             // arrivait « d'un coup »).
             let base: CGFloat = 0.13
@@ -237,9 +237,11 @@ final class CoverLoader: @unchecked Sendable {
             func amount(_ row: CGFloat) -> CGFloat { // `row` : depuis le haut de l'écran
                 if row < gap { return base }
                 if row < gap + side * 0.1 { return base * (1 - eased((row - gap) / (side * 0.1))) }
-                // Pochette et son reflet : nets. Avant, le flou commençait déjà sur le bas de la pochette (visible à travers
-                // son fondu) ; il part maintenant juste après le reflet, avec la même montée qu'avant.
-                if row < gap + side + band { return 0 }
+                // Pochette : nette. Avant, le flou montait déjà sur son dernier tiers (visible à travers son fondu). Il monte
+                // maintenant dans son reflet, de rien au bord de la pochette jusqu'au même niveau qu'avant à la fin du
+                // reflet (sans cette montée, un trait se voyait là), puis continue comme avant.
+                if row < gap + side { return 0 }
+                if row < gap + side + band { return 0.04 * eased((row - gap - side) / max(band, 1)) }
                 return 0.04 + 0.96 * pow(min((row - gap - side - band) / (bottom * 0.75), 1), 1.8)
             }
             let rows = Int(canvas.height)
