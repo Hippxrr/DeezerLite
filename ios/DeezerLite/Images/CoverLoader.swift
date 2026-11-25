@@ -229,7 +229,7 @@ final class CoverLoader: @unchecked Sendable {
                 .composited(over: placed.clampedToExtent())
             // Force du flou, ligne par ligne (0 : net ; 1 : rayon maximal). Derrière l'heure, léger (le reflet du haut ressemble
             // au début de la pochette : plus de limite visible, avant il était aussi flou que le fond habituel) ; nul sous la
-            // pochette (cachée ou en train de s'effacer), en montée douce dans son reflet ; puis après le reflet, il part de presque rien
+            // pochette (cachée ou en train de s'effacer), à peine sur ses tout derniers % ; puis sous elle, il part de presque rien
             // et monte doucement sur les trois quarts de la hauteur restante (avant : la moitié, plus vite au départ, le flou
             // arrivait « d'un coup »).
             let base: CGFloat = 0.13
@@ -237,12 +237,13 @@ final class CoverLoader: @unchecked Sendable {
             func amount(_ row: CGFloat) -> CGFloat { // `row` : depuis le haut de l'écran
                 if row < gap { return base }
                 if row < gap + side * 0.1 { return base * (1 - eased((row - gap) / (side * 0.1))) }
-                // Pochette : nette. Avant, le flou montait déjà sur son dernier tiers (visible à travers son fondu). Il monte
-                // maintenant dans son reflet, de rien au bord de la pochette jusqu'au même niveau qu'avant à la fin du
-                // reflet (sans cette montée, un trait se voyait là), puis continue comme avant.
-                if row < gap + side { return 0 }
-                if row < gap + side + band { return 0.04 * eased((row - gap - side) / max(band, 1)) }
-                return 0.04 + 0.96 * pow(min((row - gap - side - band) / (bottom * 0.75), 1), 1.8)
+                // Pochette nette, sauf ses 6 derniers % (déjà presque effacés par son fondu) où le flou monte jusqu'à son
+                // niveau du bord. Avant, il montait sur tout le dernier tiers : le bas de la pochette (un texte) était flou.
+                // Sans aucune montée sur la pochette, le grain s'arrêtait net au bord et un trait se voyait (essayé, puis
+                // vérifié en reproduisant le rendu).
+                if row < gap + side * 0.94 { return 0 }
+                if row < gap + side { return 0.04 * pow((row - gap - side * 0.94) / (side * 0.06), 2) }
+                return 0.04 + 0.96 * pow(min((row - gap - side) / (bottom * 0.75), 1), 1.8)
             }
             let rows = Int(canvas.height)
             let column = (0..<rows).map { UInt8((amount(CGFloat($0)) * 255).rounded()) }
