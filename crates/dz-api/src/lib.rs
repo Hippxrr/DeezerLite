@@ -361,6 +361,13 @@ impl DeezerClient {
         }
     }
 
+    /// Diagnostic temporaire des déconnexions (à retirer une fois la cause trouvée) : valeurs du cookie `arl` de la session
+    /// en cours, celle posée par `set_arl` et celles que Deezer a pu envoyer depuis.
+    pub fn session_arls(&self) -> Vec<String> {
+        let Ok(store) = self.jar.lock() else { return Vec::new() };
+        store.iter_unexpired().filter(|c| c.name() == "arl").map(|c| c.value().to_owned()).collect()
+    }
+
     fn sid_cookie(&self) -> Option<String> {
         let store = self.jar.lock().ok()?;
         store.get("deezer.com", "/", "sid").map(|c| c.value().to_owned())
@@ -1355,6 +1362,17 @@ mod tests {
         assert!(gw_error(&json!([])).is_none());
         assert!(gw_error(&json!({})).is_none());
         assert!(gw_error(&Value::Null).is_none());
+    }
+
+    #[test]
+    fn session_arls_sees_an_arl_sent_by_deezer() {
+        let c = DeezerClient::new().unwrap();
+        c.set_arl("saved").unwrap();
+        assert_eq!(c.session_arls(), vec!["saved".to_owned()]);
+        let url = Url::parse("https://www.deezer.com").unwrap();
+        let sent = reqwest_cookie_store::RawCookie::parse("arl=fresh; Domain=.deezer.com; Path=/").unwrap();
+        c.jar.lock().unwrap().insert_raw(&sent, &url).unwrap();
+        assert_eq!(c.session_arls(), vec!["fresh".to_owned()], "même cookie : remplacé");
     }
 
     #[tokio::test]

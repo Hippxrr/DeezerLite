@@ -711,6 +711,13 @@ impl Core {
         keyring::Entry::new(SERVICE, USER).and_then(|e| e.get_password()).is_ok()
     }
 
+    /// Diagnostic temporaire des déconnexions au bout d'un moment (à retirer une fois la cause trouvée) : Deezer a envoyé
+    /// pendant la session un autre `arl` que celui du trousseau. `false` sans ARL enregistré.
+    pub fn arl_replaced(&self) -> bool {
+        let Ok(saved) = keyring::Entry::new(SERVICE, USER).and_then(|e| e.get_password()) else { return false };
+        self.api.session_arls().iter().any(|a| a != saved.trim())
+    }
+
     /// Dernier accueil chargé (vide si aucun).
     pub fn cached_home(&self) -> Vec<Shelf> {
         self.restore("home.json").unwrap_or_default()
