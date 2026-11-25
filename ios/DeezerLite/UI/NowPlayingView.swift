@@ -704,13 +704,13 @@ struct NowPlayingView: View {
     /// Bas fondu en courbe douce (pas de départ visible du fondu, comme une ligne). Haut fondu un peu plus long (7 %) : la
     /// jonction avec le fond se fait en douceur, les logos tout en haut restent lisibles.
     private static let bleedMask = LinearGradient(
-        // Bas : pochette entière jusqu'à 85 %, puis fondue sur les 15 derniers %. Avant, le fondu partait de 70 % : on voyait
+        // Bas : pochette entière jusqu'à 75 %, puis fondue sur les 25 derniers %. Avant, le fondu partait de 70 % : on voyait
         // déjà à travers le fond, calculé en 400 pixels et presque net à cet endroit (bas de pochette de moindre qualité).
-        // Plus bas, ce fond est assez flou pour que sa résolution ne se voie plus. Le fond lui-même ne change pas : même
-        // jonction sous la pochette, sans trait (vérifié en reproduisant le rendu avec de vraies pochettes).
+        // Essayé à partir de 85 % : plus net, mais le passage au flou, trop court, se voyait comme une limite. 75 % : entre
+        // les deux. Le fond lui-même ne change pas.
         stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.07),
-                .init(color: .black, location: 0.85), .init(color: .black.opacity(0.74), location: 0.9),
-                .init(color: .black.opacity(0.35), location: 0.94), .init(color: .black.opacity(0.07), location: 0.975),
+                .init(color: .black, location: 0.75), .init(color: .black.opacity(0.74), location: 0.833),
+                .init(color: .black.opacity(0.35), location: 0.9), .init(color: .black.opacity(0.07), location: 0.958),
                 .init(color: .clear, location: 1)],
         startPoint: .top, endPoint: .bottom)
 
