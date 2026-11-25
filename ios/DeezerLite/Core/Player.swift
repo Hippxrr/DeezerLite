@@ -1327,8 +1327,12 @@ final class Player {
             // Déconnexion pendant l'attente : la réponse ne rouvre pas le compte.
             guard account == accountGeneration else { return }
             loggedIn = ok
-            if !ok { forgetAccountCopies() }
+            if !ok {
+                forgetAccountCopies()
+                explainLostSession(core)
+            }
             if ok {
+                UserDefaults.standard.set(true, forKey: Self.sessionSavedKey)
                 sessionRetries = 0
                 sessionRetryTask?.cancel()
                 sessionRetryTask = nil
@@ -1354,6 +1358,24 @@ final class Player {
                 if UIApplication.shared.isProtectedDataAvailable { message = describe(error) }
             }
         }
+    }
+
+    /// Une session a été ouverte sur ce téléphone (connexion ou relancement réussis) et pas fermée par une déconnexion :
+    /// au lancement, une session introuvable est alors anormale (voir `explainLostSession`).
+    private static let sessionSavedKey = "sessionSaved"
+
+    /// Session pas rouverte au lancement : la raison est affichée, pour comprendre sans deviner (aussi pour les prochains
+    /// problèmes). Avant, l'écran de connexion revenait sans rien dire, que Deezer ait refusé la session ou qu'elle soit
+    /// introuvable sur le téléphone. Premier lancement ou après une déconnexion : rien à expliquer, aucun message.
+    private func explainLostSession(_ core: Core) {
+        guard UIApplication.shared.isProtectedDataAvailable else { return }
+        if core.hasSavedLogin() {
+            // Le cœur garde l'ARL quand Deezer le refuse : encore là, c'est donc un refus.
+            message = tr("Deezer a refusé la session enregistrée sur ce téléphone (ARL expiré ou remplacé) : reconnecte-toi.")
+        } else if UserDefaults.standard.bool(forKey: Self.sessionSavedKey) {
+            message = tr("La session enregistrée sur ce téléphone est introuvable (trousseau de l'iPhone) : reconnecte-toi.")
+        }
+        UserDefaults.standard.set(false, forKey: Self.sessionSavedKey)
     }
 
     @ObservationIgnored private var sessionRetries = 0
@@ -1389,6 +1411,7 @@ final class Player {
         do {
             try await core.login(arl: arl)
             KeychainAccess.allowWhileLocked()
+            UserDefaults.standard.set(true, forKey: Self.sessionSavedKey)
             loggedIn = true
             sessionReady = true
             // Comme à l'ouverture de session : listes des téléchargements relues pour ce compte. Avant, après une session
@@ -1462,6 +1485,7 @@ final class Player {
         // Téléchargements ajoutés à la file par ces modifications (avant : écrits dans la file et repris au compte suivant).
         BackgroundDownloadManager.shared.stopAll()
         do { try await core.logout() } catch { message = describe(error) }
+        UserDefaults.standard.set(false, forKey: Self.sessionSavedKey) // déconnexion voulue : rien à expliquer au lancement
         // Ouverture de session lancée pendant la déconnexion (réseau revenu, nouvel essai) : elle ne rouvre pas le compte.
         accountGeneration += 1
         // Profil choisi oublié : un autre compte peut se connecter.

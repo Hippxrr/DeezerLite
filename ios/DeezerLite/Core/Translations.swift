@@ -52,6 +52,8 @@ enum Translations {
         "Plus assez de place sur l'iPhone : téléchargements en pause.": ("Not enough space on the iPhone: downloads paused.", "No queda espacio en el iPhone: descargas en pausa."),
         "ARL invalide ou expiré.": ("Invalid or expired ARL.", "ARL no válido o caducado."),
         "Session Deezer expirée : reconnecte-toi.": ("Deezer session expired: please sign in again.", "La sesión de Deezer ha caducado: vuelve a iniciar sesión."),
+        "Deezer a refusé la session enregistrée sur ce téléphone (ARL expiré ou remplacé) : reconnecte-toi.": ("Deezer refused the session saved on this phone (ARL expired or replaced): please sign in again.", "Deezer rechazó la sesión guardada en este teléfono (ARL caducado o sustituido): vuelve a iniciar sesión."),
+        "La session enregistrée sur ce téléphone est introuvable (trousseau de l'iPhone) : reconnecte-toi.": ("The session saved on this phone could not be found (iPhone keychain): please sign in again.", "No se encuentra la sesión guardada en este teléfono (llavero del iPhone): vuelve a iniciar sesión."),
         "Téléchargements en cours": ("Downloads in progress", "Descargas en curso"),
         "Tout arrêter": ("Stop all", "Detener todo"),
         "Téléchargements en échec": ("Failed downloads", "Descargas fallidas"),
