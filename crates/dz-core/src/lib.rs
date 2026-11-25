@@ -1204,6 +1204,11 @@ impl Actor {
         let keep: std::collections::HashSet<i64> = self.queue.iter().copied().collect();
         let audible = self.engine.shared.current_id.load(Ordering::Relaxed);
         self.infos.retain(|id, _| keep.contains(id) || *id == audible);
+        // Fiches oubliées : leurs artistes complétés aussi. Avant, ces titres restaient notés « déjà complétés » : revenus
+        // dans une file (fréquent avec Flow), ils n'étaient plus redemandés et s'affichaient sans leurs feats.
+        let infos = &self.infos;
+        self.enriched.retain(|id| infos.contains_key(id));
+        self.ahead_asked.retain(|id| infos.contains_key(id));
     }
 
     fn emit_queue(&self) {
@@ -1761,6 +1766,21 @@ mod tests {
         assert_eq!(asked, vec![2, 4], "titres à venir seulement, sans ceux qui ont déjà leurs feats");
         a.enrich_ahead();
         assert_eq!(a.ahead_asked.len(), 2, "jamais redemandés");
+    }
+
+    #[tokio::test]
+    async fn a_track_back_in_a_new_queue_is_asked_again_for_its_feats() {
+        let mut a = actor(vec![1, 2], 0);
+        a.seed_infos(vec![track(1), track(2)]);
+        a.enrich_ahead();
+        a.enriched.insert(2);
+        a.queue = vec![3]; // autre liste : les fiches de 1 et 2 sont oubliées
+        a.forget_old_infos();
+        assert!(!a.ahead_asked.contains(&2) && !a.enriched.contains(&2), "oubliés avec leur fiche");
+        a.queue = vec![2]; // le titre revient (Flow suivant)
+        a.seed_infos(vec![track(2)]);
+        a.enrich_ahead();
+        assert!(a.ahead_asked.contains(&2), "redemandé : ses feats reviennent avec la file");
     }
 
     fn track(id: i64) -> TrackInfo {

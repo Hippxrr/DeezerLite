@@ -127,7 +127,6 @@ struct SearchView: View {
             .accessibilityHidden(!typing)
         }
         }
-        .animation(.easeOut(duration: 0.2), value: typing)
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         // Fond de la page : ce qui défile passe dessous sans se mêler au champ.
@@ -135,6 +134,27 @@ struct SearchView: View {
     }
 
     var body: some View {
+        resultsPage
+            .safeAreaInset(edge: .top, spacing: 0) { searchField }
+            // Titre replié ou rouvert : la liste suit le même mouvement que le champ. Avant, l'animation était posée sur le
+            // champ seul : la place réservée en haut changeait d'un coup, la liste sautait (vers le haut, ou vers le bas en
+            // laissant un vide) pendant que le titre et le champ glissaient.
+            .animation(.easeOut(duration: 0.2), value: typing)
+            .toolbar(.hidden, for: .navigationBar)
+            // Résultats au fil de la frappe : la recherche part 300 ms après la dernière lettre (pas une requête par lettre).
+            .onChange(of: query) { _, _ in run(after: .milliseconds(300)) }
+            .onChange(of: focusRequest) {
+                typing = true
+                // Une page était ouverte par-dessus : le champ n'est atteignable qu'une fois revenu à la recherche.
+                Task {
+                    try? await Task.sleep(for: .milliseconds(350))
+                    typing = true
+                }
+            }
+    }
+
+    /// Historique ou résultats, sous le champ. À part du `body` : la chaîne de réglages reste courte pour le compilateur.
+    private var resultsPage: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 if query.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -181,18 +201,6 @@ struct SearchView: View {
         .modifier(ScrollWatch { _ in typing = false })
         // Page vide (rien de tapé, pas d'historique) : rien ne défile. Seulement clavier ouvert, pour ne rien gêner sinon.
         .background(KeyboardDrag(active: typing) { typing = false })
-        .safeAreaInset(edge: .top, spacing: 0) { searchField }
-        .toolbar(.hidden, for: .navigationBar)
-        // Résultats au fil de la frappe : la recherche part 300 ms après la dernière lettre (pas une requête par lettre).
-        .onChange(of: query) { _, _ in run(after: .milliseconds(300)) }
-        .onChange(of: focusRequest) {
-            typing = true
-            // Une page était ouverte par-dessus : le champ n'est atteignable qu'une fois revenu à la recherche.
-            Task {
-                try? await Task.sleep(for: .milliseconds(350))
-                typing = true
-            }
-        }
     }
 
     private func remember(_ card: Card) { player.remember(.card(card)) }
