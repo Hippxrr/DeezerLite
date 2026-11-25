@@ -78,11 +78,18 @@ private struct WebLoginView: UIViewRepresentable {
             guard !done else { return }
             cookieStore.getAllCookies { [weak self] cookies in
                 guard let self, !self.done,
-                      let arl = cookies.first(where: { $0.name == "arl" && $0.domain.hasSuffix("deezer.com") && !$0.value.isEmpty })?.value
+                      let arl = cookies.first(where: { $0.name == "arl" && Self.isDeezer($0.domain) && !$0.value.isEmpty })?.value
                 else { return }
                 self.done = true
                 self.parent.onArl(arl)
             }
+        }
+
+        /// deezer.com ou l'un de ses sous-domaines. Avant, un domaine qui finissait seulement par « deezer.com »
+        /// (« fauxdeezer.com ») passait aussi : son cookie `arl` aurait été pris pour la session (comme sur le Mac).
+        private static func isDeezer(_ domain: String) -> Bool {
+            let d = domain.hasPrefix(".") ? String(domain.dropFirst()) : domain
+            return d == "deezer.com" || d.hasSuffix(".deezer.com")
         }
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) { parent.loading = true }

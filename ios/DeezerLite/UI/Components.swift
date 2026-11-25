@@ -344,7 +344,9 @@ struct TrackRow: View {
         guard swiped else { return }
         let wasTap = completed && maxSwipe < Self.tapSlop
         maxSwipe = 0
-        if swipe >= Self.swipeThreshold {
+        // Geste annulé par le système (appel, Centre de contrôle) : rien n'est ajouté. Avant, le titre partait dans la file
+        // même sans que le doigt soit levé.
+        if completed, swipe >= Self.swipeThreshold {
             player.queueAdd([track], next: true)
             queued += 1
         }

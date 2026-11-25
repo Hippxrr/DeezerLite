@@ -49,6 +49,12 @@ final class CoverLoader: @unchecked Sendable {
 
     /// Déconnexion : pochettes en mémoire et sur le disque effacées.
     func clear() {
+        // Chargements en cours annulés : finis après la déconnexion, ils remettaient des pochettes de l'ancien compte dans
+        // le cache (en mémoire et sur le disque).
+        lock.withLock {
+            running.values.forEach { $0.cancel() }
+            running.removeAll()
+        }
         cache.removeAllObjects()
         colors.removeAllObjects()
         backdrops.removeAllObjects()
@@ -95,7 +101,7 @@ final class CoverLoader: @unchecked Sendable {
                         data = answer?.0
                     }
                 }
-                guard let data, let image = Self.downsample(data, side) else { return nil }
+                guard let data, !Task.isCancelled, let image = Self.downsample(data, side) else { return nil }
                 let cost = (image.cgImage?.bytesPerRow ?? 0) * (image.cgImage?.height ?? 0)
                 cache.setObject(image, forKey: key, cost: cost)
                 return image

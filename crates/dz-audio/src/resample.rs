@@ -23,6 +23,12 @@ pub struct Resampler {
 
 impl Resampler {
     pub fn new(src: u32, dst: u32, ch: usize) -> Result<Self, String> {
+        // Fréquence annoncée par le fichier, refusée hors des valeurs réelles : un fichier abîmé ou fabriqué (WAV à 1 Hz…)
+        // faisait préparer des centaines de Mo par bloc (48 000 fois l'entrée) et l'app s'arrêtait. Le titre échoue à la
+        // place, avec son message.
+        if !(8_000..=384_000).contains(&src) {
+            return Err(format!("fréquence non prise en charge : {src} Hz"));
+        }
         let inner = FftFixedIn::<f32>::new(src as usize, dst as usize, CHUNK, 2, ch).map_err(|e| format!("resampler: {e}"))?;
         let skip = inner.output_delay();
         Ok(Self { inner, ch, planar: vec![Vec::new(); ch], src: u64::from(src.max(1)), dst: u64::from(dst), fed: 0, emitted: 0, skip })
@@ -124,5 +130,19 @@ mod tests {
             let rms = (mid.iter().map(|v| v * v).sum::<f32>() / mid.len() as f32).sqrt();
             assert!((rms / 0.353_55 - 1.0).abs() < 0.02, "{f} Hz : niveau {rms}");
         }
+    }
+}
+
+#[cfg(test)]
+mod rate_tests {
+    use super::Resampler;
+
+    #[test]
+    fn absurd_source_rates_are_refused() {
+        assert!(Resampler::new(1, 48_000, 2).is_err());
+        assert!(Resampler::new(0, 48_000, 2).is_err());
+        assert!(Resampler::new(1_000_000, 48_000, 2).is_err());
+        assert!(Resampler::new(44_100, 48_000, 2).is_ok());
+        assert!(Resampler::new(8_000, 48_000, 1).is_ok());
     }
 }
