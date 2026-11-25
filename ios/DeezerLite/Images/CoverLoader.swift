@@ -232,7 +232,7 @@ final class CoverLoader: @unchecked Sendable {
             // pochette (cachée ou en train de s'effacer), à peine au bas de celle-ci ; puis sous elle, il part de presque rien
             // et monte doucement sur les trois quarts de la hauteur restante (avant : la moitié, plus vite au départ, le flou
             // arrivait « d'un coup »).
-            let base: CGFloat = 0.13
+            let base: CGFloat = 0.15 // 13 % avant : les traînées des hauts très chargés (fourrure, capuche) se voyaient un peu plus
             func eased(_ t: CGFloat) -> CGFloat { let t = min(max(t, 0), 1); return t * t * (3 - 2 * t) }
             func amount(_ row: CGFloat) -> CGFloat { // `row` : depuis le haut de l'écran
                 if row < gap { return base }
