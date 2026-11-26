@@ -988,6 +988,10 @@ pub struct TrackInfo {
     /// Tous les artistes du titre (artiste principal + feats), dans l'ordre de Deezer.
     #[serde(default)]
     pub artists: Vec<ArtistRef>,
+    /// Volume moyen du titre mesuré par Deezer (« GAIN », en dB : environ -8 pour un titre fort, -18 pour un calme),
+    /// pour la normalisation du volume. `None` : inconnu (anciens téléchargements, certaines listes).
+    #[serde(default)]
+    pub gain: Option<f32>,
 }
 
 /// Un artiste crédité sur un titre.
@@ -1015,6 +1019,8 @@ pub(crate) struct RawTrack {
     picture: String,
     #[serde(rename = "TRACK_TOKEN", default)]
     token: Option<String>,
+    #[serde(rename = "GAIN", default, deserialize_with = "flex_gain")]
+    gain: Option<f32>,
     #[serde(rename = "ART_ID", default, deserialize_with = "flex_u64")]
     artist_id: u64,
     #[serde(rename = "ALB_ID", default, deserialize_with = "flex_u64")]
@@ -1093,7 +1099,7 @@ impl From<RawTrack> for TrackInfo {
         TrackInfo {
             id: r.id, title, artist, album: r.album,
             duration_s: r.duration, cover_url, track_token: r.token, quality: None, added_at, release_date, fallback_id, restricted,
-            artist_id, album_id: r.album_id, artists,
+            artist_id, album_id: r.album_id, artists, gain: r.gain,
         }
     }
 }
@@ -1161,6 +1167,22 @@ fn flex_i64<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<i64, D::Erro
         Some(N::S(s)) => Ok(s.trim().parse().unwrap_or(0)),
         None => Ok(0),
     }
+}
+
+/// Volume mesuré (« GAIN ») : nombre ou chaîne selon la méthode. Vide, nul (pas mesuré) ou illisible : inconnu.
+fn flex_gain<'de, D: Deserializer<'de>>(d: D) -> std::result::Result<Option<f32>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum N {
+        F(f64),
+        S(String),
+    }
+    let value = match Option::<N>::deserialize(d)? {
+        Some(N::F(n)) => Some(n as f32),
+        Some(N::S(s)) => s.trim().parse::<f32>().ok(),
+        None => None,
+    };
+    Ok(value.filter(|g| g.is_finite() && *g != 0.0))
 }
 
 /// gw-light renvoie souvent les nombres sous forme de chaînes.
@@ -1314,6 +1336,18 @@ mod tests {
         assert!(!d.user.options.web_hq && d.user.options.web_lossless);
     }
 
+
+    #[test]
+    fn the_measured_volume_is_read_as_number_or_text() {
+        let gain = |v: serde_json::Value| serde_json::from_value::<RawTrack>(serde_json::json!({ "SNG_ID": 1, "GAIN": v })).unwrap().gain;
+        assert_eq!(gain(serde_json::json!("-9.4")), Some(-9.4));
+        assert_eq!(gain(serde_json::json!(-12.5)), Some(-12.5));
+        assert_eq!(gain(serde_json::json!("")), None);
+        assert_eq!(gain(serde_json::json!(0)), None, "pas mesuré");
+        assert_eq!(gain(serde_json::Value::Null), None);
+        let none = serde_json::from_value::<RawTrack>(serde_json::json!({ "SNG_ID": 1 })).unwrap();
+        assert_eq!(none.gain, None, "champ absent");
+    }
 
     #[test]
     fn odd_numbers_from_deezer_keep_the_track() {

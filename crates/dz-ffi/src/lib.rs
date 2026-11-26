@@ -1557,6 +1557,11 @@ impl Core {
         self.player.set_volume(volume);
     }
 
+    /// Normalisation du volume (Réglages, désactivée par défaut) : chaque titre ramené au même niveau d'écoute.
+    pub fn set_normalize(&self, on: bool) {
+        self.player.set_normalize(on);
+    }
+
     /// Fondu enchaîné entre deux titres, en secondes (0 = désactivé, 12 au plus) ; effet dès la prochaine transition.
     pub fn set_crossfade(&self, seconds: u32) {
         self.player.set_crossfade(u64::from(seconds.min(12)) * 1000);
@@ -1915,6 +1920,7 @@ mod tests {
             artist_id: 1,
             album_id: 2,
             artists: vec![],
+            gain: None,
         }
     }
 

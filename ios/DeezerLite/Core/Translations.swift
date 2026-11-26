@@ -291,6 +291,8 @@ enum Translations {
         "%@ titres à mettre à jour": ("%@ tracks to update", "%@ canciones por actualizar"),
         "Déjà en cours": ("Already in progress", "Ya en curso"),
         "Mettre à jour": ("Update", "Actualizar"),
+        "Volume égal entre les titres": ("Even volume across tracks", "Volumen igual entre canciones"),
+        "Les titres forts sont baissés et les calmes remontés, d'après le volume mesuré par Deezer": ("Loud tracks are turned down and quiet ones up, based on Deezer's loudness measurement", "Las canciones fuertes se bajan y las suaves se suben, según el volumen medido por Deezer"),
         "Télécharger en Wi-Fi seulement": ("Download on Wi-Fi only", "Descargar solo con Wi-Fi"),
         "En données mobiles, les téléchargements attendent le Wi-Fi": ("On mobile data, downloads wait for Wi-Fi", "Con datos móviles, las descargas esperan al Wi-Fi"),
         "Téléchargement au retour du Wi-Fi (réglage « Wi-Fi seulement »).": ("Will download once back on Wi-Fi (\"Wi-Fi only\" setting).", "Se descargará al volver al Wi-Fi (ajuste «Solo Wi-Fi»)."),

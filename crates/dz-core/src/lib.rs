@@ -164,6 +164,11 @@ impl PlayerHandle {
         self.shared.volume.store(v.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
     }
 
+    /// Normalisation du volume (réglage, désactivée par défaut) : voir `normalize_factor`.
+    pub fn set_normalize(&self, on: bool) {
+        self.shared.normalize.store(on, Ordering::Relaxed);
+    }
+
     /// Durée du fondu enchaîné (0 = désactivé) ; effet dès la prochaine transition.
     pub fn set_crossfade(&self, ms: u64) {
         self.shared.crossfade_ms.store(ms.min(12_000), Ordering::Relaxed);
@@ -209,6 +214,15 @@ impl PlayerHandle {
     pub fn send(&self, cmd: PlayerCmd) -> Result<(), PlayerError> {
         self.tx.try_send(cmd).map_err(|_| PlayerError::Unavailable)
     }
+}
+
+/// Normalisation du volume (réglage, désactivée par défaut) : facteur qui amène un titre à environ -14 LUFS, le niveau
+/// courant des services de streaming, d'après le volume moyen mesuré par Deezer (`TrackInfo::gain`, -(gain + 18,4) dB en
+/// ReplayGain). Les titres forts sont baissés (15 dB au plus), les calmes remontés de 5 dB au plus : le limiteur de la sortie
+/// évite la saturation. Volume inconnu : rien ne change.
+fn normalize_factor(gain: Option<f32>) -> f32 {
+    const TARGET_LUFS: f32 = -14.0;
+    gain.filter(|g| g.is_finite() && *g < 0.0).map_or(1.0, |loudness| 10f32.powf((TARGET_LUFS - loudness).clamp(-15.0, 5.0) / 20.0))
 }
 
 /// À appeler depuis un contexte tokio.
@@ -1373,11 +1387,11 @@ impl Actor {
         self.prefetched = None;
         let info = TrackInfo {
             id: LOCAL_ID, title, artist: "Source locale".into(), album: String::new(),
-            duration_s: 0, cover_url: None, track_token: None, quality: None, added_at: None, release_date: None, fallback_id: None, restricted: false, artist_id: 0, album_id: 0, artists: Vec::new(),
+            duration_s: 0, cover_url: None, track_token: None, quality: None, added_at: None, release_date: None, fallback_id: None, restricted: false, artist_id: 0, album_id: 0, artists: Vec::new(), gain: None,
         };
         self.infos.insert(LOCAL_ID, info);
         self.cancel_streams();
-        self.engine.load(LOCAL_ID, src, ext);
+        self.engine.load(LOCAL_ID, src, ext, 1.0);
     }
 
     /// Annule tous les flux réseau confiés au moteur (voir `streams`).
@@ -1415,12 +1429,13 @@ impl Actor {
                 if r.preview {
                     self.error("Lecture complète indisponible : aperçu de 30 s (flux Deezer chiffré).");
                 }
+                let norm = normalize_factor(r.info.gain);
                 let _ = self.events.send(CoreEvent::Track(r.info));
                 self.maybe_enrich(id);
                 // Annulés seulement maintenant que le nouveau titre est prêt : si sa résolution échoue, l'ancien continue.
                 self.cancel_streams();
                 self.streams.extend(r.cancel.map(|c| (id, c)));
-                self.engine.load(id, r.src, r.ext);
+                self.engine.load(id, r.src, r.ext, norm);
             }
             Err(e) => {
                 // Rechargement manqué (reprise après coupure sans réseau…) : rien ne repart, donc le prochain départ de
@@ -1679,8 +1694,9 @@ impl Actor {
                     }
                     keep
                 });
+                let norm = normalize_factor(r.info.gain);
                 self.streams.extend(r.cancel.map(|c| (next, c)));
-                self.engine.queue_next(next, r.src, r.ext);
+                self.engine.queue_next(next, r.src, r.ext, norm);
                 self.flush_waiting_listens();
                 // Fiche complète (artistes) et vérification de la pochette du titre suivant : faites maintenant, pendant
                 // son téléchargement, plutôt qu'au changement de titre. Les échanges réseau sont regroupés, la radio se
@@ -1851,7 +1867,7 @@ mod tests {
     fn track(id: i64) -> TrackInfo {
         TrackInfo {
             id, title: format!("t{id}"), artist: String::new(), album: String::new(), duration_s: 1, cover_url: None, track_token: None,
-            quality: None, added_at: None, release_date: None, fallback_id: None, restricted: false, artist_id: 0, album_id: 0, artists: Vec::new(),
+            quality: None, added_at: None, release_date: None, fallback_id: None, restricted: false, artist_id: 0, album_id: 0, artists: Vec::new(), gain: None,
         }
     }
 
@@ -1990,6 +2006,18 @@ mod tests {
         let mut b = actor(vec![7], 0);
         b.repeat = RepeatMode::All;
         assert!(b.sync_loop(), "file d'un seul titre en « Répéter tout »");
+    }
+
+    #[test]
+    fn normalization_brings_tracks_to_the_same_level() {
+        let db = |g| 20.0 * normalize_factor(g).log10();
+        assert!((db(Some(-8.0)) + 6.0).abs() < 0.01, "titre fort : baissé de 6 dB");
+        assert!(db(Some(-14.0)).abs() < 0.01, "déjà au bon niveau");
+        assert!((db(Some(-17.0)) - 3.0).abs() < 0.01, "titre calme : remonté");
+        assert!((db(Some(-40.0)) - 5.0).abs() < 0.01, "remonté de 5 dB au plus");
+        assert!((db(Some(-0.5)) + 13.5).abs() < 0.01);
+        assert_eq!(normalize_factor(None), 1.0, "volume inconnu : rien ne change");
+        assert_eq!(normalize_factor(Some(3.0)), 1.0, "valeur impossible : ignorée");
     }
 
     #[tokio::test]

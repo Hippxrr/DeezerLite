@@ -1975,6 +1975,7 @@ mod tests {
             artist_id: 1,
             album_id: 2,
             artists: vec![],
+            gain: None,
         }
     }
 

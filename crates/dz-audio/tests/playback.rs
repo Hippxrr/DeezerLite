@@ -58,7 +58,7 @@ async fn plays_seeks_and_chains_gaplessly() {
 
     let (tx, mut rx) = unbounded_channel();
     let eng = Engine::start(tx);
-    eng.load(1, Box::new(File::open(&a).unwrap()), Some("wav".into()));
+    eng.load(1, Box::new(File::open(&a).unwrap()), Some("wav".into()), 1.0);
 
     let first = wait_for(&mut rx, 5, |e| matches!(e, EngineEvent::TrackStarted { .. } | EngineEvent::Error { .. })).await;
     match first {
@@ -81,7 +81,7 @@ async fn plays_seeks_and_chains_gaplessly() {
     assert!(wait_for(&mut rx, 2, |e| matches!(e, EngineEvent::StateChanged)).await.is_some(), "saut non annoncé");
     let at_notice = eng.shared.position_ms.load(std::sync::atomic::Ordering::Relaxed);
     assert!((1450..1700).contains(&at_notice), "position au moment de l'annonce du saut = {at_notice} ms");
-    eng.queue_next(2, Box::new(File::open(&b).unwrap()), Some("wav".into()));
+    eng.queue_next(2, Box::new(File::open(&b).unwrap()), Some("wav".into()), 1.0);
     tokio::time::sleep(Duration::from_millis(200)).await;
     let p2 = eng.shared.position_ms.load(std::sync::atomic::Ordering::Relaxed);
     assert!((1450..1900).contains(&p2), "position après seek = {p2} ms");
@@ -102,7 +102,7 @@ async fn pause_stops_output_and_resume_continues_after_seek() {
 
     let (tx, mut rx) = unbounded_channel();
     let eng = Engine::start(tx);
-    eng.load(7, Box::new(File::open(&path).unwrap()), Some("wav".into()));
+    eng.load(7, Box::new(File::open(&path).unwrap()), Some("wav".into()), 1.0);
     match wait_for(&mut rx, 5, |e| matches!(e, EngineEvent::TrackStarted { .. } | EngineEvent::Error { .. })).await {
         Some(EngineEvent::TrackStarted { id: 7 }) => {}
         other => {

@@ -56,7 +56,7 @@ async fn switching_device_keeps_playing_from_the_same_position() {
     write_wav(&path, 44_100, 4.0);
     let (tx, mut rx) = unbounded_channel();
     let eng = Engine::start(tx);
-    eng.load(7, Box::new(File::open(&path).unwrap()), Some("wav".into()));
+    eng.load(7, Box::new(File::open(&path).unwrap()), Some("wav".into()), 1.0);
     match wait_for(&mut rx, 5, |e| matches!(e, EngineEvent::TrackStarted { .. } | EngineEvent::Error { .. })).await {
         Some(EngineEvent::TrackStarted { id: 7 }) => {}
         other => {

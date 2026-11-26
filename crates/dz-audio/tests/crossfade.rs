@@ -37,8 +37,8 @@ async fn run(crossfade_ms: u64) -> Option<(f32, f32)> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let eng = Engine::start(tx);
     eng.set_crossfade(crossfade_ms);
-    eng.load(1, Box::new(File::open(&a).unwrap()), Some("wav".into()));
-    eng.queue_next(2, Box::new(File::open(&b).unwrap()), Some("wav".into()));
+    eng.load(1, Box::new(File::open(&a).unwrap()), Some("wav".into()), 1.0);
+    eng.queue_next(2, Box::new(File::open(&b).unwrap()), Some("wav".into()), 1.0);
 
     let (mut t0, mut t2, mut tend) = (None, None, None);
     let deadline = Instant::now() + Duration::from_secs(12);
@@ -66,8 +66,8 @@ async fn seek_during_crossfade_jumps_in_the_incoming_track() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let eng = Engine::start(tx);
     eng.set_crossfade(1500);
-    eng.load(1, Box::new(File::open(&a).unwrap()), Some("wav".into()));
-    eng.queue_next(2, Box::new(File::open(&b).unwrap()), Some("wav".into()));
+    eng.load(1, Box::new(File::open(&a).unwrap()), Some("wav".into()), 1.0);
+    eng.queue_next(2, Box::new(File::open(&b).unwrap()), Some("wav".into()), 1.0);
 
     let deadline = Instant::now() + Duration::from_secs(8);
     let mut started2 = false;

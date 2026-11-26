@@ -622,6 +622,19 @@ struct SettingsView: View {
                 }
             }
             .padding(14)
+            divider
+            Toggle(isOn: Binding(get: { player.normalizeVolume }, set: { player.setNormalizeVolume($0) })) {
+                HStack(spacing: 12) {
+                    Image(systemName: "speaker.wave.2").foregroundStyle(Theme.accent).frame(width: 26)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(tr("Volume égal entre les titres"))
+                        Text(tr("Les titres forts sont baissés et les calmes remontés, d'après le volume mesuré par Deezer"))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .tint(Theme.accent)
+            .padding(14)
         }
         group(tr("Égaliseur")) { EqualizerPanel() }
         Text(tr("Fréquences en Hz. Toucher un curseur crée ton réglage « Personnalisé »."))

@@ -79,6 +79,8 @@ pub struct Shared {
     pub volume: AtomicU32,
     /// Gain supplémentaire (facteur linéaire, de ~0,32 à ~4, bits f32) ; au-dessus de 1, un limiteur doux l'accompagne.
     pub boost: AtomicU32,
+    /// Normalisation du volume (réglage, désactivée par défaut) : voir `Engine::set_normalize`.
+    pub normalize: AtomicBool,
     /// Égaliseur : gain de chaque bande (60 Hz, 230 Hz, 910 Hz, 3,6 kHz, 14 kHz) en dixièmes de dB (-120..=120).
     pub eq: [AtomicI32; eq::BANDS],
     /// Description de la sortie ouverte (nom, fréquence, canaux), pour le diagnostic ; vide si aucune.
@@ -107,6 +109,7 @@ impl Default for Shared {
             fade_tail_ms: AtomicU64::new(0),
             volume: AtomicU32::new(0.5f32.to_bits()), // moitié par défaut
             boost: AtomicU32::new(1.0f32.to_bits()),
+            normalize: AtomicBool::new(false),
             eq: std::array::from_fn(|_| AtomicI32::new(0)),
             out_info: Mutex::new(String::new()),
             levels_on: AtomicBool::new(false),
@@ -118,8 +121,8 @@ impl Default for Shared {
 }
 
 enum Cmd {
-    Load { id: i64, src: Box<dyn MediaSource>, ext: Option<String> },
-    QueueNext { id: i64, src: Box<dyn MediaSource>, ext: Option<String> },
+    Load { id: i64, src: Box<dyn MediaSource>, ext: Option<String>, norm: f32 },
+    QueueNext { id: i64, src: Box<dyn MediaSource>, ext: Option<String>, norm: f32 },
     Pause,
     Resume,
     Seek(u64),
@@ -152,12 +155,14 @@ impl Engine {
         Self { tx, shared }
     }
 
-    pub fn load(&self, id: i64, src: Box<dyn MediaSource>, ext: Option<String>) {
-        let _ = self.tx.send(Cmd::Load { id, src, ext });
+    /// `norm` : facteur de la normalisation du volume pour ce titre (1 = aucun), appliqué si elle est activée
+    /// (`set_normalize`).
+    pub fn load(&self, id: i64, src: Box<dyn MediaSource>, ext: Option<String>, norm: f32) {
+        let _ = self.tx.send(Cmd::Load { id, src, ext, norm });
     }
     /// Piste suivante préchargée : enchaînée sans silence à la fin de la courante.
-    pub fn queue_next(&self, id: i64, src: Box<dyn MediaSource>, ext: Option<String>) {
-        let _ = self.tx.send(Cmd::QueueNext { id, src, ext });
+    pub fn queue_next(&self, id: i64, src: Box<dyn MediaSource>, ext: Option<String>, norm: f32) {
+        let _ = self.tx.send(Cmd::QueueNext { id, src, ext, norm });
     }
     /// Le son s'arrête immédiatement (drapeau lu par le callback) ; la commande met ensuite l'état à jour.
     pub fn pause(&self) {
@@ -176,6 +181,9 @@ impl Engine {
     pub fn set_loop(&self, on: bool) { self.shared.loop_current.store(on, Ordering::Relaxed); }
     pub fn skip_next(&self) { let _ = self.tx.send(Cmd::SkipNext); }
     /// Fondu enchaîné entre deux pistes (0 à 12 s ; 0 = enchaînement sans coupure classique).
+    /// Normalisation du volume (réglage) : chaque titre est ramené au même niveau d'écoute. Effet en moins d'une
+    /// demi-seconde (le son déjà préparé garde l'ancien réglage).
+    pub fn set_normalize(&self, on: bool) { self.shared.normalize.store(on, Ordering::Relaxed); }
     pub fn set_crossfade(&self, ms: u64) { self.shared.crossfade_ms.store(ms.min(12_000), Ordering::Relaxed); }
     /// Gain en décibels (−10 à +12 dB) : négatif = son plus faible. Au-delà de 0 dB, le limiteur de crête évite l'écrêtage.
     pub fn set_boost_db(&self, db: f32) {
@@ -721,6 +729,8 @@ struct Track {
     delivered: u64,
     out_rate: u32,
     eof: bool,
+    /// Facteur de la normalisation du volume (1 = aucun).
+    norm: f32,
 }
 
 /// Saute l'étiquette ID3v2 en tête de flux. Les aperçus Deezer commencent par une étiquette vide
@@ -800,6 +810,7 @@ struct Pending {
     id: i64,
     src: Box<dyn MediaSource>,
     ext: Option<String>,
+    norm: f32,
 }
 
 fn open_track(p: Pending, out_rate: u32, out_ch: usize) -> Result<Track, AudioError> {
@@ -842,7 +853,7 @@ fn open_track(p: Pending, out_rate: u32, out_ch: usize) -> Result<Track, AudioEr
     } else {
         None
     };
-    Ok(Track { id: p.id, format, decoder, track_id, src_ch, rs, src_rate, duration_ms, sbuf: None, pending: Vec::new(), delivered: 0, out_rate, eof: false })
+    Ok(Track { id: p.id, format, decoder, track_id, src_ch, rs, src_rate, duration_ms, sbuf: None, pending: Vec::new(), delivered: 0, out_rate, eof: false, norm: p.norm })
 }
 
 /// Remappe des échantillons entrelacés `src_ch` -> `dst_ch` (mono<->stéréo, sinon troncature/zéros).
@@ -912,11 +923,19 @@ impl Track {
     }
 
     /// Décode jusqu'à disposer d'au moins `min` échantillons en attente (ou jusqu'à la fin du fichier).
-    fn fill(&mut self, ch: usize, min: usize) -> Result<(), AudioError> {
+    /// `normalize` : la normalisation du volume est activée (le facteur du titre est appliqué ici, au décodage : il
+    /// change pile au bon titre, même en enchaînement sans coupure ou en fondu).
+    fn fill(&mut self, ch: usize, min: usize, normalize: bool) -> Result<(), AudioError> {
+        let gain = if normalize { self.norm } else { 1.0 };
         while self.pending.len() < min && !self.eof {
             let mut buf = Vec::new();
             match self.step(ch, &mut buf)? {
-                Step::Samples => self.pending.extend_from_slice(&buf),
+                Step::Samples => {
+                    if gain != 1.0 {
+                        buf.iter_mut().for_each(|s| *s *= gain);
+                    }
+                    self.pending.extend_from_slice(&buf);
+                }
                 Step::Eof => {
                     // Fin du titre : ce que retient encore le rééchantillonneur (avant, ~25 ms perdues à chaque titre).
                     if let Some(rs) = &mut self.rs {
@@ -1201,7 +1220,7 @@ impl Worker {
             if let Some(id) = tail {
                 if let Some(p) = self.next.take() {
                     // Le suivant était prêt : il démarre sur la nouvelle sortie.
-                    self.handle(Cmd::Load { id: p.id, src: p.src, ext: p.ext });
+                    self.handle(Cmd::Load { id: p.id, src: p.src, ext: p.ext, norm: p.norm });
                 } else {
                     // Le reste du titre est perdu avec l'ancienne sortie : fin du titre, comme s'il avait fini de jouer.
                     // Avant, rien n'était signalé et la lecture restait bloquée (ni titre suivant, ni reprise possible).
@@ -1391,7 +1410,7 @@ impl Worker {
 
     fn handle(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::Load { id, src, ext } => {
+            Cmd::Load { id, src, ext, norm } => {
                 if !self.ensure_output() {
                     // Aucune sortie (seul casque débranché…) : le titre demandé ne joue pas, l'ancien n'est pas gardé (une
                     // reprise le relançait alors que l'écran montrait le nouveau), et plus d'« en lecture » sans son.
@@ -1414,7 +1433,7 @@ impl Worker {
                 if id != self.shared.current_id.load(Ordering::Relaxed) {
                     self.shared.position_ms.store(0, Ordering::Relaxed);
                 }
-                match open_track(Pending { id, src, ext }, rate, ch) {
+                match open_track(Pending { id, src, ext, norm }, rate, ch) {
                     Ok(t) => {
                         self.start_track(t, 0);
                         self.set_paused(false);
@@ -1430,8 +1449,8 @@ impl Worker {
                     }
                 }
             }
-            Cmd::QueueNext { id, src, ext } => {
-                let p = Pending { id, src, ext };
+            Cmd::QueueNext { id, src, ext, norm } => {
+                let p = Pending { id, src, ext, norm };
                 // Le titre en cours est déjà entièrement décodé (saut près de la fin, titre très court) mais encore en train de jouer :
                 // le suivant est enchaîné tout de suite. Sinon il attendrait une fin de décodage déjà passée et la lecture resterait bloquée.
                 if self.cur.is_none() && self.incoming.is_none() && !self.segments.is_empty() {
@@ -1448,7 +1467,7 @@ impl Worker {
             Cmd::ClearNext => self.next = None,
             // Même chose qu'un chargement, avec la piste déjà préparée (et déjà en partie ou entièrement téléchargée).
             Cmd::SkipNext => match self.next.take() {
-                Some(p) => self.handle(Cmd::Load { id: p.id, src: p.src, ext: p.ext }),
+                Some(p) => self.handle(Cmd::Load { id: p.id, src: p.src, ext: p.ext, norm: p.norm }),
                 None => {
                     // Suivant déjà passé dans `cur` (décodage du titre d'avant fini, sa fin encore dans le tampon, jusqu'à
                     // 0,5 s) mais pas encore audible : on y passe tout de suite, depuis son début. Avant : « échec », le
@@ -1671,18 +1690,19 @@ impl Worker {
         // --- Mélange pendant le fondu
         if self.incoming.is_some() {
             let want = 4096 - (4096 % ch);
+            let normalize = self.shared.normalize.load(Ordering::Relaxed);
             let (Some(cur), Some(inc)) = (self.cur.as_mut(), self.incoming.as_mut()) else {
                 // Piste sortante disparue (erreur) : la piste entrante prend le relais seule.
                 self.cur = self.incoming.take();
                 return Some(Vec::new());
             };
-            if let Err(e) = cur.fill(ch, want) {
+            if let Err(e) = cur.fill(ch, want, normalize) {
                 let id = cur.id;
                 self.cur = self.incoming.take();
                 self.fail(id, e);
                 return Some(Vec::new());
             }
-            if let Err(e) = inc.fill(ch, want) {
+            if let Err(e) = inc.fill(ch, want, normalize) {
                 let id = inc.id;
                 self.incoming = None;
                 self.fail(id, e);
@@ -1709,9 +1729,10 @@ impl Worker {
         }
 
         // --- Lecture normale d'une seule piste
+        let normalize = self.shared.normalize.load(Ordering::Relaxed);
         let track = self.cur.as_mut()?;
         if track.pending.is_empty() {
-            if let Err(e) = track.fill(ch, 1) {
+            if let Err(e) = track.fill(ch, 1, normalize) {
                 let id = track.id;
                 self.cur = None;
                 // Le suivant préparé est lâché aussi : sinon le moteur ne voyait jamais la fin (ni « fini », ni suivant)
@@ -1833,7 +1854,7 @@ mod tests {
     fn opens_real_deezer_preview() {
         let p = std::env::temp_dir().join("prev.mp3");
         let Ok(f) = std::fs::File::open(p) else { return };
-        let t = open_track(Pending { id: 1, src: Box::new(f), ext: Some("mp3".into()) }, 48_000, 2)
+        let t = open_track(Pending { id: 1, src: Box::new(f), ext: Some("mp3".into()), norm: 1.0 }, 48_000, 2)
             .unwrap_or_else(|e| panic!("{e}"));
         assert!(t.src_ch >= 1);
     }
@@ -1855,8 +1876,41 @@ mod tests {
         v.extend_from_slice(b"data");
         v.extend_from_slice(&data_len.to_le_bytes());
         v.resize(v.len() + data_len as usize, 0);
-        open_track(Pending { id, src: Box::new(Cursor::new(v)), ext: Some("wav".into()) }, 48_000, 2)
+        open_track(Pending { id, src: Box::new(Cursor::new(v)), ext: Some("wav".into()), norm: 1.0 }, 48_000, 2)
             .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// Titre de 100 trames stéréo à mi-volume (0,5), au facteur de normalisation `norm`.
+    fn half_volume_track(norm: f32) -> Track {
+        let data_len = 4u32 * 100;
+        let mut v = Vec::new();
+        v.extend_from_slice(b"RIFF");
+        v.extend_from_slice(&(36 + data_len).to_le_bytes());
+        v.extend_from_slice(b"WAVEfmt ");
+        v.extend_from_slice(&16u32.to_le_bytes());
+        v.extend_from_slice(&1u16.to_le_bytes());
+        v.extend_from_slice(&2u16.to_le_bytes());
+        v.extend_from_slice(&48_000u32.to_le_bytes());
+        v.extend_from_slice(&(48_000u32 * 4).to_le_bytes());
+        v.extend_from_slice(&4u16.to_le_bytes());
+        v.extend_from_slice(&16u16.to_le_bytes());
+        v.extend_from_slice(b"data");
+        v.extend_from_slice(&data_len.to_le_bytes());
+        for _ in 0..200 {
+            v.extend_from_slice(&16_384i16.to_le_bytes());
+        }
+        open_track(Pending { id: 1, src: Box::new(Cursor::new(v)), ext: Some("wav".into()), norm }, 48_000, 2)
+            .unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    #[test]
+    fn normalization_scales_the_decoded_sound_only_when_on() {
+        let mut t = half_volume_track(0.5);
+        t.fill(2, 20, true).unwrap();
+        assert!(t.pending.iter().all(|s| (s - 0.25).abs() < 1e-3), "activée : facteur appliqué");
+        let mut t = half_volume_track(0.5);
+        t.fill(2, 20, false).unwrap();
+        assert!(t.pending.iter().all(|s| (s - 0.5).abs() < 1e-3), "désactivée : son inchangé");
     }
 
     /// Changement de sortie : on reprend le titre réellement entendu, pas celui que le décodeur prépare.

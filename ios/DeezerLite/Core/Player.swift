@@ -1000,6 +1000,15 @@ final class Player {
         core?.setCrossfade(seconds: UInt32(crossfade))
     }
 
+    /// Réglages › Son : volume égal entre les titres (d'après le volume mesuré par Deezer). Désactivé par défaut.
+    private(set) var normalizeVolume = UserDefaults.standard.bool(forKey: "normalizeVolume")
+
+    func setNormalizeVolume(_ on: Bool) {
+        normalizeVolume = on
+        if on { UserDefaults.standard.set(true, forKey: "normalizeVolume") } else { UserDefaults.standard.removeObject(forKey: "normalizeVolume") }
+        core?.setNormalize(on: on)
+    }
+
     /// Envoyé au moteur ; il l'applique aussitôt, sans couper le son.
     private func applyEq() {
         core?.setEq(gains: eqGains.map { Float($0) })
@@ -1067,6 +1076,7 @@ final class Player {
         core?.setVolume(volume: 1.0)
         applyEq()
         core?.setCrossfade(seconds: UInt32(crossfade))
+        core?.setNormalize(on: normalizeVolume)
         // Créé ici, au lancement : une relance en arrière-plan pour livrer des téléchargements trouve le cœur prêt.
         if let core { BackgroundDownloadManager.shared.configure(core: core, player: self) }
         // Qualité choisie lors d'une session précédente (le cœur démarre en FLAC).
