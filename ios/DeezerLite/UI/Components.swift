@@ -596,6 +596,7 @@ struct CardView: View {
                 // Pas d'ombre : dans une rangée qui défile, chaque ombre coûte un rendu à part.
                 if let url = player.coverURL(card) {
                     CoverView(url: url, side: side, radius: Theme.radius, round: card.kind == "artist")
+                        .overlay(alignment: .topLeading) { if MixTitle.wanted(card, url) { MixTitle(title: card.title, side: side) } }
                 } else if card.kind == "loved" {
                     LovedArt(side: side)
                 } else {
@@ -798,6 +799,29 @@ struct ItemRow<Art: View>: View {
         .padding(10)
         .surface(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .contentShape(Rectangle())
+    }
+}
+
+/// Nom d'un mix écrit sur sa pochette, comme dans l'app officielle. Ses pochettes en mosaïque (md5 « a-b-c », composées par
+/// le serveur d'images de Deezer) ont en haut un fond uni prévu pour ce nom : avant, cette bande restait vide.
+private struct MixTitle: View {
+    let title: String
+    let side: CGFloat
+
+    /// Pochette Deezer en mosaïque d'un mix (pas une pochette perso).
+    static func wanted(_ card: Card, _ url: String) -> Bool {
+        card.kind == "mix" && url.hasPrefix("http") && url.split(separator: "/").dropLast().last?.contains("-") == true
+    }
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: side * 0.17, weight: .black).width(.compressed))
+            .foregroundStyle(.black)
+            .lineLimit(2)
+            .minimumScaleFactor(0.5)
+            .padding(side * 0.07)
+            .frame(width: side, height: side * 0.48, alignment: .topLeading)
+            .allowsHitTesting(false)
     }
 }
 
