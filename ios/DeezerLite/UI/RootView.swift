@@ -623,6 +623,11 @@ struct TabStack<Content: View>: View {
     /// Journal de diagnostic (temporaire) : nom de l'onglet suivi ; vide, rien n'est noté.
     var probe = ""
     @ViewBuilder let content: () -> Content
+    /// Largeur à l'écran de la première page de la pile, et de la pile elle-même (voir la reconstruction plus bas).
+    @State private var rootWidth: CGFloat = 0
+    @State private var stackWidth: CGFloat = 0
+    /// Change : la pile est reconstruite.
+    @State private var rebuilds = 0
 
     var body: some View {
         NavigationStack(path: $path) {
@@ -631,8 +636,22 @@ struct TabStack<Content: View>: View {
                 .background(EdgeOnlyBack())
                 .pageBackground()
                 .modifier(DiagnosticProbe(name: probe.isEmpty ? "" : "\(probe) : dans la pile"))
+                .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).width } action: { rootWidth = $0 }
                 .navigationDestination(for: Route.self) { DetailView(route: $0).miniPlayerSpace().pageBackground() }
                 .navigationDestination(for: LibrarySection.self) { LibrarySectionView(section: $0).miniPlayerSpace().pageBackground() }
+        }
+        .id(rebuilds)
+        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).width } action: { stackWidth = $0 }
+        // iOS 27.0.1, barre de l'app, lancement déjà connecté : la pile posait sa première page à une largeur fausse
+        // (174 points au lieu de 402) et ne la recalculait jamais. L'accueil restait tout noir, seule la barre d'onglets
+        // visible. iOS 27.2 la corrige seul en un instant : la pile n'est reconstruite que si l'écart dure (0,6 s), deux
+        // fois au plus. Rien d'autre à faire quand les largeurs sont égales.
+        .task(id: rootWidth - stackWidth) {
+            guard abs(rootWidth - stackWidth) > 1, rootWidth > 0, stackWidth > 0, path.isEmpty, rebuilds < 2 else { return }
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !Task.isCancelled else { return }
+            SessionLog.note("pile \(probe) reconstruite : page large de \(Int(rootWidth)) au lieu de \(Int(stackWidth))") // journal (temporaire)
+            rebuilds += 1
         }
         .modifier(DiagnosticProbe(name: probe.isEmpty ? "" : "\(probe) : pile entière"))
         .environment(\.openRoute) { path.append($0) }
