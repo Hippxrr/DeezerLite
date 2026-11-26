@@ -2847,10 +2847,13 @@ final class Player {
             // Titre téléchargé atteint par la file (suivant, glissement) : il était affiché avec l'adresse Deezer de la file, et
             // gardait celle-ci au lieu de son image enregistrée. Réseau faible ou absent : pas de pochette (ou celle d'avant
             // sur l'écran verrouillé) malgré le son. Son image enregistrée remplace donc l'adresse Deezer, sauf si celle-ci
-            // est déjà en mémoire (rien à recharger, pas de saut d'image).
+            // est déjà en mémoire (rien à recharger, pas de saut d'image). Sauf aussi si cette image en mémoire n'est que
+            // l'image vide de Deezer (pochette supprimée chez lui) : avant, le carré gris restait jusqu'au relancement,
+            // alors que la bonne pochette était enregistrée sur le téléphone.
             if let shown = current, shown.id == track.id, let cover = shown.coverUrl {
                 let local = track.coverUrl.map { !$0.hasPrefix("http") } ?? false
-                let takeLocal = local && cover.hasPrefix("http") && CoverLoader.shared.anyCached(url: cover) == nil
+                let loader = CoverLoader.shared
+                let takeLocal = local && cover.hasPrefix("http") && (loader.anyCached(url: cover) == nil || loader.isEmptyPicture(cover))
                 if !takeLocal, !(cover.hasPrefix("http") && track.coverUrl?.hasPrefix("http") == true) { track.coverUrl = cover }
             }
             if current.map({ !Self.sameTrack($0, track) }) ?? true { current = track }

@@ -355,7 +355,7 @@ struct MainTabs: View {
     /// Jusqu'à iOS 26.0 : onglets classiques, le mini-lecteur est posé par-dessus (voir `body`).
     private var classicTabs: some View {
         TabView(selection: selection) {
-            TabStack(active: tab == 0) { HomeView() }
+            TabStack(active: tab == 0, probe: "accueil") { HomeView() }
                 .tabItem { tabLabel(tr("Accueil"), Image(uiImage: TabIcons.home)) }
                 .tag(0)
             TabStack(active: tab == 1, popRequest: searchFocus) { SearchView(focusRequest: searchFocus) }
@@ -377,7 +377,7 @@ struct MainTabs: View {
     private var barTabs: some View {
         TabView(selection: selection) {
             Tab(value: 0) {
-                TabStack(active: tab == 0) { HomeView() }
+                TabStack(active: tab == 0, probe: "accueil") { HomeView() }
             } label: {
                 tabLabel(tr("Accueil"), Image(uiImage: TabIcons.home))
             }
@@ -440,7 +440,9 @@ struct MainTabs: View {
     /// clavier, qui la recouvre simplement.
     private var ownTabs: some View {
         ZStack {
-            ownPage(0, TabStack(active: tab == 0, popRequest: homePop) { HomeView() })
+            ownPage(0, TabStack(active: tab == 0, popRequest: homePop, probe: "accueil") { HomeView() })
+                // Journal de diagnostic (temporaire) : la page entière, avec son opacité (hors de la pile de navigation).
+                .modifier(DiagnosticProbe(name: "accueil : page"))
             if visited.contains(1) || tab == 1 {
                 ownPage(1, TabStack(active: tab == 1, popRequest: searchFocus) { SearchView(focusRequest: searchFocus) })
             }
@@ -618,6 +620,8 @@ struct TabStack<Content: View>: View {
     let active: Bool
     /// Change : retour à la première page de l'onglet.
     var popRequest = 0
+    /// Journal de diagnostic (temporaire) : nom de l'onglet suivi ; vide, rien n'est noté.
+    var probe = ""
     @ViewBuilder let content: () -> Content
 
     var body: some View {
@@ -626,9 +630,11 @@ struct TabStack<Content: View>: View {
                 .miniPlayerSpace()
                 .background(EdgeOnlyBack())
                 .pageBackground()
+                .modifier(DiagnosticProbe(name: probe.isEmpty ? "" : "\(probe) : dans la pile"))
                 .navigationDestination(for: Route.self) { DetailView(route: $0).miniPlayerSpace().pageBackground() }
                 .navigationDestination(for: LibrarySection.self) { LibrarySectionView(section: $0).miniPlayerSpace().pageBackground() }
         }
+        .modifier(DiagnosticProbe(name: probe.isEmpty ? "" : "\(probe) : pile entière"))
         .environment(\.openRoute) { path.append($0) }
         // Page demandée depuis le lecteur plein écran : ouverte dans l'onglet affiché.
         .onChange(of: player.requestedRoute) { _, route in

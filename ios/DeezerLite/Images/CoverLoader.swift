@@ -24,6 +24,13 @@ final class CoverLoader: @unchecked Sendable {
     private let lock = NSLock()
     /// Téléchargements en cours : deux vues qui veulent la même image n'en font qu'un.
     private var running: [String: Task<UIImage?, Never>] = [:]
+    /// Adresses pour lesquelles Deezer n'a renvoyé que son image vide (pochette supprimée chez lui), sous `lock`.
+    private var empty: Set<String> = []
+
+    /// Pochette qui n'existe plus chez Deezer : son adresse ne montre que l'image vide (carré gris).
+    func isEmptyPicture(_ url: String) -> Bool {
+        url.contains(Self.emptyPicture) || lock.withLock { empty.contains(url) }
+    }
 
     private init() {
         // 64 Mo d'images décodées (vidé si iOS manque de mémoire, et en arrière-plan). 16 Mo ne tenaient pas un écran
@@ -85,7 +92,7 @@ final class CoverLoader: @unchecked Sendable {
         if let hit = cache.object(forKey: key) { return hit }
         let task: Task<UIImage?, Never> = lock.withLock {
             if let existing = running[key as String] { return existing }
-            let task = Task.detached(priority: .userInitiated) { [session, cache] () -> UIImage? in
+            let task = Task.detached(priority: .userInitiated) { [session, cache, self] () -> UIImage? in
                 let data: Data?
                 if url.hasPrefix("/") {
                     data = try? Data(contentsOf: URL(fileURLWithPath: url))
@@ -96,7 +103,13 @@ final class CoverLoader: @unchecked Sendable {
                     // réduite ici à la taille voulue.
                     if let final = answer?.1.url?.absoluteString, final.contains(Self.emptyPicture), !url.contains(Self.emptyPicture),
                        let big = URL(string: Self.sized(url, side > 1000 ? 1000 : 500)) {
-                        data = (try? await session.data(from: big))?.0
+                        let second = try? await session.data(from: big)
+                        data = second?.0
+                        // Vide aussi en grand : la pochette n'existe plus du tout chez Deezer. Retenu pour qu'un titre
+                        // téléchargé montre son image enregistrée (voir `Player`, événement `.track`).
+                        if second?.1.url?.absoluteString.contains(Self.emptyPicture) == true {
+                            _ = self.lock.withLock { self.empty.insert(url) }
+                        }
                     } else {
                         data = answer?.0
                     }

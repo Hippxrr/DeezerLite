@@ -1091,8 +1091,16 @@ impl Actor {
         let Some((url, album)) = self.infos.get(&id).and_then(|i| Some((i.cover_url.clone()?, i.album_id))) else { return };
         let (api, tx) = (self.api.clone(), self.cmd_tx.clone());
         tokio::spawn(async move {
-            if let Some(cover) = api.repaired_track_cover(&url, album, id).await {
-                let _ = tx.send(PlayerCmd::CoverFixed { id, cover }).await;
+            // Refaite après 10 s, 30 s puis 90 s si rien n'a été trouvé : un réseau faible au mauvais moment laissait sinon
+            // l'image vide (carré gris) jusqu'au relancement de l'app, le titre étant déjà marqué vérifié. Une pochette
+            // bonne ou déjà cherchée sans succès est retenue par `repaired_track_cover` : ces essais-là ne coûtent rien
+            // (ou une petite requête).
+            for wait in [0, 10, 30, 90] {
+                tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+                if let Some(cover) = api.repaired_track_cover(&url, album, id).await {
+                    let _ = tx.send(PlayerCmd::CoverFixed { id, cover }).await;
+                    return;
+                }
             }
         });
     }

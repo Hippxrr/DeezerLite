@@ -367,13 +367,19 @@ final class CrashReceiver: NSObject, MXMetricManagerSubscriber {
 /// Diagnostic temporaire (voir `SessionLog`) : note l'apparition, le retrait et la taille d'une vue, et garde sa place à
 /// l'écran pour la copie du journal.
 struct DiagnosticProbe: ViewModifier {
+    /// Vide : rien n'est suivi.
     let name: String
 
+    @ViewBuilder
     func body(content: Content) -> some View {
-        content
-            .onAppear { SessionLog.note("\(name) : affiché") }
-            .onDisappear { SessionLog.note("\(name) : retiré") }
-            .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { SessionLog.place(name, $0) }
+        if name.isEmpty {
+            content
+        } else {
+            content
+                .onAppear { SessionLog.note("\(name) : affiché") }
+                .onDisappear { SessionLog.note("\(name) : retiré") }
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { SessionLog.place(name, $0) }
+        }
     }
 }
 
