@@ -569,7 +569,7 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         let wasResumed = fromResume.remove(id) != nil
         if let error {
             // Ce qu'iOS a déjà reçu, pour reprendre plus tard là où il en était (coupure, app fermée de force).
-            let resumeData = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeDataKey] as? Data
+            let resumeData = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeData] as? Data
             // Téléchargement annulé par iOS, pas par l'app (app fermée de force depuis le sélecteur d'apps : iOS annule
             // alors toutes ses tâches et le signale au lancement suivant). Les annulations de l'app retirent la tâche
             // avant de l'annuler et n'arrivent jamais ici. Le titre repart simplement de la file, sans passer en échec :
