@@ -258,14 +258,14 @@ final class Player {
         showToast(accepted.isEmpty ? tr("Déjà en cours") : tr("%@ titres à mettre à jour", "\(accepted.count)"))
     }
 
-    /// Mise à jour finie dans une autre qualité que celle demandée : Deezer n'a pas mieux pour ce titre, il n'est plus
-    /// proposé (sinon il serait retéléchargé à chaque fois pour rien).
-    func qualityUpdateFinished(_ track: Track) {
-        let wanted = downloadQuality
-        guard track.quality != Self.label(wanted) else { return }
-        var ids = qualityUnavailable(wanted)
-        ids.insert(track.id)
-        UserDefaults.standard.set(ids.map { NSNumber(value: $0) }, forKey: Self.qualityUnavailableKey(wanted))
+    /// Deezer n'a pas la qualité `wanted` (« FLAC »…) pour ce titre : il n'est plus proposé pour elle (sinon, redemandé à
+    /// chaque mise à jour). `wanted` : qualité du moment où la mise à jour a été préparée. Avant, celle du moment de la
+    /// fin : changée entre-temps dans les Réglages, le titre était noté à tort.
+    func markQualityUnavailable(_ id: Int64, wanted: String) {
+        guard let quality = [AudioQuality.flac, .mp3High, .mp3Low].first(where: { Self.label($0) == wanted }) else { return }
+        var ids = qualityUnavailable(quality)
+        guard ids.insert(id).inserted else { return }
+        UserDefaults.standard.set(ids.map { NSNumber(value: $0) }, forKey: Self.qualityUnavailableKey(quality))
     }
 
     private func qualityUnavailable(_ q: AudioQuality) -> Set<Int64> {
@@ -473,7 +473,11 @@ final class Player {
             skippedDownloads.subtract(ids)
             saveSkippedDownloads()
         }
-        let accepted = BackgroundDownloadManager.shared.enqueue(tracks.filter { !downloadedIds.contains($0.id) })
+        // Déjà téléchargés : écartés, sauf une mise à jour de la qualité en échec (« Réessayer »). Avant, elle ne pouvait
+        // plus être relancée.
+        let accepted = BackgroundDownloadManager.shared.enqueue(tracks.filter {
+            !downloadedIds.contains($0.id) || downloadStates[$0.id]?.state == .failed
+        })
         var nextTracks = downloadTracks
         var nextStates = downloadStates
         for track in accepted {
@@ -560,10 +564,12 @@ final class Player {
         }
     }
 
-    func restoreDownloadQueue(_ tracks: [Track]) {
+    /// `upgrades` : mises à jour de la qualité, en file bien que déjà téléchargées. Avant, elles disparaissaient de la page
+    /// Téléchargements après une relance (ni nom, ni compteur, ni « Tout arrêter ») tout en continuant en fond.
+    func restoreDownloadQueue(_ tracks: [Track], upgrades: Set<Int64>) {
         var nextTracks = downloadTracks
         var nextStates = downloadStates
-        for track in tracks where !downloadedIds.contains(track.id) {
+        for track in tracks where !downloadedIds.contains(track.id) || upgrades.contains(track.id) {
             nextTracks[track.id] = track
             nextStates[track.id] = DownloadUpdate(id: track.id, state: .queued, progress: 0, error: nil)
         }
@@ -1196,8 +1202,10 @@ final class Player {
         let scale = UIScreen.main.scale
         let small = Int(64 * scale), large = Int(148 * scale)
         var out: [(String, Int)] = []
-        if let loved = lovedCover { out.append((loved, small)) }
-        for item in homeItems.prefix(8) {
+        let top = homeItems.prefix(8)
+        // Titres aimés retirés de l'accueil : leur pochette n'est plus attendue (avant, elle l'était quand même).
+        if top.contains(.loved), let loved = lovedCover { out.append((loved, small)) }
+        for item in top {
             if case .pin(let pin) = item, let url = coverURL(pin.card) { out.append((url, small)) }
         }
         if let all = home {
@@ -2865,6 +2873,7 @@ final class Player {
         case .Keychain(let m): return tr("Trousseau de l'iPhone inaccessible : %@", m)
         case .Player: return tr("Lecteur indisponible.")
         case .UnknownTrack: return tr("Titre inconnu : recharge la page.")
+        case .NotBetter: return tr("Pas mieux chez Deezer pour ce titre.")
         case .SessionExpired:
             // ARL expiré ou révoqué pendant que l'app restait ouverte : retour à l'écran de connexion. Avant, tout
             // échouait avec ce message jusqu'à ce que l'app soit tuée. Fait après coup : l'appelant finit d'abord.

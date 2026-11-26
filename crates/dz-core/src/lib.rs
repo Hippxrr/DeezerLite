@@ -1665,6 +1665,8 @@ impl Actor {
 
     async fn maybe_prefetch(&mut self) {
         if self.sync_loop() {
+            // Rien à précharger en boucle : les écoutes en attente partent quand même (avant, seulement à la pause).
+            self.flush_waiting_listens();
             return;
         }
         let sh = &self.engine.shared;

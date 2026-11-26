@@ -939,7 +939,13 @@ impl Track {
                 Step::Eof => {
                     // Fin du titre : ce que retient encore le rééchantillonneur (avant, ~25 ms perdues à chaque titre).
                     if let Some(rs) = &mut self.rs {
+                        let start = self.pending.len();
                         rs.flush(&mut self.pending);
+                        // Normalisation aussi sur cette fin : avant, elle y échappait (petit sursaut de volume d'un titre
+                        // fort juste avant le suivant).
+                        if gain != 1.0 {
+                            self.pending[start..].iter_mut().for_each(|s| *s *= gain);
+                        }
                     }
                     self.eof = true;
                 }
@@ -1882,6 +1888,11 @@ mod tests {
 
     /// Titre de 100 trames stéréo à mi-volume (0,5), au facteur de normalisation `norm`.
     fn half_volume_track(norm: f32) -> Track {
+        half_volume_track_at(norm, 48_000)
+    }
+
+    /// Même titre, ouvert pour une sortie à `out_rate` (autre que 48 kHz : rééchantillonné).
+    fn half_volume_track_at(norm: f32, out_rate: u32) -> Track {
         let data_len = 4u32 * 100;
         let mut v = Vec::new();
         v.extend_from_slice(b"RIFF");
@@ -1899,7 +1910,7 @@ mod tests {
         for _ in 0..200 {
             v.extend_from_slice(&16_384i16.to_le_bytes());
         }
-        open_track(Pending { id: 1, src: Box::new(Cursor::new(v)), ext: Some("wav".into()), norm }, 48_000, 2)
+        open_track(Pending { id: 1, src: Box::new(Cursor::new(v)), ext: Some("wav".into()), norm }, out_rate, 2)
             .unwrap_or_else(|e| panic!("{e}"))
     }
 
@@ -1911,6 +1922,11 @@ mod tests {
         let mut t = half_volume_track(0.5);
         t.fill(2, 20, false).unwrap();
         assert!(t.pending.iter().all(|s| (s - 0.5).abs() < 1e-3), "désactivée : son inchangé");
+        // Rééchantillonné : ce titre court sort presque en entier à la vidange de fin, normalisée elle aussi.
+        let mut t = half_volume_track_at(0.5, 44_100);
+        t.fill(2, usize::MAX, true).unwrap();
+        let peak = t.pending.iter().fold(0f32, |m, s| m.max(s.abs()));
+        assert!(t.eof && peak > 0.2 && peak < 0.35, "fin du titre normalisée : {peak}");
     }
 
     /// Changement de sortie : on reprend le titre réellement entendu, pas celui que le décodeur prépare.

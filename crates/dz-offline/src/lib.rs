@@ -5,11 +5,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use dz_api::{Cipher, DeezerClient, Quality, TrackInfo};
+use dz_api::{DeezerClient, TrackInfo};
 use dz_stream::{ChunkDecryptor, Passthrough, CHUNK};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 
 #[derive(Debug, thiserror::Error)]
 pub enum DownloadError {
@@ -239,9 +239,6 @@ pub struct OfflineStore {
     persist_lock: Arc<Mutex<()>>,
     /// Incrémenté par `clear()` (déconnexion) : écoutes et compte (voir `generation()`).
     generation: Arc<AtomicU64>,
-    /// Incrémenté par chaque effacement des téléchargements (déconnexion ou « Tout effacer ») : un téléchargement
-    /// commencé avant n'est pas enregistré après.
-    wipes: Arc<AtomicU64>,
     /// Lignes du journal depuis la dernière réécriture de `downloads.json` (voir `JOURNAL`), sous `persist_lock`.
     journal_len: Arc<AtomicU64>,
 }
@@ -428,7 +425,6 @@ impl OfflineStore {
             listens: Arc::new(RwLock::new(listens)),
             persist_lock: Arc::new(Mutex::new(())),
             generation: Arc::new(AtomicU64::new(0)),
-            wipes: Arc::new(AtomicU64::new(0)),
             journal_len: Arc::new(AtomicU64::new(0)),
         };
         // Réécrit seulement si quelque chose a changé (avant : à chaque lancement). Un échec n'empêche pas de démarrer :
@@ -489,6 +485,11 @@ impl OfflineStore {
             self.persist_entries_locked()?;
         }
         Ok(changed)
+    }
+
+    /// Fiche d'un titre téléchargé.
+    pub fn entry(&self, id: i64) -> Option<OfflineTrack> {
+        self.entries.read().ok().and_then(|entries| entries.get(&id).cloned())
     }
 
     pub fn list(&self) -> Vec<OfflineTrack> {
@@ -934,8 +935,8 @@ impl OfflineStore {
     }
 
     fn wipe(&self, with_listens: bool) -> io::Result<()> {
-        // Les téléchargements en cours ne seront pas enregistrés après l'effacement (voir `insert_if_current`).
-        self.wipes.fetch_add(1, Ordering::AcqRel);
+        // Les téléchargements en cours ne seront pas enregistrés après l'effacement : la file vidée ici bloque
+        // `insert_if_pending`.
         // Tout est vidé en mémoire et sur le disque AVANT d'écrire quoi que ce soit : disque plein, la première écriture
         // échouait et rien n'était effacé (les téléchargements du compte précédent restaient).
         if let Ok(mut pending) = self.pending.write() {
@@ -1020,23 +1021,15 @@ impl OfflineStore {
         collection
     }
 
-    /// Utilisé par les tests ; les téléchargements passent par `insert_if_current` / `insert_if_pending`.
+    /// Utilisé par les tests ; les téléchargements passent par `insert_if_pending`.
     #[cfg(test)]
-    fn insert(&self, entry: OfflineTrack) -> io::Result<()> {
-        self.insert_if_current(entry, self.wipes.load(Ordering::Acquire)).map(|_| ())
-    }
-
-    /// Enregistre un titre seulement si aucun effacement complet n'a eu lieu depuis le début de son téléchargement.
-    fn insert_if_current(&self, mut entry: OfflineTrack, wipes: u64) -> io::Result<bool> {
+    fn insert(&self, mut entry: OfflineTrack) -> io::Result<()> {
         entry.pinned |= !self.in_collection(entry.info.id);
         // Verrou des écritures pris d'abord (même ordre que `write_manifest`) : la ligne du journal ne peut pas arriver
         // après une réécriture complète qui aurait déjà retiré ce titre.
         let _guard = self.persist_lock.lock().map_err(|_| io::Error::other("écriture des manifests verrouillée"))?;
         let previous = {
             let mut entries = self.entries.write().map_err(|_| io::Error::other("index des téléchargements verrouillé"))?;
-            if self.wipes.load(Ordering::Acquire) != wipes {
-                return Ok(false);
-            }
             entry.pinned |= entries.get(&entry.info.id).is_some_and(|old| old.pinned);
             entries.insert(entry.info.id, entry.clone())
         };
@@ -1045,7 +1038,7 @@ impl OfflineStore {
             self.restore_entry(entry.info.id, previous);
             return Err(error);
         }
-        Ok(true)
+        Ok(())
     }
 
     /// Enregistre un titre importé seulement s'il est encore attendu : annulé (ou compte déconnecté) pendant
@@ -1334,119 +1327,6 @@ pub async fn store_collection_removing(
     Ok((store.collection(&kind, id).map(|(collection, _)| collection).unwrap_or(collection), removed))
 }
 
-pub async fn download_track(
-    api: Arc<DeezerClient>,
-    store: OfflineStore,
-    info: TrackInfo,
-    quality: Quality,
-    cancelled: Arc<AtomicBool>,
-    progress: impl Fn(u64, Option<u64>) + Send + Sync,
-) -> Result<OfflineTrack, DownloadError> {
-    let wipes = store.wipes.load(Ordering::Acquire);
-    let id = info.id;
-    let resolved = api.media_with_recovery(id, Some(info), quality).await?;
-    let (media, stream_id, mut info) = (resolved.media, resolved.stream_id, resolved.info);
-    let dec: Arc<dyn ChunkDecryptor> = match media.cipher {
-        Cipher::None => Arc::new(Passthrough),
-        Cipher::BlockStripe => dz_decrypt::decryptor(stream_id),
-        Cipher::Other(kind) => return Err(DownloadError::Cipher(kind)),
-    };
-    let ext = if media.format.to_ascii_uppercase().starts_with("FLAC") { "flac" } else { "mp3" };
-    info.quality = Some(dz_api::format_label(&media.format));
-    info.track_token = None;
-
-    let response = api.http().get(media.url).send().await?.error_for_status()?;
-    let total = response.content_length();
-    let mut stream = response.bytes_stream();
-    let part = store.root.join("audio").join(format!("{id}.part"));
-    let final_path = audio_path(&store.root, id, ext);
-    let mut file = tokio::fs::File::create(&part).await?;
-    let mut pending = Vec::with_capacity(CHUNK * 4);
-    let mut index = 0u64;
-    let mut written = 0u64;
-
-    let result = async {
-        while let Some(bytes) = stream.next().await {
-            if cancelled.load(Ordering::Relaxed) {
-                return Err(DownloadError::Cancelled);
-            }
-            pending.extend_from_slice(&bytes?);
-            let full = pending.len() / CHUNK * CHUNK;
-            if full == 0 {
-                continue;
-            }
-            let mut ready: Vec<u8> = pending.drain(..full).collect();
-            for chunk in ready.chunks_exact_mut(CHUNK) {
-                dec.decrypt_chunk(index, chunk);
-                index += 1;
-            }
-            file.write_all(&ready).await?;
-            written += ready.len() as u64;
-            progress(written + pending.len() as u64, total);
-        }
-        if cancelled.load(Ordering::Relaxed) {
-            return Err(DownloadError::Cancelled);
-        }
-        if !pending.is_empty() {
-            file.write_all(&pending).await?;
-            written += pending.len() as u64;
-        }
-        file.flush().await?;
-        file.sync_all().await?;
-        if total.is_some_and(|expected| expected != written) {
-            return Err(DownloadError::Incomplete);
-        }
-        progress(written, total);
-        Ok(())
-    }
-    .await;
-
-    drop(file);
-    if let Err(error) = result {
-        let _ = tokio::fs::remove_file(&part).await;
-        return Err(error);
-    }
-    // Même vérification que pour les téléchargements natifs : un mauvais déchiffrement n'est pas enregistré.
-    if !valid_audio(&part, ext).await? {
-        let _ = tokio::fs::remove_file(&part).await;
-        return Err(DownloadError::InvalidAudio);
-    }
-    let _ = tokio::fs::remove_file(&final_path).await;
-    tokio::fs::rename(&part, &final_path).await?;
-
-    // Enregistré tout de suite, sans attendre la pochette ni les paroles (récupérées juste après, en arrière-plan).
-    let entry = OfflineTrack {
-        info,
-        ext: ext.into(),
-        bytes: written,
-        downloaded_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
-        cover_version: 0,
-        cover: None,
-        pinned: false, // décidé à l'enregistrement
-        cover_tries: 0,
-        cover_retry_at: 0,
-    };
-    // Écriture sur le disque hors des deux threads du cœur (partagés avec le lecteur).
-    let saving = (store.clone(), entry.clone());
-    let saved = tokio::task::spawn_blocking(move || saving.0.insert_if_current(saving.1, wipes))
-        .await
-        .unwrap_or_else(|error| Err(io::Error::other(error)));
-    match saved {
-        Ok(true) => {
-            fetch_extras(api, store, entry.clone());
-            Ok(entry)
-        }
-        Ok(false) => {
-            discard(&store, &final_path, entry.cover.as_deref()).await;
-            Err(DownloadError::Cancelled)
-        }
-        Err(error) => {
-            discard(&store, &final_path, entry.cover.as_deref()).await;
-            Err(error.into())
-        }
-    }
-}
-
 /// Copie déchiffrée d'un fichier téléchargé par iOS. Synchrone : appelée dans `spawn_blocking`, pour que le
 /// déchiffrement (gourmand en CPU) n'occupe pas les deux threads du runtime partagés avec le lecteur.
 fn decrypt_file(source: &Path, part: &Path, dec: &dyn ChunkDecryptor) -> Result<u64, DownloadError> {
@@ -1595,26 +1475,35 @@ async fn undo_import(store: &OfflineStore, id: i64, audio: &Path, update: bool, 
 fn fetch_extras(api: Arc<DeezerClient>, store: OfflineStore, entry: OfflineTrack) {
     tokio::spawn(async move {
         let id = entry.info.id;
-        let mut info = entry.info;
-        let original = info.cover_url.clone();
-        let fetched = download_cover(&api, &store.root, &mut info).await;
-        let connected = api.session().await.is_some();
-        // Réseau coupé pendant le téléchargement de la pochette : rien de noté, la vérification suivante s'en charge.
-        let cover = fetched.as_ref().ok().cloned().flatten();
-        if cover.is_some() || (connected && fetched.is_ok()) {
-            let url = info.cover_url.filter(|url| original.as_ref() != Some(url));
-            let update = CoverUpdate { id, cover: cover.clone(), url, failed: cover.is_none() };
-            if let Ok(replaced) = store.apply_cover_updates(&[update]) {
-                for old in replaced {
-                    let _ = tokio::fs::remove_file(store.root.join(old)).await;
+        // Mise à jour de la qualité : la pochette du fichier d'avant est gardée (avant, elle était revérifiée à chaque
+        // titre mis à jour). Sa vérification habituelle s'en occupe si elle doit changer.
+        let kept = entry.cover.as_ref().is_some_and(|cover| store.root.join(cover).exists());
+        if !kept {
+            let mut info = entry.info;
+            let original = info.cover_url.clone();
+            let fetched = download_cover(&api, &store.root, &mut info).await;
+            let connected = api.session().await.is_some();
+            // Réseau coupé pendant le téléchargement de la pochette : rien de noté, la vérification suivante s'en charge.
+            let cover = fetched.as_ref().ok().cloned().flatten();
+            if cover.is_some() || (connected && fetched.is_ok()) {
+                let url = info.cover_url.filter(|url| original.as_ref() != Some(url));
+                let update = CoverUpdate { id, cover: cover.clone(), url, failed: cover.is_none() };
+                if let Ok(replaced) = store.apply_cover_updates(&[update]) {
+                    for old in replaced {
+                        let _ = tokio::fs::remove_file(store.root.join(old)).await;
+                    }
                 }
             }
+            // Titre supprimé pendant ce temps : l'image n'est plus utile.
+            for unused in store.unused_covers(cover.into_iter().collect()) {
+                let _ = tokio::fs::remove_file(store.root.join(unused)).await;
+            }
         }
-        // Titre supprimé pendant ce temps : l'image n'est plus utile.
-        for unused in store.unused_covers(cover.into_iter().collect()) {
-            let _ = tokio::fs::remove_file(store.root.join(unused)).await;
+        // Paroles déjà gardées (mise à jour de la qualité) : redemandées seulement quand c'est dû. Avant, à chaque titre
+        // mis à jour.
+        if store.lyrics_due(id) {
+            fetch_lyrics_if_connected(&api, &store, id).await;
         }
-        fetch_lyrics_if_connected(&api, &store, id).await;
     });
 }
 
@@ -1769,6 +1658,11 @@ async fn check_covers(api: &DeezerClient, store: &OfflineStore, entries: Vec<Off
         // Réseau coupé : ces titres-là ne sont pas notés, et la suite attend la prochaine ouverture de session.
         let offline = batch.iter().any(Result::is_err);
         let updates: Vec<CoverUpdate> = batch.into_iter().filter_map(Result::ok).collect();
+        // Lot vide (réseau coupé dès le premier titre) : rien d'enregistré. Avant, il était compté comme enregistré, et
+        // l'app relisait toutes les listes des téléchargements pour rien.
+        if updates.is_empty() {
+            break;
+        }
         if let Ok(replaced) = store.apply_cover_updates(&updates) {
             saved = true;
             for old in replaced {
@@ -1914,6 +1808,24 @@ pub fn in_quality(entry: &OfflineTrack, wanted: &str) -> bool {
         Some(quality) => quality == wanted,
         None => (entry.ext == "flac") == (wanted == "FLAC"),
     }
+}
+
+/// Mise à jour de la qualité vers `wanted` d'un titre téléchargé, Deezer donnant `resolved` : vrai s'il n'y a rien à
+/// retélécharger. Même qualité que le fichier gardé, ou qualité supérieure demandée alors que Deezer n'a pas mieux que lui
+/// (FLAC demandé mais absent : un MP3 320 n'est pas remplacé par un MP3 128). Une baisse demandée se fait toujours.
+pub fn quality_kept(entry: &OfflineTrack, wanted: &str, resolved: &str) -> bool {
+    if in_quality(entry, resolved) {
+        return true;
+    }
+    let rank = |quality: &str| match quality {
+        "FLAC" => 3,
+        "MP3 320" => 2,
+        "MP3 128" => 1,
+        _ => 0,
+    };
+    // Sans qualité notée (anciens téléchargements) : un MP3 compte comme un MP3 320, comme dans `in_quality`.
+    let stored = entry.info.quality.as_deref().map_or(if entry.ext == "flac" { 3 } else { 2 }, rank);
+    rank(wanted) > stored && rank(resolved) <= stored
 }
 
 /// Adresse de l'image vide du serveur d'images de Deezer.
@@ -2095,7 +2007,7 @@ mod tests {
         let store = OfflineStore::open(root.clone()).unwrap();
         std::fs::create_dir_all(root.join(JOURNAL)).unwrap(); // journal impossible à écrire
         let entry = OfflineTrack { info: info(42), ext: "mp3".into(), bytes: 5, downloaded_at: 1, cover: None, cover_version: 0, pinned: false, cover_tries: 0, cover_retry_at: 0 };
-        assert!(store.insert_if_current(entry.clone(), store.wipes.load(Ordering::Acquire)).is_err());
+        assert!(store.insert(entry.clone()).is_err());
         assert!(store.list().is_empty());
 
         let (job, _, _) = native_pending(&root);
@@ -2781,6 +2693,27 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn a_quality_update_only_downloads_a_different_quality() {
+        let stored = |quality: Option<&str>, ext: &str| {
+            let mut info = info(1);
+            info.quality = quality.map(str::to_owned);
+            OfflineTrack { info, ext: ext.into(), bytes: 5, downloaded_at: 1, cover: None, cover_version: 0, pinned: false, cover_tries: 0, cover_retry_at: 0 }
+        };
+        let mp3 = stored(Some("MP3 320"), "mp3");
+        assert!(quality_kept(&mp3, "FLAC", "MP3 320"), "pas de FLAC chez Deezer : rien à retélécharger");
+        assert!(quality_kept(&mp3, "FLAC", "MP3 128"), "jamais moins bien lors d'une montée");
+        assert!(!quality_kept(&mp3, "FLAC", "FLAC"));
+        assert!(!quality_kept(&mp3, "MP3 128", "MP3 128"), "baisse demandée");
+        let flac = stored(Some("FLAC"), "flac");
+        assert!(!quality_kept(&flac, "MP3 320", "MP3 320"), "un FLAC peut passer en MP3");
+        assert!(!quality_kept(&flac, "MP3 320", "MP3 128"), "baisse : faite même si Deezer n'a que plus bas");
+        assert!(quality_kept(&flac, "FLAC", "FLAC"));
+        let low = stored(Some("MP3 128"), "mp3");
+        assert!(!quality_kept(&low, "FLAC", "MP3 320"), "mieux qu'avant, même sans FLAC");
+        assert!(quality_kept(&stored(None, "mp3"), "FLAC", "MP3 320"), "ancien MP3 sans qualité notée");
+    }
+
     #[tokio::test]
     async fn a_quality_update_replaces_the_file_only_once_saved() {
         let root = root("quality-update");
@@ -2987,14 +2920,11 @@ mod tests {
         let root = root("downloads-clear");
         let store = OfflineStore::open(root.clone()).unwrap();
         insert_file(&store, 42);
-        let (gen, wipes) = (store.generation(), store.wipes.load(Ordering::Acquire));
+        let gen = store.generation();
         store.queue_listen(listen(1, 100), gen).unwrap();
         store.set_open_listen(Some(listen(2, 200)), gen).unwrap();
         store.clear_downloads().unwrap();
         assert!(store.list().is_empty() && !audio_path(&root, 42, "mp3").exists());
-        // Téléchargement commencé avant l'effacement : pas enregistré après.
-        let entry = OfflineTrack { info: info(43), ext: "mp3".into(), bytes: 5, downloaded_at: 1, cover: None, cover_version: 0, pinned: false, cover_tries: 0, cover_retry_at: 0 };
-        assert!(!store.insert_if_current(entry, wipes).unwrap());
         // Le titre qui jouait pendant l'effacement est toujours compté à sa fin.
         assert!(store.close_listen(Some(listen(2, 200)), gen).unwrap());
         drop(store);

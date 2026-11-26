@@ -42,6 +42,10 @@ pub enum CoreError {
     /// ARL refusé par Deezer (expiré, révoqué) : l'app revient à l'écran de connexion.
     #[error("arl invalide ou expiré")]
     SessionExpired,
+    /// Mise à jour de la qualité d'un titre téléchargé inutile, rien n'est retéléchargé : Deezer n'a pas mieux que le
+    /// fichier gardé. Contient la qualité demandée (« FLAC »…) que Deezer n'a pas, vide si le titre y est déjà.
+    #[error("pas mieux chez Deezer")]
+    NotBetter(String),
 }
 
 impl From<dz_api::DeezerError> for CoreError {
@@ -52,6 +56,15 @@ impl From<dz_api::DeezerError> for CoreError {
         // Même message lisible que pour le lecteur (réseau trop faible, etc.).
         let raw = e.to_string();
         Self::Api(friendly_error(&raw).unwrap_or(raw))
+    }
+}
+
+/// Qualité telle qu'elle est notée sur les titres (`format_label`).
+fn quality_label(quality: Quality) -> &'static str {
+    match quality {
+        Quality::Flac => "FLAC",
+        Quality::Mp3320 => "MP3 320",
+        Quality::Mp3128 => "MP3 128",
     }
 }
 
@@ -363,6 +376,8 @@ pub struct DownloadUpdate {
 pub struct PreparedDownload {
     pub id: i64,
     pub url: String,
+    /// Qualité demandée pour ce téléchargement (« FLAC », « MP3 320 », « MP3 128 ») : celle du moment où il est préparé.
+    pub quality: String,
 }
 
 /// Titre téléchargé dans une autre qualité que celle choisie pour les téléchargements, et la place qu'il prend.
@@ -1071,9 +1086,19 @@ impl Core {
             info = self.run(async move { api.track_info(id).await }).await??;
         }
         let selected = self.download_quality.read().map(|q| *q).unwrap_or(Quality::Flac);
+        let wanted = quality_label(selected);
         let api = self.api.clone();
         let resolved = self.run(async move { api.media_with_recovery(id, Some(info), selected).await }).await??;
         let (media, stream_id, mut info) = (resolved.media, resolved.stream_id, resolved.info);
+        // Mise à jour de la qualité : rien n'est retéléchargé si Deezer n'a pas mieux. Avant, le fichier l'était pour rien
+        // (jusqu'à ~30 Mo), et une mise à jour coupée par une relance finissait en échec.
+        if replace {
+            let label = dz_api::format_label(&media.format);
+            if let Some(stored) = self.offline.entry(id).filter(|stored| dz_offline::quality_kept(stored, wanted, &label)) {
+                let missing = if dz_offline::in_quality(&stored, wanted) { String::new() } else { wanted.to_owned() };
+                return Err(CoreError::NotBetter(missing));
+            }
+        }
         let encrypted = match media.cipher {
             dz_api::Cipher::None => false,
             dz_api::Cipher::BlockStripe => true,
@@ -1088,7 +1113,7 @@ impl Core {
         let pinned = !self.offline.in_collection(id);
         let pending = PendingDownload { info, url: url.clone(), stream_id, ext, encrypted, pinned };
         self.offline.save_pending(pending).map_err(|e| CoreError::Api(e.to_string()))?;
-        Ok(PreparedDownload { id, url })
+        Ok(PreparedDownload { id, url, quality: wanted.into() })
     }
 
     pub async fn finish_download(&self, id: i64, path: String) -> Result<Track, CoreError> {
@@ -1186,11 +1211,7 @@ impl Core {
     /// Titres téléchargés qui ne sont pas dans la qualité choisie pour les téléchargements (Réglages › Qualité, « Mettre à
     /// jour »). Parcourt toutes les fiches : à appeler hors du fil principal.
     pub fn downloads_in_other_quality(&self) -> Vec<QualityChange> {
-        let wanted = match self.download_quality.read().map(|q| *q).unwrap_or(Quality::Flac) {
-            Quality::Flac => "FLAC",
-            Quality::Mp3320 => "MP3 320",
-            Quality::Mp3128 => "MP3 128",
-        };
+        let wanted = quality_label(self.download_quality.read().map(|q| *q).unwrap_or(Quality::Flac));
         self.offline
             .list()
             .into_iter()

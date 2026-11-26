@@ -19,6 +19,8 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         var incomingPath: String?
         /// Titre déjà téléchargé, retéléchargé dans la qualité choisie (Réglages › Qualité, mise à jour).
         var upgrade: Bool?
+        /// Qualité demandée (« FLAC »…), notée à la préparation : celle des Réglages peut changer avant la fin.
+        var target: String?
 
         var track: Track {
             Track(id: id, title: title, artist: artist, album: "", durationS: 0, coverUrl: coverURL,
@@ -163,7 +165,8 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         self.core = core
         self.player = player
         load()
-        player.restoreDownloadQueue(order.compactMap { jobs[$0]?.track })
+        let queued = order.compactMap { jobs[$0] }
+        player.restoreDownloadQueue(queued.map(\.track), upgrades: Set(queued.filter { $0.upgrade == true }.map(\.id)))
         _ = session
         session.getAllTasks { [weak self] sessionTasks in
             Task { @MainActor in self?.restore(sessionTasks) }
@@ -318,16 +321,8 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         storageFull = false // nouvelle demande : on réessaie (de la place a pu être libérée)
         var accepted: [Track] = []
         for track in tracks {
-            if var existing = jobs[track.id] {
-                guard failed.contains(track.id) else { continue }
-                failed.remove(track.id)
-                renewed.remove(track.id)
-                if let path = existing.incomingPath { try? FileManager.default.removeItem(atPath: path) }
-                dropResume(track.id)
-                existing.preparedURL = nil
-                existing.incomingPath = nil
-                jobs[track.id] = existing
-                accepted.append(track)
+            if jobs[track.id] != nil {
+                if retryFailed(track.id) { accepted.append(track) }
             } else {
                 jobs[track.id] = Job(id: track.id, title: track.title, artist: track.artist,
                                      coverURL: track.coverUrl, preparedURL: nil, incomingPath: nil)
@@ -343,16 +338,33 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         return accepted
     }
 
+    /// Titre en échec redemandé : remis à zéro (fichier reçu et reprise oubliés) pour repartir.
+    private func retryFailed(_ id: Int64) -> Bool {
+        guard var job = jobs[id], failed.remove(id) != nil else { return false }
+        renewed.remove(id)
+        if let path = job.incomingPath { try? FileManager.default.removeItem(atPath: path) }
+        dropResume(id)
+        job.preparedURL = nil
+        job.incomingPath = nil
+        jobs[id] = job
+        return true
+    }
+
     /// Titres déjà téléchargés à retélécharger dans la qualité choisie (Réglages › Qualité). Ils restent écoutables :
     /// le nouveau fichier ne remplace l'ancien qu'une fois reçu en entier (voir `import_download` dans le cœur).
     func enqueueUpgrade(_ tracks: [Track]) -> [Track] {
         storageFull = false
         var accepted: [Track] = []
-        for track in tracks where jobs[track.id] == nil {
-            jobs[track.id] = Job(id: track.id, title: track.title, artist: track.artist,
-                                 coverURL: track.coverUrl, preparedURL: nil, incomingPath: nil, upgrade: true)
-            order.append(track.id)
-            accepted.append(track)
+        for track in tracks {
+            if jobs[track.id] != nil {
+                // Mise à jour en échec : relancée. Avant, « Déjà en cours » tant que l'échec n'était pas effacé.
+                if retryFailed(track.id) { accepted.append(track) }
+            } else {
+                jobs[track.id] = Job(id: track.id, title: track.title, artist: track.artist,
+                                     coverURL: track.coverUrl, preparedURL: nil, incomingPath: nil, upgrade: true)
+                order.append(track.id)
+                accepted.append(track)
+            }
         }
         save()
         pump()
@@ -482,6 +494,14 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
             return
         }
         let task = session.downloadTask(withResumeData: data)
+        // Commencé avant un changement de « Wi-Fi seulement » : la reprise garde la règle de la requête d'origine. En
+        // données mobiles, il restait alors bloqué jusqu'au Wi-Fi malgré le réglage désactivé : il repart de zéro.
+        if onCellular, task.originalRequest?.allowsCellularAccess == wifiOnly {
+            task.cancel()
+            requeue(id)
+            pump()
+            return
+        }
         task.taskDescription = String(id)
         tasks[id] = task
         fromResume.insert(id)
@@ -513,13 +533,28 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
                     return
                 }
                 self.preparations[id] = nil
-                if self.isNetworkError(error) {
+                if case .NotBetter(let missing)? = error as? CoreError {
+                    self.keepCurrentQuality(id, missing: missing)
+                } else if self.isNetworkError(error) {
                     self.waitForNetwork(id)
                 } else {
                     self.fail(id, error: error)
                 }
             }
         }
+    }
+
+    /// Mise à jour de la qualité inutile, Deezer n'ayant pas mieux que le fichier gardé (voir `prepare_download`) : le
+    /// titre sort de la file sans rien retélécharger. `missing` : qualité demandée que Deezer n'a pas (vide : déjà dedans).
+    private func keepCurrentQuality(_ id: Int64, missing: String) {
+        jobs[id] = nil
+        renewed.remove(id)
+        order.removeAll { $0 == id }
+        save()
+        if !missing.isEmpty { player?.markQualityUnavailable(id, wanted: missing) }
+        player?.downloadsStopped([id])
+        pump()
+        finishBackgroundEventsIfPossible()
     }
 
     private func start(_ prepared: PreparedDownload, job: Job) {
@@ -529,6 +564,7 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         }
         var job = job
         job.preparedURL = prepared.url
+        job.target = prepared.quality
         jobs[job.id] = job
         // Écrit tout de suite (sans attendre le regroupement) : l'adresse préparée sert à reconnaître, après une
         // relance, un fichier livré pendant que l'app était fermée.
@@ -672,7 +708,10 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
                 self.order.removeAll { $0 == id }
                 self.save()
                 self.player?.downloadCompleted(track)
-                if job.upgrade == true { self.player?.qualityUpdateFinished(track) }
+                // Mise à jour finie dans une autre qualité que celle demandée : Deezer ne l'a pas pour ce titre.
+                if job.upgrade == true, let target = job.target, track.quality != target {
+                    self.player?.markQualityUnavailable(id, wanted: target)
+                }
                 self.pump()
                 self.finishBackgroundEventsIfPossible()
             } catch {
