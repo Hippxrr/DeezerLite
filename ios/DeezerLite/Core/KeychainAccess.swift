@@ -15,7 +15,6 @@ enum KeychainAccess {
             kSecAttrAccount as String: "arl",
         ]
         let status = SecItemDelete(query as CFDictionary)
-        SessionLog.note("trousseau : session effacée (code \(status))")
         if status != errSecSuccess && status != errSecItemNotFound {
             print("Trousseau (session oubliée) : \(status)")
         }
@@ -29,7 +28,6 @@ enum KeychainAccess {
         ]
         let change: [String: Any] = [kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly]
         let status = SecItemUpdate(query as CFDictionary, change as CFDictionary)
-        if status != errSecSuccess { SessionLog.note("trousseau : accès « iPhone verrouillé » non posé (code \(status))") }
         if status != errSecSuccess && status != errSecItemNotFound && status != errSecInteractionNotAllowed {
             print("Trousseau (accès verrouillé) : \(status)")
         }

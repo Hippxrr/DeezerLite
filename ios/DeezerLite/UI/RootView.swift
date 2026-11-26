@@ -156,27 +156,17 @@ struct RootView: View {
         .background(Theme.background.ignoresSafeArea())
         .background(WindowStyle())
         .onChange(of: phase) { _, now in
-            SessionLog.note("scène : \(now)")
             if now == .active { ThemeStore.applyStyle(ThemeStore.shared.appearance.style) }
         }
         .tint(Theme.accent)
         .toastOverlay()
         .overlay {
             if launchCover {
-                LaunchCover {
-                    launchCover = false
-                    // Journal de diagnostic (temporaire) : l'écran est contrôlé juste après.
-                    SessionLog.checkScreenSoon("après le lancement")
-                }
-                .modifier(DiagnosticProbe(name: "écran de lancement"))
+                LaunchCover { launchCover = false }
             }
         }
         .alert("Deezer Lite", isPresented: Binding(get: { player.message != nil }, set: { if !$0 { player.message = nil } })) {
             Button("OK", role: .cancel) {}
-            // Diagnostic temporaire des déconnexions (voir `SessionLog`).
-            if player.offerSessionLog {
-                Button(tr("Copier le journal")) { SessionLog.copy() }
-            }
         } message: {
             Text(player.message ?? "")
         }
@@ -251,10 +241,6 @@ struct LoginView: View {
                                 .surface(RoundedRectangle(cornerRadius: 14, style: .continuous), interactive: false)
                                 .transition(.opacity.combined(with: .move(edge: .top)))
                             }
-                            // Diagnostic temporaire des déconnexions (voir `SessionLog`) : aussi ici, si le message a été fermé.
-                            Button(tr("Copier le journal de connexion")) { SessionLog.copy() }
-                                .font(.caption)
-                                .foregroundStyle(.tertiary)
                         }
                         .padding(.bottom, 12)
                     }
@@ -266,17 +252,11 @@ struct LoginView: View {
             }
         }
         .sheet(isPresented: $web) {
-            WebLoginSheet { cookie in
-                SessionLog.note("connexion par la page Deezer")
-                login(cookie)
-            }
+            WebLoginSheet { cookie in login(cookie) }
         }
     }
 
-    private func loginWithArl() {
-        SessionLog.note("connexion par cookie arl collé")
-        login(arl)
-    }
+    private func loginWithArl() { login(arl) }
 
     private func login(_ value: String) {
         let value = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -322,7 +302,6 @@ struct MainTabs: View {
     /// Onglet choisi. iOS passe aussi par ici quand on rappuie sur l'onglet déjà ouvert.
     private var selection: Binding<Int> {
         Binding(get: { tab }, set: { new in
-            SessionLog.note("onglet \(new) choisi (avant \(tab))") // journal de diagnostic (temporaire)
             if new == 1 && tab == 1 { searchFocus += 1 }
             tab = new
         })
@@ -355,7 +334,7 @@ struct MainTabs: View {
     /// Jusqu'à iOS 26.0 : onglets classiques, le mini-lecteur est posé par-dessus (voir `body`).
     private var classicTabs: some View {
         TabView(selection: selection) {
-            TabStack(active: tab == 0, probe: "accueil") { HomeView() }
+            TabStack(active: tab == 0) { HomeView() }
                 .tabItem { tabLabel(tr("Accueil"), Image(uiImage: TabIcons.home)) }
                 .tag(0)
             TabStack(active: tab == 1, popRequest: searchFocus) { SearchView(focusRequest: searchFocus) }
@@ -377,7 +356,7 @@ struct MainTabs: View {
     private var barTabs: some View {
         TabView(selection: selection) {
             Tab(value: 0) {
-                TabStack(active: tab == 0, probe: "accueil") { HomeView() }
+                TabStack(active: tab == 0) { HomeView() }
             } label: {
                 tabLabel(tr("Accueil"), Image(uiImage: TabIcons.home))
             }
@@ -403,7 +382,6 @@ struct MainTabs: View {
 
     /// Onglet choisi dans la barre de l'app : un nouvel appui revient à la première page (et ouvre le clavier sur la recherche).
     private func selectOwn(_ new: Int) {
-        SessionLog.note("onglet \(new) choisi (avant \(tab))") // journal de diagnostic (temporaire)
         if new == tab {
             switch new {
             case 0: homePop += 1
@@ -440,9 +418,7 @@ struct MainTabs: View {
     /// clavier, qui la recouvre simplement.
     private var ownTabs: some View {
         ZStack {
-            ownPage(0, TabStack(active: tab == 0, popRequest: homePop, probe: "accueil") { HomeView() })
-                // Journal de diagnostic (temporaire) : la page entière, avec son opacité (hors de la pile de navigation).
-                .modifier(DiagnosticProbe(name: "accueil : page"))
+            ownPage(0, TabStack(active: tab == 0, popRequest: homePop) { HomeView() })
             if visited.contains(1) || tab == 1 {
                 ownPage(1, TabStack(active: tab == 1, popRequest: searchFocus) { SearchView(focusRequest: searchFocus) })
             }
@@ -465,18 +441,17 @@ struct MainTabs: View {
     @ViewBuilder
     private var tabs: some View {
         #if compiler(>=6.2.1)
-        // Journal de diagnostic (temporaire) : quelle barre d'onglets est affichée, et sa place.
         if #available(iOS 26.1, *) {
             if barFullShown {
-                ownTabs.modifier(DiagnosticProbe(name: "onglets (barre de l'app)"))
+                ownTabs
             } else {
-                barTabs.modifier(DiagnosticProbe(name: "onglets (barre d'iOS)"))
+                barTabs
             }
         } else {
-            classicTabs.modifier(DiagnosticProbe(name: "onglets (classiques)"))
+            classicTabs
         }
         #else
-        classicTabs.modifier(DiagnosticProbe(name: "onglets (classiques)"))
+        classicTabs
         #endif
     }
 
@@ -620,8 +595,6 @@ struct TabStack<Content: View>: View {
     let active: Bool
     /// Change : retour à la première page de l'onglet.
     var popRequest = 0
-    /// Journal de diagnostic (temporaire) : nom de l'onglet suivi ; vide, rien n'est noté.
-    var probe = ""
     @ViewBuilder let content: () -> Content
     /// Largeur à l'écran de la première page de la pile, et de la pile elle-même (voir la reconstruction plus bas).
     @State private var rootWidth: CGFloat = 0
@@ -635,7 +608,6 @@ struct TabStack<Content: View>: View {
                 .miniPlayerSpace()
                 .background(EdgeOnlyBack())
                 .pageBackground()
-                .modifier(DiagnosticProbe(name: probe.isEmpty ? "" : "\(probe) : dans la pile"))
                 .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).width } action: { rootWidth = $0 }
                 .navigationDestination(for: Route.self) { DetailView(route: $0).miniPlayerSpace().pageBackground() }
                 .navigationDestination(for: LibrarySection.self) { LibrarySectionView(section: $0).miniPlayerSpace().pageBackground() }
@@ -650,10 +622,8 @@ struct TabStack<Content: View>: View {
             guard abs(rootWidth - stackWidth) > 1, rootWidth > 0, stackWidth > 0, path.isEmpty, rebuilds < 2 else { return }
             try? await Task.sleep(for: .milliseconds(600))
             guard !Task.isCancelled else { return }
-            SessionLog.note("pile \(probe) reconstruite : page large de \(Int(rootWidth)) au lieu de \(Int(stackWidth))") // journal (temporaire)
             rebuilds += 1
         }
-        .modifier(DiagnosticProbe(name: probe.isEmpty ? "" : "\(probe) : pile entière"))
         .environment(\.openRoute) { path.append($0) }
         // Page demandée depuis le lecteur plein écran : ouverte dans l'onglet affiché.
         .onChange(of: player.requestedRoute) { _, route in

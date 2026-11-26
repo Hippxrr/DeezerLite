@@ -48,7 +48,6 @@ struct HomeView: View {
             .padding(.bottom, 12)
             .animation(.easeOut(duration: 0.25), value: player.home == nil)
         }
-        .modifier(DiagnosticProbe(name: "accueil")) // journal de diagnostic (temporaire, voir `SessionLog`)
         .toolbar(.hidden, for: .navigationBar)
         .sheet(isPresented: $reordering) {
             HomeOrderView().environment(player).presentationDetents([.medium, .large])

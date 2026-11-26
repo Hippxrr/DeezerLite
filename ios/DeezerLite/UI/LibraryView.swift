@@ -376,10 +376,6 @@ struct SettingsView: View {
                     case .quality: quality
                     }
                     Text("Deezer Lite \(version)").font(.caption).foregroundStyle(.tertiary).frame(maxWidth: .infinity)
-                    // Diagnostic temporaire (voir `SessionLog`) : aussi en secouant l'iPhone, n'importe où dans l'app.
-                    Button(tr("Copier le journal de diagnostic")) { SessionLog.copy() }
-                        .font(.caption)
-                        .frame(maxWidth: .infinity)
                 }
                 .padding(16)
                 .animation(nil, value: tab)

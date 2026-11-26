@@ -583,8 +583,6 @@ struct FullPlayerContainer: View {
                     // Très grandes tailles de texte : bornées (comme le mini-lecteur), sinon sur un petit iPhone (SE) le
                     // bas du lecteur passait sous la barre du bas.
                     .dynamicTypeSize(...DynamicTypeSize.accessibility1)
-                    // Journal de diagnostic (temporaire) : sa place réelle, déplacement compris (fermé = sous l'écran).
-                    .modifier(DiagnosticProbe(name: "lecteur plein écran"))
                     .offset(y: pull.y)
                     .allowsHitTesting(player.showFullPlayer)
                     .accessibilityHidden(!player.showFullPlayer)
@@ -599,7 +597,6 @@ struct FullPlayerContainer: View {
     }
 
     private func place(_ height: CGFloat) {
-        SessionLog.note("lecteur plein écran placé : hauteur \(Int(height)), \(player.showFullPlayer ? "ouvert" : "fermé (caché sous l'écran)")")
         pull.height = height
         if !player.showFullPlayer {
             pull.y = height
