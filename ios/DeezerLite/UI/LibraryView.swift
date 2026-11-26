@@ -348,6 +348,10 @@ struct SettingsView: View {
     @AppStorage("miniProgress") private var miniProgress = true
     @AppStorage("fullBleedCover") private var fullBleedCover = false
     @AppStorage("saveCoverOnLongPress") private var saveCoverOnLongPress = false
+    @AppStorage(BackgroundDownloadManager.wifiOnlyKey) private var downloadsWifiOnly = false
+    /// Titres téléchargés dans une autre qualité que celle des téléchargements (« Mettre à jour »).
+    @State private var qualityChanges: [QualityChange] = []
+    @State private var confirmQualityUpdate = false
 
     enum SettingsTab: String, CaseIterable {
         case general, look, sound, quality
@@ -630,10 +634,69 @@ struct SettingsView: View {
         group(tr("Qualité en Wi-Fi")) { qualityRows(player.quality) { player.setQuality($0) } }
         group(tr("Qualité en données mobiles")) { qualityRows(player.cellularQuality) { player.setCellularQuality($0) } }
         group(tr("Qualité des téléchargements")) { qualityRows(player.downloadQuality) { player.setDownloadQuality($0) } }
+            // Recalculé à chaque changement de qualité, hors du fil principal.
+            .task(id: player.downloadQuality) { qualityChanges = await player.downloadsInOtherQuality() }
         Text(tr("Pour les nouveaux téléchargements, en Wi-Fi et en 4G/5G.")).font(.caption).foregroundStyle(.secondary).padding(.top, -14).padding(.leading, 4)
+        if !qualityChanges.isEmpty { qualityUpdateRow }
         if let playing = player.current?.quality {
             Text(tr("Titre en cours : %@", playing)).font(.caption).foregroundStyle(.secondary).padding(.top, -14).padding(.leading, 4)
         }
+        group(tr("Téléchargements")) {
+            Toggle(isOn: $downloadsWifiOnly) {
+                HStack(spacing: 12) {
+                    Image(systemName: "wifi").foregroundStyle(Theme.accent).frame(width: 26)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(tr("Télécharger en Wi-Fi seulement"))
+                        Text(tr("En données mobiles, les téléchargements attendent le Wi-Fi")).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .tint(Theme.accent)
+            .padding(14)
+            .onChange(of: downloadsWifiOnly) { BackgroundDownloadManager.shared.wifiOnlyChanged() }
+        }
+    }
+
+    /// Titres déjà téléchargés dans une autre qualité : les retélécharger dans celle choisie, après confirmation.
+    private var qualityUpdateRow: some View {
+        Button { confirmQualityUpdate = true } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "arrow.triangle.2.circlepath").foregroundStyle(Theme.accent).frame(width: 26)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(tr("Mettre à jour les titres téléchargés"))
+                    Text(tr("%@ titres dans une autre qualité", "\(qualityChanges.count)")).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+            }
+            .padding(14)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .surface(RoundedRectangle(cornerRadius: 14, style: .continuous), interactive: false)
+        .confirmationDialog(tr("Mettre à jour la qualité ?"), isPresented: $confirmQualityUpdate, titleVisibility: .visible) {
+            Button(tr("Mettre à jour")) {
+                player.updateDownloadQuality(qualityChanges)
+                qualityChanges = []
+            }
+        } message: {
+            Text(qualityUpdateSummary)
+        }
+    }
+
+    /// Nombre de titres, place avant et après (estimée d'après leur durée), et rappel du Wi-Fi.
+    private var qualityUpdateSummary: String {
+        let kbps: Int64 = switch player.downloadQuality {
+        case .flac: 1000
+        case .mp3High: 320
+        case .mp3Low: 128
+        }
+        let before = qualityChanges.reduce(Int64(0)) { $0 + Int64($1.bytes) }
+        let after = qualityChanges.reduce(Int64(0)) { $0 + Int64($1.track.durationS) * kbps * 125 }
+        let size = { (bytes: Int64) in ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
+        let text = tr("%@ titres seront retéléchargés en %@ (environ %@ → %@). Ils restent écoutables pendant la mise à jour.",
+                      "\(qualityChanges.count)", player.downloadQuality.title, size(before), size(after))
+        return downloadsWifiOnly ? text : text + " " + tr("Conseillé en Wi-Fi.")
     }
 
     @ViewBuilder

@@ -380,13 +380,23 @@ impl OfflineStore {
             entries.insert(entry.info.id, entry);
         }
         let before = entries.len();
-        entries.retain(|id, entry| audio_path(&root, *id, &entry.ext).metadata().is_ok_and(|m| m.len() == entry.bytes));
+        entries.retain(|id, entry| {
+            let path = audio_path(&root, *id, &entry.ext);
+            let whole = |p: &Path| p.metadata().is_ok_and(|m| m.len() == entry.bytes);
+            // App arrêtée net pendant la mise à jour de la qualité de ce titre (même format) : son fichier d'avant, mis
+            // de côté, est remis en place. Sinon le titre disparaissait des téléchargements.
+            whole(&path) || {
+                let aside = root.join("audio").join(format!("{id}.old"));
+                whole(&aside) && std::fs::rename(&aside, &path).is_ok()
+            }
+        });
         changed |= entries.len() != before;
         // File des téléchargements illisible : on repart d'une file vide plutôt que d'empêcher l'app de démarrer
         // (les téléchargements en cours sont redemandés par l'app, qui garde sa propre liste).
         let mut pending: BTreeMap<i64, PendingDownload> = read_manifest(&root.join("pending.json")).unwrap_or_default();
-        // Titre enregistré mais retiré de la file sans pouvoir la réécrire (disque plein) : il n'est plus attendu.
-        pending.retain(|id, _| !entries.contains_key(id));
+        // Titre enregistré mais retiré de la file sans pouvoir la réécrire (disque plein) : il n'est plus attendu. Gardé
+        // s'il est attendu dans une autre qualité que celle enregistrée : mise à jour de la qualité en cours.
+        pending.retain(|id, p| entries.get(id).is_none_or(|e| e.ext != p.ext || e.info.quality != p.info.quality));
         let collections: BTreeMap<String, OfflineCollection> = read_or_set_aside(&root.join("collections.json"), &mut damaged)?;
         // Titres hors de toute collection (téléchargés seuls, y compris avant l'existence de `pinned`) : gardés pour eux-mêmes.
         let grouped: BTreeSet<i64> = collections.values().flat_map(|c| c.track_ids.iter().copied()).collect();
@@ -1488,6 +1498,11 @@ pub async fn import_download(
     let dec: Arc<dyn ChunkDecryptor> = if encrypted { dz_decrypt::decryptor(stream_id) } else { Arc::new(Passthrough) };
     let part = store.root.join("audio").join(format!("{id}.part"));
     let final_path = audio_path(&store.root, id, &ext);
+    // Titre déjà téléchargé (mise à jour de la qualité) : il garde sa pochette, et son fichier actuel n'est retiré qu'une
+    // fois le nouveau enregistré (sinon, il est remis en place). Le titre reste écoutable pendant toute la mise à jour.
+    let previous = store.entries.read().ok().and_then(|entries| entries.get(&id).cloned());
+    let kept = previous.as_ref().map(|p| audio_path(&store.root, id, &p.ext));
+    let aside = store.root.join("audio").join(format!("{id}.old"));
 
     let blocking_part = part.clone();
     let result = tokio::task::spawn_blocking(move || decrypt_file(&source, &blocking_part, dec.as_ref()))
@@ -1505,8 +1520,19 @@ pub async fn import_download(
         let _ = tokio::fs::remove_file(&part).await;
         return Err(DownloadError::InvalidAudio);
     }
-    let _ = tokio::fs::remove_file(&final_path).await;
-    tokio::fs::rename(&part, &final_path).await?;
+    // Même nom de fichier que l'actuel (même format) : l'actuel est mis de côté d'abord.
+    let same_file = kept.as_ref() == Some(&final_path);
+    let set_aside = same_file && tokio::fs::rename(&final_path, &aside).await.is_ok();
+    if !same_file {
+        let _ = tokio::fs::remove_file(&final_path).await;
+    }
+    if let Err(error) = tokio::fs::rename(&part, &final_path).await {
+        let _ = tokio::fs::remove_file(&part).await;
+        if set_aside {
+            let _ = tokio::fs::rename(&aside, &final_path).await;
+        }
+        return Err(error.into());
+    }
     // Enregistré tout de suite : avant, l'app attendait la pochette (jusqu'à une dizaine de requêtes) et les paroles
     // (jusqu'à 3 essais de 20 s) avant de considérer le titre téléchargé, titre après titre. Elles suivent en arrière-plan.
     let entry = OfflineTrack {
@@ -1514,11 +1540,11 @@ pub async fn import_download(
         ext,
         bytes: written,
         downloaded_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
-        cover_version: 0,
-        cover: None,
+        cover_version: previous.as_ref().map_or(0, |p| p.cover_version),
+        cover: previous.as_ref().and_then(|p| p.cover.clone()),
         pinned: false, // décidé à l'enregistrement
-        cover_tries: 0,
-        cover_retry_at: 0,
+        cover_tries: previous.as_ref().map_or(0, |p| p.cover_tries),
+        cover_retry_at: previous.as_ref().map_or(0, |p| p.cover_retry_at),
     };
     let saving = (store.clone(), entry.clone());
     let saved = tokio::task::spawn_blocking(move || saving.0.insert_if_pending(saving.1))
@@ -1526,16 +1552,40 @@ pub async fn import_download(
         .unwrap_or_else(|error| Err(io::Error::other(error)));
     match saved {
         Ok(true) => {
+            // Fichier de l'ancienne qualité : retiré maintenant que le nouveau est enregistré.
+            if set_aside {
+                let _ = tokio::fs::remove_file(&aside).await;
+            } else if let Some(old) = kept.filter(|old| *old != final_path) {
+                let _ = tokio::fs::remove_file(old).await;
+            }
             fetch_extras(api, store, entry.clone());
             Ok(entry)
         }
         Ok(false) => {
-            discard(&store, &final_path, entry.cover.as_deref()).await;
+            undo_import(&store, id, &final_path, previous.is_some(), set_aside.then_some(&aside), entry.cover.as_deref()).await;
             Err(DownloadError::Cancelled)
         }
         Err(error) => {
-            discard(&store, &final_path, entry.cover.as_deref()).await;
+            undo_import(&store, id, &final_path, previous.is_some(), set_aside.then_some(&aside), entry.cover.as_deref()).await;
             Err(error.into())
+        }
+    }
+}
+
+/// Titre pas enregistré : mise à jour de la qualité annulée, il garde son fichier d'avant (remis en place s'il avait été
+/// mis de côté) ; nouveau titre, ses fichiers partent.
+async fn undo_import(store: &OfflineStore, id: i64, audio: &Path, update: bool, aside: Option<&PathBuf>, cover: Option<&str>) {
+    if !update {
+        discard(store, audio, cover).await;
+        return;
+    }
+    let _ = tokio::fs::remove_file(audio).await;
+    if let Some(aside) = aside {
+        // Supprimé des téléchargements entre-temps : son ancien fichier part aussi (sinon, orphelin jusqu'au lancement).
+        if store.entries.read().is_ok_and(|entries| entries.contains_key(&id)) {
+            let _ = tokio::fs::rename(aside, audio).await;
+        } else {
+            let _ = tokio::fs::remove_file(aside).await;
         }
     }
 }
@@ -1855,6 +1905,15 @@ async fn valid_audio(path: &Path, ext: &str) -> io::Result<bool> {
         "flac" => count == header.len() && &header == b"fLaC",
         _ => count >= 3 && (&header[..3] == b"ID3" || header[0] == 0xff && header[1] & 0xe0 == 0xe0),
     })
+}
+
+/// Titre téléchargé déjà dans la qualité `wanted` (« FLAC », « MP3 320 », « MP3 128 », comme `format_label`). Fiche
+/// sans qualité notée (anciens téléchargements) : jugée sur son format seulement, pour ne rien retélécharger pour rien.
+pub fn in_quality(entry: &OfflineTrack, wanted: &str) -> bool {
+    match entry.info.quality.as_deref() {
+        Some(quality) => quality == wanted,
+        None => (entry.ext == "flac") == (wanted == "FLAC"),
+    }
 }
 
 /// Adresse de l'image vide du serveur d'images de Deezer.
@@ -2704,6 +2763,55 @@ mod tests {
         let stored = store.collections.read().unwrap().get("playlist:10").unwrap().cover_url.clone();
         assert_eq!(stored, Some(original_url));
         assert!(root.join(relative).exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_file_set_aside_by_an_interrupted_update_is_put_back() {
+        let root = root("quality-crash");
+        let store = OfflineStore::open(root.clone()).unwrap();
+        insert_file(&store, 42);
+        drop(store);
+        // Arrêt net juste après la mise de côté (même format) : le titre n'a plus que `42.old`.
+        std::fs::rename(audio_path(&root, 42, "mp3"), root.join("audio/42.old")).unwrap();
+        let store = OfflineStore::open(root.clone()).unwrap();
+        assert!(store.local(42).is_some(), "toujours téléchargé");
+        assert!(!root.join("audio/42.old").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_quality_update_replaces_the_file_only_once_saved() {
+        let root = root("quality-update");
+        let store = OfflineStore::open(root.clone()).unwrap();
+        let api = Arc::new(DeezerClient::new().unwrap());
+        // Titre 42 déjà téléchargé en FLAC, avec sa pochette.
+        std::fs::write(audio_path(&root, 42, "flac"), b"fLaCold").unwrap();
+        store.insert(OfflineTrack { info: info(42), ext: "flac".into(), bytes: 7, downloaded_at: 1, cover: Some("covers/x.jpg".into()), cover_version: COVER_VERSION, pinned: true, cover_tries: 0, cover_retry_at: 0 }).unwrap();
+
+        // Mise à jour annulée (plus attendue) : le titre garde son fichier.
+        let (pending, source, _) = native_pending(&root);
+        let result = import_download(api.clone(), store.clone(), pending, source).await;
+        assert!(matches!(result, Err(DownloadError::Cancelled)));
+        assert!(store.local(42).is_some_and(|t| t.ext == "flac"), "toujours écoutable");
+        assert!(!audio_path(&root, 42, "mp3").exists());
+
+        // Passage en MP3 : le nouveau fichier remplace l'ancien, la pochette est gardée.
+        let (pending, source, bytes) = native_pending(&root);
+        store.save_pending(pending.clone()).unwrap();
+        let entry = import_download(api.clone(), store.clone(), pending, source).await.unwrap();
+        assert_eq!((entry.ext.as_str(), entry.cover.as_deref()), ("mp3", Some("covers/x.jpg")));
+        assert!(!audio_path(&root, 42, "flac").exists(), "ancienne qualité retirée");
+        assert!(store.local(42).is_some_and(|t| t.ext == "mp3"));
+
+        // Même format, mise à jour annulée : le fichier mis de côté est remis en place.
+        let (pending, source, _) = native_pending(&root);
+        let mut other = bytes.clone();
+        other[10] ^= 0xff;
+        std::fs::write(&source, &other).unwrap();
+        assert!(import_download(api, store.clone(), pending, source).await.is_err());
+        assert_eq!(std::fs::read(audio_path(&root, 42, "mp3")).unwrap(), bytes);
+        assert!(!root.join("audio/42.old").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -17,6 +17,8 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         let coverURL: String?
         var preparedURL: String?
         var incomingPath: String?
+        /// Titre déjà téléchargé, retéléchargé dans la qualité choisie (Réglages › Qualité, mise à jour).
+        var upgrade: Bool?
 
         var track: Track {
             Track(id: id, title: title, artist: artist, album: "", durationS: 0, coverUrl: coverURL,
@@ -53,8 +55,20 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
     /// Réseau disponible (relevé du système, transmis par `Player`). Sans réseau, rien n'est préparé : avant, chaque
     /// essai échouait aussitôt et toute la file passait en « Échec » en quelques secondes.
     private var networkUp = true
+    /// Réseau actuel en données mobiles (et pas en Wi-Fi).
+    private var onCellular = false
+    /// Réglages › Qualité › « Télécharger en Wi-Fi seulement » : en données mobiles, rien n'est préparé ni téléchargé.
+    static let wifiOnlyKey = "downloadsWifiOnly"
+    private var wifiOnly: Bool { UserDefaults.standard.bool(forKey: Self.wifiOnlyKey) }
+    /// En données mobiles avec « Wi-Fi seulement » : les titres attendent le Wi-Fi.
+    private var waitingForWifi: Bool { wifiOnly && onCellular }
     /// Titres arrêtés par une coupure : gardés en file (pas en échec), ils repartent quand le réseau revient.
     private var waitingNetwork: Set<Int64> = []
+    /// Titres coupés en cours de route (réseau, app fermée de force) dont iOS a donné de quoi reprendre : ils repartent
+    /// de là où ils s'étaient arrêtés (voir `resumeDirectory`). Avant, ils reprenaient tout depuis le début.
+    private var resumable: Set<Int64> = []
+    /// Téléchargements en cours repris de cette façon (leur échec non réseau fait repartir de zéro, une fois).
+    private var fromResume: Set<Int64> = []
     /// Plus de place sur l'iPhone : la file est arrêtée (chaque titre suivant échouait pareil, après avoir été
     /// téléchargé pour rien), les titres restent en attente. Reprise au retour dans l'app, à une nouvelle demande, ou
     /// au lancement suivant.
@@ -85,6 +99,37 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
     private nonisolated static var storageDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("deezer-lite/Downloads", isDirectory: true)
+    }
+
+    /// Données de reprise, une par titre : à part d'`Incoming` (dont les fichiers non référencés sont effacés au lancement).
+    private nonisolated static var resumeDirectory: URL {
+        storageDirectory.appendingPathComponent("Resume", isDirectory: true)
+    }
+
+    private func resumeURL(_ id: Int64) -> URL { Self.resumeDirectory.appendingPathComponent("\(id).resume") }
+
+    /// Gardé pour reprendre plus tard ; l'adresse préparée et le titre attendu par le cœur restent.
+    private func keepForResume(_ id: Int64, _ data: Data) {
+        try? FileManager.default.createDirectory(at: Self.resumeDirectory, withIntermediateDirectories: true)
+        guard (try? data.write(to: resumeURL(id), options: .completeFileProtectionUntilFirstUserAuthentication)) != nil else { return }
+        resumable.insert(id)
+        save()
+        player?.downloadUpdated(DownloadUpdate(id: id, state: .queued, progress: 0, error: nil))
+    }
+
+    private func dropResume(_ id: Int64) {
+        guard resumable.remove(id) != nil else { return }
+        try? FileManager.default.removeItem(at: resumeURL(id))
+    }
+
+    /// Taille complète attendue du fichier : celle annoncée (réponse 200), ou le total de « Content-Range » d'une reprise
+    /// (réponse 206, seule la fin du fichier est envoyée).
+    private nonisolated static func expectedSize(_ response: URLResponse?) -> Int64? {
+        guard let http = response as? HTTPURLResponse else { return nil }
+        if http.statusCode == 206 {
+            return http.value(forHTTPHeaderField: "Content-Range").flatMap { $0.split(separator: "/").last }.flatMap { Int64($0) }
+        }
+        return http.expectedContentLength > 0 ? http.expectedContentLength : nil
     }
 
     private nonisolated static func incomingURL(id: Int64, taskIdentifier: Int) -> URL {
@@ -146,12 +191,32 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
     /// en attente repartent tout de suite ; sur le même réseau (iOS en redonne des nouvelles souvent), c'est la minuterie
     /// qui décide. Avant, chaque nouvelle relançait toute la file : sur un Wi-Fi sans Internet, l'attente grandissante
     /// entre deux essais ne servait à rien.
-    func networkChanged(up: Bool, newNetwork: Bool) {
+    func networkChanged(up: Bool, newNetwork: Bool, cellular: Bool) {
         let wasUp = networkUp
+        let wasCellular = onCellular
         networkUp = up
+        onCellular = cellular
+        // Passage Wi-Fi <-> données mobiles : la règle « Wi-Fi seulement » est appliquée aux téléchargements en cours.
+        if wasCellular != cellular { applyCellularRule() }
         guard up, !wasUp || (newNetwork && !waitingNetwork.isEmpty) else { return }
         networkRetryCount = 0 // nouveau réseau : on repart d'une attente courte
         resumeWaitingForNetwork()
+    }
+
+    /// Réglage « Wi-Fi seulement » changé dans les Réglages.
+    func wifiOnlyChanged() {
+        applyCellularRule()
+    }
+
+    /// En données mobiles, un téléchargement en cours qui ne suit plus le réglage repart de zéro avec le bon : autorisé en
+    /// données mobiles alors que « Wi-Fi seulement » est activé (arrêté, il attendra le Wi-Fi), ou l'inverse (il restait
+    /// bloqué jusqu'au Wi-Fi). En Wi-Fi, rien ne change : ils continuent. Puis la file repart (Wi-Fi retrouvé…).
+    private func applyCellularRule() {
+        if onCellular {
+            let stale = tasks.filter { $0.value.originalRequest?.allowsCellularAccess == wifiOnly }.map(\.key)
+            stale.forEach(requeue)
+        }
+        pump()
     }
 
     private func resumeWaitingForNetwork() {
@@ -189,6 +254,8 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
     /// Remis « En attente », sans passer en échec : adresse et fichier reçu oubliés, il repartira de zéro.
     private func requeue(_ id: Int64) {
         tasks.removeValue(forKey: id)?.cancel()
+        dropResume(id)
+        fromResume.remove(id)
         core?.cancelDownload(id: id)
         if var job = jobs[id] {
             if let path = job.incomingPath { try? FileManager.default.removeItem(atPath: path) }
@@ -212,10 +279,15 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         return ns.domain == NSURLErrorDomain && codes.contains(ns.code)
     }
 
-    /// Titre arrêté par le réseau : remis en file (« En attente »), sans passer en échec.
-    private func waitForNetwork(_ id: Int64) {
+    /// Titre arrêté par le réseau : remis en file (« En attente »), sans passer en échec. Avec des données de reprise, il
+    /// repartira de là où il s'était arrêté (adresse préparée gardée) ; sinon, de zéro.
+    private func waitForNetwork(_ id: Int64, resumeData: Data? = nil) {
         waitingNetwork.insert(id)
-        requeue(id)
+        if let resumeData {
+            keepForResume(id, resumeData)
+        } else {
+            requeue(id)
+        }
         // Réseau présent mais Deezer injoignable : nouvel essai plus tard (pas en boucle).
         if networkRetry == nil {
             let delay = min(Self.networkRetryDelay * (1 << min(networkRetryCount, 5)), .seconds(900))
@@ -251,6 +323,7 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
                 failed.remove(track.id)
                 renewed.remove(track.id)
                 if let path = existing.incomingPath { try? FileManager.default.removeItem(atPath: path) }
+                dropResume(track.id)
                 existing.preparedURL = nil
                 existing.incomingPath = nil
                 jobs[track.id] = existing
@@ -264,6 +337,28 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         }
         save()
         pump()
+        if waitingForWifi, !accepted.isEmpty {
+            player?.showToast(tr("Téléchargement au retour du Wi-Fi (réglage « Wi-Fi seulement »)."), seconds: 4)
+        }
+        return accepted
+    }
+
+    /// Titres déjà téléchargés à retélécharger dans la qualité choisie (Réglages › Qualité). Ils restent écoutables :
+    /// le nouveau fichier ne remplace l'ancien qu'une fois reçu en entier (voir `import_download` dans le cœur).
+    func enqueueUpgrade(_ tracks: [Track]) -> [Track] {
+        storageFull = false
+        var accepted: [Track] = []
+        for track in tracks where jobs[track.id] == nil {
+            jobs[track.id] = Job(id: track.id, title: track.title, artist: track.artist,
+                                 coverURL: track.coverUrl, preparedURL: nil, incomingPath: nil, upgrade: true)
+            order.append(track.id)
+            accepted.append(track)
+        }
+        save()
+        pump()
+        if waitingForWifi, !accepted.isEmpty {
+            player?.showToast(tr("Téléchargement au retour du Wi-Fi (réglage « Wi-Fi seulement »)."), seconds: 4)
+        }
         return accepted
     }
 
@@ -277,6 +372,8 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         for id in cancelled {
             preparations.removeValue(forKey: id)?.cancel()
             tasks.removeValue(forKey: id)?.cancel()
+            dropResume(id)
+            fromResume.remove(id)
             if let path = jobs[id]?.incomingPath { try? FileManager.default.removeItem(atPath: path) }
             jobs[id] = nil
             failed.remove(id)
@@ -308,6 +405,9 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         failed.removeAll()
         renewed.removeAll()
         waitingNetwork.removeAll()
+        resumable.removeAll()
+        fromResume.removeAll()
+        try? FileManager.default.removeItem(at: Self.resumeDirectory)
         networkRetry?.cancel()
         networkRetry = nil
         deferred.removeAll()
@@ -333,7 +433,8 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         for event in pending {
             received(id: event.id, task: event.task, file: event.file, error: event.error)
         }
-        pump()
+        // Tâches d'avant la relance : remises à la règle « Wi-Fi seulement » si besoin (puis la file repart).
+        applyCellularRule()
         finishBackgroundEventsIfPossible()
         // Titres préparés restés sans nouvelles pendant le délai de grâce : relancés ensuite.
         Task { [weak self] in
@@ -352,7 +453,8 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
     private func pump() {
         guard !restoring, !storageFull, core != nil else { return }
         for id in order {
-            if !finishing.contains(id), player?.downloadedIds.contains(id) == true {
+            // Déjà téléchargé : retiré de la file, sauf s'il y est pour une mise à jour de la qualité.
+            if !finishing.contains(id), jobs[id]?.upgrade != true, player?.downloadedIds.contains(id) == true {
                 removeRecoveredJob(id)
                 continue
             }
@@ -361,19 +463,39 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
                   tasks[id] == nil, let job = jobs[id], !awaitingLateDelivery(job) else { continue }
             if job.incomingPath != nil {
                 finish(job)
-            } else if deezerSessionReady, networkUp {
+            } else if resumable.contains(id), job.preparedURL != nil {
+                // Coupé en cours de route : repris là où il en était (adresse déjà préparée, pas besoin de Deezer).
+                if networkUp, !waitingForWifi { resumeDownload(job) }
+            } else if deezerSessionReady, networkUp, !waitingForWifi {
                 prepare(job)
             }
         }
     }
 
+    /// Reprend un téléchargement coupé là où il s'était arrêté. Données de reprise illisibles : il repartira de zéro.
+    private func resumeDownload(_ job: Job) {
+        let id = job.id
+        let data = try? Data(contentsOf: resumeURL(id))
+        dropResume(id)
+        guard let data else {
+            pump()
+            return
+        }
+        let task = session.downloadTask(withResumeData: data)
+        task.taskDescription = String(id)
+        tasks[id] = task
+        fromResume.insert(id)
+        task.resume()
+    }
+
     private func prepare(_ job: Job) {
         guard let core else { return }
         let id = job.id
+        dropResume(id) // nouvelle adresse : l'ancienne reprise ne vaut plus
         player?.downloadUpdated(DownloadUpdate(id: id, state: .queued, progress: 0, error: nil))
         preparations[id] = Task { [weak self] in
             do {
-                let prepared = try await core.prepareDownload(id: id)
+                let prepared = try await core.prepareDownload(id: id, replace: job.upgrade == true)
                 guard let self, !Task.isCancelled, self.jobs[id] != nil else {
                     if self?.jobs[id] == nil { core.cancelDownload(id: id) }
                     self?.finishBackgroundEventsIfPossible()
@@ -412,7 +534,11 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         // relance, un fichier livré pendant que l'app était fermée.
         writeActive()
         save()
-        let task = session.downloadTask(with: url)
+        // « Wi-Fi seulement » : si le Wi-Fi est perdu en cours de route, iOS met ce téléchargement en attente au lieu de
+        // passer en données mobiles.
+        var request = URLRequest(url: url)
+        request.allowsCellularAccess = !wifiOnly
+        let task = session.downloadTask(with: request)
         task.taskDescription = String(job.id)
         tasks[job.id] = task
         task.resume()
@@ -440,11 +566,21 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
             finishBackgroundEventsIfPossible()
             return
         }
+        let wasResumed = fromResume.remove(id) != nil
         if let error {
+            // Ce qu'iOS a déjà reçu, pour reprendre plus tard là où il en était (coupure, app fermée de force).
+            let resumeData = (error as NSError).userInfo[NSURLSessionDownloadTaskResumeDataKey] as? Data
             // Téléchargement annulé par iOS, pas par l'app (app fermée de force depuis le sélecteur d'apps : iOS annule
             // alors toutes ses tâches et le signale au lancement suivant). Les annulations de l'app retirent la tâche
-            // avant de l'annuler et n'arrivent jamais ici. Le titre repart simplement de la file, sans passer en échec.
+            // avant de l'annuler et n'arrivent jamais ici. Le titre repart simplement de la file, sans passer en échec :
+            // de là où il en était si iOS le permet, sinon de zéro.
             if (error as NSError).domain == NSURLErrorDomain, (error as NSError).code == NSURLErrorCancelled {
+                if let resumeData, job.preparedURL != nil {
+                    keepForResume(id, resumeData)
+                    pump()
+                    finishBackgroundEventsIfPossible()
+                    return
+                }
                 core?.cancelDownload(id: id)
                 job.preparedURL = nil
                 jobs[id] = job
@@ -467,7 +603,17 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
                 return
             }
             if isNetworkError(error) {
-                waitForNetwork(id)
+                waitForNetwork(id, resumeData: job.preparedURL == nil ? nil : resumeData)
+                return
+            }
+            // Reprise refusée (données de reprise périmées, fichier changé chez Deezer…) : une fois de zéro.
+            if wasResumed {
+                core?.cancelDownload(id: id)
+                job.preparedURL = nil
+                jobs[id] = job
+                save()
+                pump()
+                finishBackgroundEventsIfPossible()
                 return
             }
             fail(id, error: error)
@@ -513,7 +659,9 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
                 guard let self else { return }
                 self.finishing.remove(id)
                 guard self.jobs[id]?.incomingPath == path else {
-                    try? core.removeDownload(id: id)
+                    // Annulé pendant le rangement. Mise à jour de la qualité : le titre reste téléchargé (avant, il était
+                    // supprimé en entier).
+                    if job.upgrade != true { try? core.removeDownload(id: id) }
                     self.pump()
                     self.finishBackgroundEventsIfPossible()
                     return
@@ -524,13 +672,14 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
                 self.order.removeAll { $0 == id }
                 self.save()
                 self.player?.downloadCompleted(track)
+                if job.upgrade == true { self.player?.qualityUpdateFinished(track) }
                 self.pump()
                 self.finishBackgroundEventsIfPossible()
             } catch {
                 guard let self else { return }
                 self.finishing.remove(id)
                 if self.jobs[id]?.incomingPath != path {
-                    try? core.removeDownload(id: id)
+                    if job.upgrade != true { try? core.removeDownload(id: id) }
                     self.pump()
                     self.finishBackgroundEventsIfPossible()
                 } else {
@@ -551,6 +700,8 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
 
     private func fail(_ id: Int64, message: String) {
         tasks.removeValue(forKey: id)?.cancel()
+        dropResume(id)
+        fromResume.remove(id)
         core?.cancelDownload(id: id)
         if var job = jobs[id] {
             if let path = job.incomingPath { try? FileManager.default.removeItem(atPath: path) }
@@ -598,6 +749,16 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
             let current = incoming.appendingPathComponent((path as NSString).lastPathComponent).path
             if current != path { jobs[id]?.incomingPath = current }
         }
+        // Reprises gardées : seulement celles d'un titre encore en file avec son adresse préparée.
+        if let files = try? FileManager.default.contentsOfDirectory(at: Self.resumeDirectory, includingPropertiesForKeys: nil) {
+            for file in files {
+                if let id = Int64(file.deletingPathExtension().lastPathComponent), jobs[id]?.preparedURL != nil {
+                    resumable.insert(id)
+                } else {
+                    try? FileManager.default.removeItem(at: file)
+                }
+            }
+        }
         let referenced = Set(jobs.values.compactMap(\.incomingPath))
         if let files = try? FileManager.default.contentsOfDirectory(at: incoming, includingPropertiesForKeys: nil) {
             for file in files where !referenced.contains(file.path) {
@@ -608,6 +769,7 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
 
     private func removeRecoveredJob(_ id: Int64) {
         if let path = jobs[id]?.incomingPath { try? FileManager.default.removeItem(atPath: path) }
+        dropResume(id)
         core?.cancelDownload(id: id)
         jobs[id] = nil
         order.removeAll { $0 == id }
@@ -729,8 +891,9 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
                 throw NSError(domain: Self.errorDomain, code: response.statusCode,
                               userInfo: [NSLocalizedDescriptionKey: tr("Le serveur a répondu HTTP %@", String(response.statusCode))])
             }
-            let expected = downloadTask.countOfBytesExpectedToReceive
-            if expected > 0, downloadTask.countOfBytesReceived != expected {
+            // Comparé à la taille du fichier reçu : avec une reprise, les compteurs d'iOS ne portent que sur la fin du fichier.
+            let size = (try? location.resourceValues(forKeys: [.fileSizeKey]))?.fileSize.map(Int64.init)
+            if let expected = Self.expectedSize(downloadTask.response), let size, size != expected {
                 throw NSError(domain: Self.errorDomain, code: 1,
                               userInfo: [NSLocalizedDescriptionKey: tr("Le fichier téléchargé est incomplet")])
             }

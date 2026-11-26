@@ -186,7 +186,7 @@ final class Player {
     private func networkChanged(signature: String, cellular: Bool) {
         defer { networkSignature = signature }
         // Sans réseau, les téléchargements attendent au lieu d'échouer ; ils repartent à son retour.
-        BackgroundDownloadManager.shared.networkChanged(up: signature != "none", newNetwork: networkSignature != signature)
+        BackgroundDownloadManager.shared.networkChanged(up: signature != "none", newNetwork: networkSignature != signature, cellular: cellular)
         // Premier relevé au lancement : rien à réinitialiser.
         guard let previous = networkSignature, previous != signature else {
             if onCellular != cellular { onCellular = cellular; applyQuality() }
@@ -229,6 +229,59 @@ final class Player {
         cellularQuality = q
         UserDefaults.standard.set(Player.raw(q), forKey: "cellularQuality")
         applyQuality(reload: true)
+    }
+
+    // MARK: Mise à jour de la qualité des titres téléchargés (Réglages › Qualité)
+
+    /// Titres téléchargés dans une autre qualité que celle des téléchargements, sans ceux que Deezer n'a pas mieux
+    /// (déjà retéléchargés pour rien : plus proposés).
+    func downloadsInOtherQuality() async -> [QualityChange] {
+        guard let core else { return [] }
+        let skip = qualityUnavailable(downloadQuality)
+        let all = await Task.detached(priority: .userInitiated) { core.downloadsInOtherQuality() }.value
+        return all.filter { !skip.contains($0.track.id) }
+    }
+
+    /// Retélécharge ces titres dans la qualité des téléchargements, par la file des téléchargements (progression, « Tout
+    /// arrêter », « Wi-Fi seulement »). Ils restent écoutables pendant ce temps.
+    func updateDownloadQuality(_ changes: [QualityChange]) {
+        let accepted = BackgroundDownloadManager.shared.enqueueUpgrade(changes.map(\.track))
+        var nextTracks = downloadTracks
+        var nextStates = downloadStates
+        for track in accepted {
+            nextTracks[track.id] = track
+            nextStates[track.id] = DownloadUpdate(id: track.id, state: .queued, progress: 0, error: nil)
+        }
+        downloadTracks = nextTracks
+        downloadStates = nextStates
+        syncDownloadRows(accepted.map(\.id))
+        showToast(accepted.isEmpty ? tr("Déjà en cours") : tr("%@ titres à mettre à jour", "\(accepted.count)"))
+    }
+
+    /// Mise à jour finie dans une autre qualité que celle demandée : Deezer n'a pas mieux pour ce titre, il n'est plus
+    /// proposé (sinon il serait retéléchargé à chaque fois pour rien).
+    func qualityUpdateFinished(_ track: Track) {
+        let wanted = downloadQuality
+        guard track.quality != Self.label(wanted) else { return }
+        var ids = qualityUnavailable(wanted)
+        ids.insert(track.id)
+        UserDefaults.standard.set(ids.map { NSNumber(value: $0) }, forKey: Self.qualityUnavailableKey(wanted))
+    }
+
+    private func qualityUnavailable(_ q: AudioQuality) -> Set<Int64> {
+        let saved = UserDefaults.standard.array(forKey: Self.qualityUnavailableKey(q)) as? [NSNumber] ?? []
+        return Set(saved.map(\.int64Value))
+    }
+
+    private static func qualityUnavailableKey(_ q: AudioQuality) -> String { "qualityUnavailable-\(raw(q))" }
+
+    /// Qualité telle que le cœur la note sur les titres (`format_label`).
+    private static func label(_ q: AudioQuality) -> String {
+        switch q {
+        case .flac: "FLAC"
+        case .mp3High: "MP3 320"
+        case .mp3Low: "MP3 128"
+        }
     }
 
     func setDownloadQuality(_ q: AudioQuality) {
@@ -438,19 +491,22 @@ final class Player {
     var downloadQueueOrder: [Int64] { BackgroundDownloadManager.shared.queueOrder }
 
     func cancelDownload(_ id: Int64) {
-        skipDownloads([id]) // annulé à la main : pas relancé par la synchro
+        // Annulé à la main : pas relancé par la synchro. Sauf un titre déjà téléchargé (mise à jour de la qualité
+        // annulée) : il reste téléchargé, et la synchro de sa playlist doit continuer à le garder.
+        if !downloadedIds.contains(id) { skipDownloads([id]) }
         BackgroundDownloadManager.shared.cancel(id)
     }
 
     func cancelAllDownloads() {
-        skipDownloads(BackgroundDownloadManager.shared.queueOrder) // « Tout arrêter » : rien n'est relancé tout seul
+        // « Tout arrêter » : rien n'est relancé tout seul (titres déjà téléchargés en mise à jour : gardés, voir plus haut).
+        skipDownloads(BackgroundDownloadManager.shared.queueOrder.filter { !downloadedIds.contains($0) })
         BackgroundDownloadManager.shared.stopAll()
         showToast(tr("Téléchargements arrêtés"))
     }
 
     /// Retire de la liste les téléchargements en échec.
     func clearFailedDownloads() {
-        skipDownloads(downloadStates.filter { $0.value.state == .failed }.map(\.key)) // retirés à la main
+        skipDownloads(downloadStates.filter { $0.value.state == .failed && !downloadedIds.contains($0.key) }.map(\.key)) // retirés à la main
         BackgroundDownloadManager.shared.clearFailed()
     }
 

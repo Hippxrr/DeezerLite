@@ -365,6 +365,13 @@ pub struct PreparedDownload {
     pub url: String,
 }
 
+/// Titre téléchargé dans une autre qualité que celle choisie pour les téléchargements, et la place qu'il prend.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct QualityChange {
+    pub track: Track,
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 pub struct DownloadCollection {
     pub key: String,
@@ -1046,8 +1053,9 @@ impl Core {
         }
     }
 
-    pub async fn prepare_download(&self, id: i64) -> Result<PreparedDownload, CoreError> {
-        if self.offline.contains(id) {
+    /// `replace` : titre déjà téléchargé, retéléchargé dans la qualité choisie (Réglages › Qualité, mise à jour).
+    pub async fn prepare_download(&self, id: i64, replace: bool) -> Result<PreparedDownload, CoreError> {
+        if !replace && self.offline.contains(id) {
             return Err(CoreError::Api("titre déjà téléchargé".into()));
         }
         let mut info = match self.lookup(&[id]) {
@@ -1173,6 +1181,22 @@ impl Core {
 
     pub fn remove_download_collection(&self, kind: String, id: u64) -> Result<Vec<i64>, CoreError> {
         self.offline.remove_collection(&kind, self.stored_id(&kind, id)).map_err(|e| CoreError::Api(e.to_string()))
+    }
+
+    /// Titres téléchargés qui ne sont pas dans la qualité choisie pour les téléchargements (Réglages › Qualité, « Mettre à
+    /// jour »). Parcourt toutes les fiches : à appeler hors du fil principal.
+    pub fn downloads_in_other_quality(&self) -> Vec<QualityChange> {
+        let wanted = match self.download_quality.read().map(|q| *q).unwrap_or(Quality::Flac) {
+            Quality::Flac => "FLAC",
+            Quality::Mp3320 => "MP3 320",
+            Quality::Mp3128 => "MP3 128",
+        };
+        self.offline
+            .list()
+            .into_iter()
+            .filter(|entry| entry.info.id > 0 && !dz_offline::in_quality(entry, wanted))
+            .map(|entry| QualityChange { track: Track::from(&entry.info), bytes: entry.bytes })
+            .collect()
     }
 
     pub fn cancel_download(&self, id: i64) {
