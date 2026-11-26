@@ -1112,6 +1112,55 @@ final class Player {
         for (tab, list) in copy.library.enumerated() where library[tab] == nil && !list.isEmpty { library[tab] = list }
         if lovedIds.isEmpty { lovedIds = Set(copy.loved) }
         if lovedCard == nil { lovedCard = copy.lovedCard }
+        // Pochettes du premier écran lues en mémoire avant que l'écran de lancement ne parte (0,7 s au plus ; lui-même part
+        // au plus tard 1 s après le lancement). Avant, elles apparaissaient une à une juste après : sur un iPhone plus lent,
+        // l'accueil semblait pas fini.
+        let covers = firstScreenCovers()
+        guard !covers.isEmpty else { return }
+        await Self.wait(atMost: .milliseconds(700)) {
+            await withTaskGroup(of: Void.self) { group in
+                for (url, pixels) in covers { group.addTask { _ = await CoverLoader.shared.image(url: url, pixels: pixels) } }
+            }
+        }
+    }
+
+    /// Pochettes visibles à l'ouverture de l'accueil, à la taille où elles s'affichent : titres aimés, épinglés, et les 3
+    /// premières cartes des 2 premières rangées.
+    private func firstScreenCovers() -> [(String, Int)] {
+        let scale = UIScreen.main.scale
+        let small = Int(64 * scale), large = Int(148 * scale)
+        var out: [(String, Int)] = []
+        if let loved = lovedCover { out.append((loved, small)) }
+        for item in homeItems.prefix(8) {
+            if case .pin(let pin) = item, let url = coverURL(pin.card) { out.append((url, small)) }
+        }
+        if let all = home {
+            for shelf in reco.shelves(all).prefix(2) {
+                let side = shelf.kind == "track-mixes" ? small : large
+                out += shelf.items.prefix(3).compactMap { coverURL($0) }.map { ($0, side) }
+            }
+        }
+        return out
+    }
+
+    /// Attend la fin de `work`, au plus `limit` : passé ce délai on n'attend plus, et le travail continue seul.
+    private static func wait(atMost limit: Duration, _ work: @escaping @Sendable () async -> Void) async {
+        final class Once: @unchecked Sendable {
+            private let lock = NSLock()
+            private var done = false
+            func run(_ body: () -> Void) { lock.withLock { if !done { done = true; body() } } }
+        }
+        let once = Once()
+        await withCheckedContinuation { (finished: CheckedContinuation<Void, Never>) in
+            Task.detached(priority: .userInitiated) {
+                await work()
+                once.run { finished.resume() }
+            }
+            Task.detached {
+                try? await Task.sleep(for: limit)
+                once.run { finished.resume() }
+            }
+        }
     }
 
     /// L'app rouverte après qu'iOS l'a fermée : même titre, même file, même position, en pause.
@@ -1380,7 +1429,7 @@ final class Player {
             // l'ARL rangé avant (les autres données de l'app, elles, restent). Rien à réparer : on se reconnecte, comme
             // dans toute app installée hors App Store. Autre cause vue : une autre app signée avec le même certificat qui vide
             // tout le trousseau partagé (Sono 2.4.0 et plus, à chaque lancement).
-            message = tr("Session introuvable sur ce téléphone (app réinstallée ou certificat changé) : reconnecte-toi.")
+            message = tr("Session introuvable sur ce téléphone (app réinstallée, certificat changé ou trousseau vidé par une autre app) : reconnecte-toi.")
         }
         UserDefaults.standard.set(false, forKey: Self.sessionSavedKey)
     }

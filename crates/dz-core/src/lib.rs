@@ -1085,10 +1085,16 @@ impl Actor {
     /// dans le lecteur sans retarder la lecture.
     /// Vérifie, une fois par titre, que sa pochette existe encore chez Deezer ; sinon la remplace par celle de l'album.
     fn check_cover(&mut self, id: i64) {
-        if id <= 0 || id == LOCAL_ID || !self.covers_checked.insert(id) {
+        if id <= 0 || id == LOCAL_ID || self.covers_checked.contains(&id) {
             return;
         }
         let Some((url, album)) = self.infos.get(&id).and_then(|i| Some((i.cover_url.clone()?, i.album_id))) else { return };
+        // Titre téléchargé : sa pochette est un fichier du téléphone, rien à vérifier chez Deezer (avant, ses essais
+        // attendaient ~2 min pour rien). Pas retenu comme vérifié : joué plus tard depuis Deezer, il le sera.
+        if !url.starts_with("http") {
+            return;
+        }
+        self.covers_checked.insert(id);
         let (api, tx) = (self.api.clone(), self.cmd_tx.clone());
         tokio::spawn(async move {
             // Refaite après 10 s, 30 s puis 90 s si rien n'a été trouvé : un réseau faible au mauvais moment laissait sinon

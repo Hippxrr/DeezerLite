@@ -182,21 +182,20 @@ struct LoginView: View {
 
     var body: some View {
         ZStack {
-            LinearGradient(colors: [Theme.accent.opacity(0.55), Theme.background, Theme.background], startPoint: .top, endPoint: .bottom)
-                .ignoresSafeArea()
+            // Fond uni (avant : un dégradé de la couleur de l'app).
+            Theme.background.ignoresSafeArea()
             // Défilable : sur un petit iPhone (SE), le champ arl passait sous le clavier. Toute la hauteur quand il y a la
             // place (même mise en page qu'avant).
             GeometryReader { geo in
                 ScrollView {
                     VStack(spacing: 22) {
                         Spacer()
-                        Image(systemName: "waveform")
-                            .font(.system(size: 46, weight: .semibold))
-                            .foregroundStyle(Theme.onAccent)
-                            .frame(width: 96, height: 96)
-                            .background(Theme.accent,
-                                        in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-                            .shadow(color: Theme.accent.opacity(0.5), radius: 24, y: 10)
+                        // Logo de l'app, le même que sur l'écran de lancement (avant : une icône « vague » du système).
+                        Image("LaunchLogo")
+                            .resizable()
+                            .scaledToFit()
+                            .frame(width: 110, height: 110)
+                            .accessibilityHidden(true)
                         VStack(spacing: 6) {
                             Text("Deezer Lite").font(.largeTitle.bold())
                             Text(tr("Ta musique Deezer, légère et rapide.")).font(.subheadline).foregroundStyle(.secondary)
@@ -617,8 +616,9 @@ struct TabStack<Content: View>: View {
         // iOS 27.0.1, barre de l'app, lancement déjà connecté : la pile posait sa première page à une largeur fausse
         // (174 points au lieu de 402) et ne la recalculait jamais. L'accueil restait tout noir, seule la barre d'onglets
         // visible. iOS 27.2 la corrige seul en un instant : la pile n'est reconstruite que si l'écart dure (0,6 s), deux
-        // fois au plus. Rien d'autre à faire quand les largeurs sont égales.
-        .task(id: rootWidth - stackWidth) {
+        // fois au plus. Rien d'autre à faire quand les largeurs sont égales. Relancé aussi après chaque reconstruction :
+        // avant, la page retombée sur la même largeur fausse n'avait jamais son second essai.
+        .task(id: "\(rootWidth - stackWidth)|\(rebuilds)") {
             guard abs(rootWidth - stackWidth) > 1, rootWidth > 0, stackWidth > 0, path.isEmpty, rebuilds < 2 else { return }
             try? await Task.sleep(for: .milliseconds(600))
             guard !Task.isCancelled else { return }
