@@ -92,6 +92,8 @@ struct DetailView: View {
     @Environment(\.dismiss) private var dismiss
     let route: Route
     @State private var detail: Detail?
+    /// Numéro des changements de MP3 déjà pris en compte par cette page (voir le rechargement de la page MP3).
+    @State private var seenMp3Revision = Player.shared.mp3Revision
     @State private var failed = false
     /// Couleur dominante de la pochette : dégradé derrière l'en-tête.
     @State private var tint: Color = .clear
@@ -379,8 +381,11 @@ struct DetailView: View {
         }
         .task { await load(force: false) }
         // Page MP3 : rechargée après un import, une modification ou une suppression.
+        // Seulement si le numéro a changé depuis : `task(id:)` part aussi à l'ouverture, et la page MP3 se chargeait deux fois.
         .task(id: player.mp3Revision) {
-            if detail?.kind == "mp3", player.mp3Revision > 0 { await load(force: true) }
+            guard player.mp3Revision != seenMp3Revision else { return }
+            seenMp3Revision = player.mp3Revision
+            if detail?.kind == "mp3" { await load(force: true) }
         }
         // Copie hors ligne : un titre supprimé de ce téléphone disparaît aussi de la page.
         .onChange(of: offlineIds) { _, ids in

@@ -142,6 +142,15 @@ impl EqState {
         }
     }
 
+    /// Réglage pris d'un coup, sans montée : rendu audio recréé (iPhone, à chaque saut ou titre), dont le son démarre déjà
+    /// par un fondu. Avant, l'égaliseur y remontait depuis « plat » à chaque fois (graves absents un instant, jusqu'à 2 s
+    /// écran verrouillé).
+    pub fn start_at(&mut self, target: [i32; BANDS]) {
+        while self.applied != target {
+            self.set(target);
+        }
+    }
+
     /// Vrai si au moins une bande modifie le son (vérifié par les tests ; le limiteur de la sortie, lui, est toujours là).
     #[cfg(test)]
     pub fn active(&self) -> bool {
@@ -176,6 +185,17 @@ impl EqState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn start_at_applies_the_setting_at_once() {
+        let mut st = EqState::new(44_100, 2);
+        st.start_at([120, -60, 0, 30, -120]);
+        assert_eq!(st.applied, [120, -60, 0, 30, -120]);
+        assert!(st.active());
+        // Déjà atteint : un bloc suivant ne change plus rien.
+        st.set([120, -60, 0, 30, -120]);
+        assert_eq!(st.applied, [120, -60, 0, 30, -120]);
+    }
 
     /// Réglage atteint (le gain avance par petits pas, un par bloc audio).
     fn settle(st: &mut EqState, gains: [i32; BANDS]) {

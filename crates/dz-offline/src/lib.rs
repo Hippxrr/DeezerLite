@@ -161,7 +161,7 @@ enum LyricsFetch {
     /// Paroles (ou absence de paroles) enregistrées sur le téléphone.
     Stored,
     /// Pas de réseau ou pas de session : on arrête, ce sera pour le prochain lancement.
-    Offline,
+    NetworkDown,
     /// Autre échec pour ce titre seulement : réessayé au prochain lancement.
     Failed,
 }
@@ -175,6 +175,11 @@ const EMPTY_PICTURE: &str = "d41d8cd98f00b204e9800998ecf8427e";
 /// vérifiée à partir de l'adresse d'origine chez Deezer. Une version 2 a pu garder la réparation d'un autre titre
 /// du même album retiré (Chanel / Jr Vini) : les titres en version < 3 sont revérifiés une fois (`repair_covers`).
 const COVER_VERSION: u8 = 3;
+
+/// Réseau coupé (ou serveur d'images en panne) pendant un téléchargement de pochette : on ne sait pas si l'image existe.
+/// Avant, c'était compté comme « pas d'image » : le prochain essai était repoussé d'un jour, puis de 7, puis de 30.
+#[derive(Debug, PartialEq)]
+struct NetworkDown;
 
 /// Résultat de la vérification de la pochette d'un titre téléchargé.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1311,7 +1316,7 @@ pub async fn store_collection_removing(
                 h.finish()
             };
             let relative = PathBuf::from("covers").join(format!("collection-{safe_kind}-{id}-{tag:016x}.jpg"));
-            if let Some(cover) = download_image(&api, &store.root, url, relative).await {
+            if let Ok(Some(cover)) = download_image(&api, &store.root, url, relative).await {
                 store.update_collection_cover(&kind, id, cover)?;
             }
         }
@@ -1542,9 +1547,11 @@ fn fetch_extras(api: Arc<DeezerClient>, store: OfflineStore, entry: OfflineTrack
         let id = entry.info.id;
         let mut info = entry.info;
         let original = info.cover_url.clone();
-        let cover = download_cover(&api, &store.root, &mut info).await;
+        let fetched = download_cover(&api, &store.root, &mut info).await;
         let connected = api.session().await.is_some();
-        if cover.is_some() || connected {
+        // Réseau coupé pendant le téléchargement de la pochette : rien de noté, la vérification suivante s'en charge.
+        let cover = fetched.as_ref().ok().cloned().flatten();
+        if cover.is_some() || (connected && fetched.is_ok()) {
             let url = info.cover_url.filter(|url| original.as_ref() != Some(url));
             let update = CoverUpdate { id, cover: cover.clone(), url, failed: cover.is_none() };
             if let Ok(replaced) = store.apply_cover_updates(&[update]) {
@@ -1582,10 +1589,10 @@ async fn fetch_lyrics_if_connected(api: &DeezerClient, store: &OfflineStore, id:
 async fn fetch_lyrics(api: &DeezerClient, store: &OfflineStore, id: i64) -> LyricsFetch {
     let found = match api.lyrics(id).await {
         Ok(found) => found,
-        Err(dz_api::DeezerError::Http(e)) if e.is_connect() || e.is_timeout() => return LyricsFetch::Offline,
-        Err(dz_api::DeezerError::InvalidArl | dz_api::DeezerError::SessionExpired) => return LyricsFetch::Offline,
+        Err(dz_api::DeezerError::Http(e)) if e.is_connect() || e.is_timeout() => return LyricsFetch::NetworkDown,
+        Err(dz_api::DeezerError::InvalidArl | dz_api::DeezerError::SessionExpired) => return LyricsFetch::NetworkDown,
         // Trop de requêtes : Deezer refuse tout pendant un moment, inutile de continuer avec les titres suivants.
-        Err(dz_api::DeezerError::Gateway(g)) if g.to_ascii_uppercase().contains("QUOTA") => return LyricsFetch::Offline,
+        Err(dz_api::DeezerError::Gateway(g)) if g.to_ascii_uppercase().contains("QUOTA") => return LyricsFetch::NetworkDown,
         Err(_) => return LyricsFetch::Failed,
     };
     // Titre supprimé pendant la demande : rien n'est gardé (voir `save_lyrics`).
@@ -1631,7 +1638,7 @@ pub async fn repair_lyrics(api: Arc<DeezerClient>, store: OfflineStore) {
     // Par petits paquets : quelques requêtes à la fois, et arrêt dès que le réseau manque.
     for chunk in missing.chunks(3) {
         let results = futures_util::future::join_all(chunk.iter().map(|id| fetch_lyrics(&api, &store, *id))).await;
-        if results.contains(&LyricsFetch::Offline) {
+        if results.contains(&LyricsFetch::NetworkDown) {
             return;
         }
     }
@@ -1703,18 +1710,23 @@ async fn check_covers(api: &DeezerClient, store: &OfflineStore, entries: Vec<Off
             let root = store.root.clone();
             let id = entry.info.id;
             async move {
-                check_cover(api, &root, entry, original).await.unwrap_or(CoverUpdate { id, cover: None, url: None, failed: true })
+                check_cover(api, &root, entry, original).await.map(|u| u.unwrap_or(CoverUpdate { id, cover: None, url: None, failed: true }))
             }
         })
         .buffer_unordered(3)
         .ready_chunks(30);
     while let Some(batch) = checks.next().await {
-        let updates: Vec<CoverUpdate> = batch;
+        // Réseau coupé : ces titres-là ne sont pas notés, et la suite attend la prochaine ouverture de session.
+        let offline = batch.iter().any(Result::is_err);
+        let updates: Vec<CoverUpdate> = batch.into_iter().filter_map(Result::ok).collect();
         if let Ok(replaced) = store.apply_cover_updates(&updates) {
             saved = true;
             for old in replaced {
                 let _ = tokio::fs::remove_file(store.root.join(old)).await;
             }
+        }
+        if offline {
+            break;
         }
     }
     saved
@@ -1726,11 +1738,10 @@ fn cover_md5(url: &str) -> Option<&str> {
 }
 
 /// Vérifie la pochette d'un titre téléchargé, en partant de son adresse d'origine chez Deezer (`original` ; à défaut,
-/// celle gardée). `None` : rien à changer pour l'instant (pas de réseau, ou aucune vraie image trouvée : revérifiée
-/// plus tard).
-async fn check_cover(api: &DeezerClient, root: &Path, entry: OfflineTrack, original: Option<String>) -> Option<CoverUpdate> {
+/// celle gardée). `Ok(None)` : aucune vraie image trouvée, revérifiée plus tard ; `Err` : réseau coupé, rien à noter.
+async fn check_cover(api: &DeezerClient, root: &Path, entry: OfflineTrack, original: Option<String>) -> Result<Option<CoverUpdate>, NetworkDown> {
     let id = entry.info.id;
-    let stored = entry.info.cover_url.clone()?;
+    let Some(stored) = entry.info.cover_url.clone() else { return Ok(None) };
     let has_file = entry.cover.as_ref().is_some_and(|cover| root.join(cover).is_file());
     let base = original.unwrap_or_else(|| stored.clone());
     // La bonne pochette de ce titre : celle d'origine si elle existe en entier, sinon sa réparation (album, puis
@@ -1738,23 +1749,24 @@ async fn check_cover(api: &DeezerClient, root: &Path, entry: OfflineTrack, origi
     let expected = api.repaired_track_cover(&base, entry.info.album_id, id).await.unwrap_or(base);
     // Déjà la bonne image, gardée par une version qui refusait l'image vide : notée vérifiée, sans retélécharger.
     if has_file && entry.cover_version >= 2 && cover_md5(&expected).is_some() && cover_md5(&expected) == cover_md5(&stored) {
-        return Some(CoverUpdate { id, cover: None, url: None, failed: false });
+        return Ok(Some(CoverUpdate { id, cover: None, url: None, failed: false }));
     }
-    // Image vide refusée : sans vraie image (pas de réseau, rien trouvé), on revérifiera plus tard.
-    let cover = shared_cover(api, root, &expected, id).await?;
+    // Image vide refusée : sans vraie image, on revérifiera plus tard.
+    let Some(cover) = shared_cover(api, root, &expected, id).await? else { return Ok(None) };
     let url = (expected != stored).then_some(expected);
-    Some(CoverUpdate { id, cover: Some(cover), url, failed: false })
+    Ok(Some(CoverUpdate { id, cover: Some(cover), url, failed: false }))
 }
 
 /// Télécharge la pochette d'un titre. Pochette supprimée par Deezer : remplacée titre par titre (pochette actuelle de
 /// l'album, ou celle de la sortie vers laquelle Deezer redirige ce titre si l'album a été retiré) ; l'adresse de
-/// `info` est mise à jour, pour l'affichage et les vérifications suivantes. `None` : aucune vraie image trouvée.
-async fn download_cover(api: &DeezerClient, root: &Path, info: &mut TrackInfo) -> Option<String> {
-    let url = info.cover_url.clone()?;
+/// `info` est mise à jour, pour l'affichage et les vérifications suivantes. `Ok(None)` : aucune vraie image trouvée ;
+/// `Err` : réseau coupé.
+async fn download_cover(api: &DeezerClient, root: &Path, info: &mut TrackInfo) -> Result<Option<String>, NetworkDown> {
+    let Some(url) = info.cover_url.clone() else { return Ok(None) };
     if let Some(fixed) = api.repaired_track_cover(&url, info.album_id, info.id).await {
         info.cover_url = Some(fixed);
     }
-    let url = info.cover_url.as_deref()?;
+    let Some(url) = info.cover_url.as_deref() else { return Ok(None) };
     shared_cover(api, root, url, info.id).await
 }
 
@@ -1762,7 +1774,7 @@ async fn download_cover(api: &DeezerClient, root: &Path, info: &mut TrackInfo) -
 /// de 20 titres ne la télécharge et ne la garde plus qu'une fois. Nom propre à cette version, pour qu'une image
 /// remplacée ne soit pas confondue avec l'ancienne dans le cache des pochettes. Adresse sans image Deezer reconnaissable :
 /// nommée d'après le titre, comme avant.
-async fn shared_cover(api: &DeezerClient, root: &Path, url: &str, id: i64) -> Option<String> {
+async fn shared_cover(api: &DeezerClient, root: &Path, url: &str, id: i64) -> Result<Option<String>, NetworkDown> {
     let md5 = cover_md5(url).filter(|md5| md5.len() == 32 && md5.chars().all(|c| c.is_ascii_hexdigit()) && !is_empty_picture(md5));
     let relative = PathBuf::from("covers").join(match md5 {
         Some(md5) => format!("{md5}-v{COVER_VERSION}.jpg"),
@@ -1771,19 +1783,24 @@ async fn shared_cover(api: &DeezerClient, root: &Path, url: &str, id: i64) -> Op
     // Déjà là (autre titre du même album) : rien à télécharger. Seulement pour une image nommée d'après Deezer : un
     // fichier nommé d'après le titre peut être une ancienne image.
     if md5.is_some() && tokio::fs::metadata(root.join(&relative)).await.is_ok_and(|m| m.is_file() && m.len() > 0) {
-        return Some(relative.to_string_lossy().into_owned());
+        return Ok(Some(relative.to_string_lossy().into_owned()));
     }
     download_image(api, root, url, relative).await
 }
 
-async fn download_image(api: &DeezerClient, root: &Path, url: &str, relative: PathBuf) -> Option<String> {
+/// `Ok(None)` : pas de vraie image chez Deezer (image vide, pas un JPEG, trop grande) ; `Err` : réseau coupé ou serveur
+/// en panne, on ne sait pas.
+async fn download_image(api: &DeezerClient, root: &Path, url: &str, relative: PathBuf) -> Result<Option<String>, NetworkDown> {
     const MAX_COVER_BYTES: u64 = 20 * 1024 * 1024;
     if !is_remote(url) {
-        return None;
+        return Ok(None);
     }
     let large = large_cover_url(url);
     for candidate in [large.as_str(), url] {
-        let Ok(response) = api.http().get(candidate).send().await else { continue };
+        let Ok(response) = api.http().get(candidate).send().await else { return Err(NetworkDown) };
+        if response.status().is_server_error() {
+            return Err(NetworkDown);
+        }
         let Ok(response) = response.error_for_status() else { continue };
         // Redirigé vers l'image vide (pochette supprimée, ou taille indisponible) : ce n'est pas la pochette. La grande
         // taille refusée, on essaie la taille d'origine.
@@ -1797,10 +1814,8 @@ async fn download_image(api: &DeezerClient, root: &Path, url: &str, relative: Pa
         let mut stream = response.bytes_stream();
         let mut complete = true;
         while let Some(chunk) = stream.next().await {
-            let Ok(chunk) = chunk else {
-                complete = false;
-                break;
-            };
+            // Coupure en cours de route : réseau.
+            let Ok(chunk) = chunk else { return Err(NetworkDown) };
             if bytes.len() as u64 + chunk.len() as u64 > MAX_COVER_BYTES {
                 complete = false;
                 break;
@@ -1816,7 +1831,7 @@ async fn download_image(api: &DeezerClient, root: &Path, url: &str, relative: Pa
         let part = root.join(&relative).with_extension(format!("{n}.part"));
         if tokio::fs::write(&part, bytes).await.is_err() {
             let _ = tokio::fs::remove_file(&part).await;
-            return None;
+            return Ok(None);
         }
         let final_path = root.join(&relative);
         // `rename` remplace d'un coup : jamais de moment sans fichier pour un titre qui l'affiche déjà.
@@ -1825,12 +1840,12 @@ async fn download_image(api: &DeezerClient, root: &Path, url: &str, relative: Pa
             let _ = tokio::fs::remove_file(&final_path).await;
             if tokio::fs::rename(&part, &final_path).await.is_err() {
                 let _ = tokio::fs::remove_file(&part).await;
-                return None;
+                return Ok(None);
             }
         }
-        return Some(relative.to_string_lossy().into_owned());
+        return Ok(Some(relative.to_string_lossy().into_owned()));
     }
-    None
+    Ok(None)
 }
 
 async fn valid_audio(path: &Path, ext: &str) -> io::Result<bool> {
@@ -2380,20 +2395,29 @@ mod tests {
 
         // Pochette normale : la grande taille est gardée.
         let mut t = track_with_cover(1, cover_url(&base, "good"));
-        let cover = download_cover(&api, &root, &mut t).await.unwrap();
+        let cover = download_cover(&api, &root, &mut t).await.unwrap().unwrap();
         assert_eq!(cover, "covers/1-v3.jpg");
         assert_eq!(std::fs::read(root.join(&cover)).unwrap(), GOOD_JPEG);
 
         // Grande taille indisponible : la taille d'origine est gardée (avant : l'image blanche).
         let mut t = track_with_cover(2, cover_url(&base, "nolarge"));
-        let cover = download_cover(&api, &root, &mut t).await.unwrap();
+        let cover = download_cover(&api, &root, &mut t).await.unwrap().unwrap();
         assert_eq!(std::fs::read(root.join(&cover)).unwrap(), SMALL_JPEG);
 
         // Pochette supprimée, rien de mieux trouvé : aucune image gardée (avant : l'image blanche).
         let mut t = track_with_cover(3, cover_url(&base, "gone"));
-        assert_eq!(download_cover(&api, &root, &mut t).await, None);
+        assert_eq!(download_cover(&api, &root, &mut t).await, Ok(None));
         assert!(!root.join("covers/3-v3.jpg").exists());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_image_server_is_not_a_missing_cover() {
+        let root = root("cover-offline");
+        let api = DeezerClient::new().unwrap();
+        // Serveur injoignable (réseau coupé) : « on ne sait pas », pas « pas d'image ».
+        let mut t = track_with_cover(4, "http://127.0.0.1:9/images/cover/x/500x500-000000-80-0-0.jpg".into());
+        assert_eq!(download_cover(&api, &root, &mut t).await, Err(NetworkDown));
     }
 
     fn downloaded(store: &OfflineStore, id: i64, url: String, image: &[u8], version: u8) {
@@ -2500,7 +2524,7 @@ mod tests {
         let mut covers = Vec::new();
         for id in [1, 2, 3] {
             let mut t = track_with_cover(id, url.clone());
-            let cover = download_cover(&api, &root, &mut t).await.unwrap();
+            let cover = download_cover(&api, &root, &mut t).await.unwrap().unwrap();
             std::fs::write(audio_path(&root, id, "mp3"), b"audio").unwrap();
             store.insert(OfflineTrack { info: t, ext: "mp3".into(), bytes: 5, downloaded_at: 1, cover: Some(cover.clone()), cover_version: COVER_VERSION, pinned: false, cover_tries: 0, cover_retry_at: 0 }).unwrap();
             covers.push(cover);

@@ -90,6 +90,9 @@ pub struct Shared {
     /// Plus rien à jouer dans le moteur (dernier titre fini, ou titre impossible à ouvrir) : une reprise ne ferait rien,
     /// le lecteur doit recharger le titre.
     pub idle: AtomicBool,
+    /// Le titre suivant est le titre en cours (« Répéter le titre ») : à la fin, le moteur le rejoue lui-même depuis le
+    /// début, avec ce qu'il a déjà reçu (voir `Engine::set_loop`).
+    pub loop_current: AtomicBool,
 }
 
 impl Default for Shared {
@@ -109,6 +112,7 @@ impl Default for Shared {
             levels_on: AtomicBool::new(false),
             levels: [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)],
             idle: AtomicBool::new(false),
+            loop_current: AtomicBool::new(false),
         }
     }
 }
@@ -167,6 +171,9 @@ impl Engine {
     pub fn seek(&self, ms: u64) { let _ = self.tx.send(Cmd::Seek(ms)); }
     pub fn stop(&self) { let _ = self.tx.send(Cmd::Stop); }
     pub fn clear_next(&self) { let _ = self.tx.send(Cmd::ClearNext); }
+    /// « Répéter le titre » : à la fin du titre, rejoué depuis le début sans rien redemander (s'il n'y a pas de suivant
+    /// préparé). Avant, il était redemandé et retéléchargé en entier à chaque tour (environ 30 Mo en FLAC).
+    pub fn set_loop(&self, on: bool) { self.shared.loop_current.store(on, Ordering::Relaxed); }
     pub fn skip_next(&self) { let _ = self.tx.send(Cmd::SkipNext); }
     /// Fondu enchaîné entre deux pistes (0 à 12 s ; 0 = enchaînement sans coupure classique).
     pub fn set_crossfade(&self, ms: u64) { self.shared.crossfade_ms.store(ms.min(12_000), Ordering::Relaxed); }
@@ -371,10 +378,13 @@ struct Renderer {
 
 impl Renderer {
     fn new(cons: rtrb::Consumer<f32>, ctl: Arc<OutCtl>, rate: u32, channels: usize) -> Self {
+        // Au réglage actuel tout de suite : sur iPhone, ce rendu est recréé à chaque saut ou titre (voir `start_at`).
+        let mut eq = EqState::new(rate, channels);
+        eq.start_at(std::array::from_fn(|i| ctl.shared.eq[i].load(Ordering::Relaxed)));
         Self {
             cons,
             ctl,
-            eq: EqState::new(rate, channels),
+            eq,
             bands: Bands::new(rate),
             channels,
             gain: 0, // le son monte en 5 ms au premier rendu
@@ -1717,7 +1727,18 @@ impl Worker {
             return Some(block);
         }
         // Fin de fichier : enchaînement sans coupure sur la piste suivante, si elle est prête.
-        self.cur = None;
+        let ended = self.cur.take();
+        // « Répéter le titre » sans suivant préparé : le même titre repart du début, sans coupure, avec ce qui est déjà
+        // reçu (fichier téléchargé ou flux gardé sur le disque). Retour en arrière impossible : comme avant.
+        if self.next.is_none() && self.shared.loop_current.load(Ordering::Relaxed) {
+            if let Some(mut t) = ended {
+                if let Ok(at) = t.seek(0) {
+                    t.delivered = 0;
+                    self.start_track(t, at);
+                    return None;
+                }
+            }
+        }
         if let Some(p) = self.next.take() {
             let id = p.id;
             match open_track(p, rate, ch) {

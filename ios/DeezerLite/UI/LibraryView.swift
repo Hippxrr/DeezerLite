@@ -795,18 +795,14 @@ private struct ThemeDots: View {
     }
 }
 
-/// Ligne de réglage : icône sur pastille de couleur (comme les Réglages d'iOS), titre et détail.
+/// Ligne de réglage : icône de la couleur de l'app, et titre.
 struct SettingLabel: View {
     let title: String
     let icon: String
-    let color: Color
-    let detail: String?
 
-    init(_ title: String, icon: String, color: Color, detail: String?) {
+    init(_ title: String, icon: String) {
         self.title = title
         self.icon = icon
-        self.color = color
-        self.detail = detail
     }
 
     var body: some View {
@@ -814,10 +810,7 @@ struct SettingLabel: View {
             Image(systemName: icon)
                 .foregroundStyle(Theme.accent)
                 .frame(width: 26)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                if let detail { Text(detail).font(.caption).foregroundStyle(.secondary) }
-            }
+            Text(title)
         }
     }
 }
@@ -831,14 +824,6 @@ extension AudioQuality {
         }
     }
 
-    var detail: String {
-        switch self {
-        case .flac: tr("Sans perte · environ 1 000 kbit/s")
-        case .mp3High: "320 kbit/s"
-        case .mp3Low: tr("128 kbit/s · moins de données mobiles")
-        }
-    }
-
     var icon: String {
         switch self {
         case .flac: "waveform"
@@ -847,27 +832,11 @@ extension AudioQuality {
         }
     }
 
-    var shortTitle: String {
-        switch self {
-        case .flac: "FLAC"
-        case .mp3High: "MP3 HQ"
-        case .mp3Low: tr("MP3 éco")
-        }
-    }
-
     var rate: String {
         switch self {
         case .flac: tr("Sans perte")
         case .mp3High: "320 kbit/s"
         case .mp3Low: "128 kbit/s"
-        }
-    }
-
-    var color: Color {
-        switch self {
-        case .flac: Theme.accent
-        case .mp3High: .orange
-        case .mp3Low: .green
         }
     }
 }
@@ -880,10 +849,10 @@ struct RecoSettingsView: View {
         List {
             Section {
                 Toggle(isOn: Binding(get: { player.flowOnHome }, set: { player.setFlowOnHome($0) })) {
-                    SettingLabel(tr("Flow sur l'accueil"), icon: "waveform", color: Theme.accent, detail: nil)
+                    SettingLabel(tr("Flow sur l'accueil"), icon: "waveform")
                 }
                 Toggle(isOn: Binding(get: { player.lovedOnHome }, set: { player.setLovedOnHome($0) })) {
-                    SettingLabel(tr("%@ sur l'accueil", player.lovedTitle), icon: "heart.fill", color: .pink, detail: nil)
+                    SettingLabel(tr("%@ sur l'accueil", player.lovedTitle), icon: "heart.fill")
                 }
             } footer: {
                 Text(tr("Désactivés, ils se trouvent en tête de tes playlists dans la Bibliothèque. Sur l'accueil, appui long puis « Réorganiser l'accueil » pour changer leur ordre."))
@@ -896,7 +865,7 @@ struct RecoSettingsView: View {
                         if on && r.order.allSatisfy(r.hidden.contains) { r.hidden = RecoPrefs().hidden } // tout était masqué : on revient aux catégories de base
                     } }
                 )) {
-                    SettingLabel(tr("Recommandations"), icon: "sparkles", color: .pink, detail: nil)
+                    SettingLabel(tr("Recommandations"), icon: "sparkles")
                 }
             } footer: {
                 Text(tr("Désactivées, l'accueil ne contacte plus Deezer pour ses suggestions."))

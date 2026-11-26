@@ -493,9 +493,21 @@ final class BackgroundDownloadManager: NSObject, URLSessionDownloadDelegate {
         player?.downloadUpdated(DownloadUpdate(id: id, state: .downloading, progress: 1, error: nil))
         // Rangement du titre : iOS laisse le temps de le finir si l'app passe en arrière-plan juste à ce moment (sinon il
         // attendait le prochain réveil de l'app).
-        let background = UIApplication.shared.beginBackgroundTask(withName: "download-finish")
+        // Temps d'arrière-plan écoulé avant la fin : la tâche est rendue tout de suite. Avant, il n'y avait pas de fin
+        // d'urgence, et iOS tue alors l'app (relancée pour livrer une grosse série de téléchargements, par exemple).
+        final class Ticket { var id = UIBackgroundTaskIdentifier.invalid }
+        let ticket = Ticket()
+        ticket.id = UIApplication.shared.beginBackgroundTask(withName: "download-finish") {
+            UIApplication.shared.endBackgroundTask(ticket.id)
+            ticket.id = .invalid
+        }
         Task { [weak self] in
-            defer { if background != .invalid { UIApplication.shared.endBackgroundTask(background) } }
+            defer {
+                if ticket.id != .invalid {
+                    UIApplication.shared.endBackgroundTask(ticket.id)
+                    ticket.id = .invalid
+                }
+            }
             do {
                 let track = try await core.finishDownload(id: id, path: path)
                 guard let self else { return }

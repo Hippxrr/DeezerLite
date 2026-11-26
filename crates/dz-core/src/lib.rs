@@ -54,6 +54,8 @@ pub enum PlayerCmd {
     FlowMore { tracks: Vec<TrackInfo> },
     /// (interne) Fiche complète d'un titre redemandée en arrière-plan (tous les artistes crédités).
     Enrich { info: TrackInfo },
+    /// (interne) Fiches des titres suivants reçues en une seule demande (voir `enrich_ahead`), en un seul message.
+    EnrichMany { infos: Vec<TrackInfo> },
     /// (interne) Pochette d'un titre remplacée : celle donnée par Deezer n'existait plus (voir `check_cover`).
     CoverFixed { id: i64, cover: String },
     /// Ajoute à la fin de la file, ou juste après le titre en cours (`next`).
@@ -604,7 +606,7 @@ impl Actor {
                             tokio::select! {
                                 _ = &mut prefetch => break None,
                                 cmd = rx.recv() => match cmd {
-                                    Some(c @ (PlayerCmd::Enrich { .. } | PlayerCmd::CoverFixed { .. } | PlayerCmd::FlowMore { .. })) => later.push(c),
+                                    Some(c @ (PlayerCmd::Enrich { .. } | PlayerCmd::EnrichMany { .. } | PlayerCmd::CoverFixed { .. } | PlayerCmd::FlowMore { .. })) => later.push(c),
                                     other => break Some(other),
                                 },
                                 Some(ev) = erx.recv() => {
@@ -810,6 +812,16 @@ impl Actor {
                 self.set_flow(true); // après PlayQueue, qui remet le drapeau à zéro
             }
             PlayerCmd::Enrich { info } => self.apply_enrich(info),
+            PlayerCmd::EnrichMany { infos } => {
+                for info in infos {
+                    // Fiche complète déjà reçue : pas redemandée seule à son lancement (avant, une requête de plus par
+                    // titre joué, pour la même réponse). Seules celles qui ont un feat changent quelque chose.
+                    self.enriched.insert(info.id);
+                    if info.artists.len() > 1 {
+                        self.apply_enrich(info);
+                    }
+                }
+            }
             PlayerCmd::CoverFixed { id, cover } => {
                 let Some(info) = self.infos.get_mut(&id) else { return };
                 info.cover_url = Some(cover);
@@ -1035,6 +1047,7 @@ impl Actor {
             PlayerCmd::Repeat(mode) => {
                 self.repeat = mode;
                 self.reset_prefetch();
+                self.sync_loop();
             }
             PlayerCmd::Sync(done) => done.notify_one(),
             PlayerCmd::EndListen(done) => {
@@ -1179,10 +1192,9 @@ impl Actor {
                 return;
             }
             if let Ok(Ok(infos)) = tokio::time::timeout(Duration::from_secs(10), api.tracks_info(&ids)).await {
-                // Seulement ceux qui ont un feat : pour les autres, rien ne change (le lancement les revérifie comme avant).
-                for info in infos.into_iter().filter(|i| i.artists.len() > 1) {
-                    let _ = tx.send(PlayerCmd::Enrich { info }).await;
-                }
+                // Un seul message pour toutes : avant, jusqu'à 100 (un par titre avec un feat) remplissaient la file de 32
+                // commandes pendant un chargement, et pause, suivant ou saut étaient refusés (« Lecteur indisponible »).
+                let _ = tx.send(PlayerCmd::EnrichMany { infos }).await;
             }
         });
     }
@@ -1622,7 +1634,24 @@ impl Actor {
     }
 
     /// À 80 % de la piste (ou à `fondu + 10 s` de la fin), prépare la suivante pour une transition sans coupure.
+    /// Titre suivant = titre en cours (« Répéter le titre », ou file d'un seul titre en « Répéter tout ») : le moteur le
+    /// rejoue lui-même depuis le début avec ce qu'il a déjà reçu (voir `Engine::set_loop`), rien n'est préparé. Avant, il
+    /// était redemandé et retéléchargé en entier à chaque tour. Vrai dans ce cas.
+    fn sync_loop(&mut self) -> bool {
+        let looping = self.next_index() == Some(self.index);
+        self.engine.set_loop(looping);
+        if looping && self.prefetched.is_some() {
+            self.prefetched = None;
+            self.prefetched_idx = None;
+            self.engine.clear_next();
+        }
+        looping
+    }
+
     async fn maybe_prefetch(&mut self) {
+        if self.sync_loop() {
+            return;
+        }
         let sh = &self.engine.shared;
         let (pos, dur) = (sh.position_ms.load(Ordering::Relaxed), sh.duration_ms.load(Ordering::Relaxed));
         let xf = sh.crossfade_ms.load(Ordering::Relaxed);
@@ -1935,6 +1964,32 @@ mod tests {
         // Une deuxième fois, rien de nouveau : aucun événement.
         a.on_cmd(PlayerCmd::Enrich { info: rich }).await;
         assert!(!std::iter::from_fn(|| rx.try_recv().ok()).any(|e| matches!(e, CoreEvent::Track(_) | CoreEvent::TrackUpdated(_))));
+    }
+
+    #[tokio::test]
+    async fn tracks_of_the_batch_are_not_asked_again_one_by_one() {
+        let mut a = actor(vec![1, 2], 0);
+        a.seed_infos(vec![track(1), track(2)]);
+        let mut feat = track(2);
+        feat.artists = vec![dz_api::ArtistRef { id: 1, name: "A".into() }, dz_api::ArtistRef { id: 2, name: "B".into() }];
+        feat.artist = "A, B".into();
+        a.on_cmd(PlayerCmd::EnrichMany { infos: vec![track(1), feat] }).await;
+        assert!(a.enriched.contains(&1) && a.enriched.contains(&2), "plus redemandés à leur lancement");
+        assert_eq!(a.infos[&2].artist, "A, B", "le feat est appliqué");
+    }
+
+    #[tokio::test]
+    async fn repeat_one_lets_the_engine_replay_the_track_itself() {
+        let mut a = actor(vec![1, 2], 0);
+        a.repeat = RepeatMode::One;
+        assert!(a.sync_loop());
+        assert!(a.engine.shared.loop_current.load(Ordering::Relaxed));
+        a.repeat = RepeatMode::Off;
+        assert!(!a.sync_loop());
+        assert!(!a.engine.shared.loop_current.load(Ordering::Relaxed));
+        let mut b = actor(vec![7], 0);
+        b.repeat = RepeatMode::All;
+        assert!(b.sync_loop(), "file d'un seul titre en « Répéter tout »");
     }
 
     #[tokio::test]
