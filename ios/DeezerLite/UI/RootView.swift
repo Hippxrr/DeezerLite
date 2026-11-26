@@ -156,20 +156,26 @@ struct RootView: View {
         .background(Theme.background.ignoresSafeArea())
         .background(WindowStyle())
         .onChange(of: phase) { _, now in
+            SessionLog.note("scène : \(now)")
             if now == .active { ThemeStore.applyStyle(ThemeStore.shared.appearance.style) }
         }
         .tint(Theme.accent)
         .toastOverlay()
         .overlay {
             if launchCover {
-                LaunchCover { launchCover = false }
+                LaunchCover {
+                    launchCover = false
+                    // Journal de diagnostic (temporaire) : l'écran est contrôlé juste après.
+                    SessionLog.checkScreenSoon("après le lancement")
+                }
+                .modifier(DiagnosticProbe(name: "écran de lancement"))
             }
         }
         .alert("Deezer Lite", isPresented: Binding(get: { player.message != nil }, set: { if !$0 { player.message = nil } })) {
             Button("OK", role: .cancel) {}
             // Diagnostic temporaire des déconnexions (voir `SessionLog`).
             if player.offerSessionLog {
-                Button(tr("Copier le journal")) { UIPasteboard.general.string = SessionLog.text() }
+                Button(tr("Copier le journal")) { SessionLog.copy() }
             }
         } message: {
             Text(player.message ?? "")
@@ -246,7 +252,7 @@ struct LoginView: View {
                                 .transition(.opacity.combined(with: .move(edge: .top)))
                             }
                             // Diagnostic temporaire des déconnexions (voir `SessionLog`) : aussi ici, si le message a été fermé.
-                            Button(tr("Copier le journal de connexion")) { UIPasteboard.general.string = SessionLog.text() }
+                            Button(tr("Copier le journal de connexion")) { SessionLog.copy() }
                                 .font(.caption)
                                 .foregroundStyle(.tertiary)
                         }
@@ -316,6 +322,7 @@ struct MainTabs: View {
     /// Onglet choisi. iOS passe aussi par ici quand on rappuie sur l'onglet déjà ouvert.
     private var selection: Binding<Int> {
         Binding(get: { tab }, set: { new in
+            SessionLog.note("onglet \(new) choisi (avant \(tab))") // journal de diagnostic (temporaire)
             if new == 1 && tab == 1 { searchFocus += 1 }
             tab = new
         })
@@ -396,6 +403,7 @@ struct MainTabs: View {
 
     /// Onglet choisi dans la barre de l'app : un nouvel appui revient à la première page (et ouvre le clavier sur la recherche).
     private func selectOwn(_ new: Int) {
+        SessionLog.note("onglet \(new) choisi (avant \(tab))") // journal de diagnostic (temporaire)
         if new == tab {
             switch new {
             case 0: homePop += 1
@@ -455,17 +463,18 @@ struct MainTabs: View {
     @ViewBuilder
     private var tabs: some View {
         #if compiler(>=6.2.1)
+        // Journal de diagnostic (temporaire) : quelle barre d'onglets est affichée, et sa place.
         if #available(iOS 26.1, *) {
             if barFullShown {
-                ownTabs
+                ownTabs.modifier(DiagnosticProbe(name: "onglets (barre de l'app)"))
             } else {
-                barTabs
+                barTabs.modifier(DiagnosticProbe(name: "onglets (barre d'iOS)"))
             }
         } else {
-            classicTabs
+            classicTabs.modifier(DiagnosticProbe(name: "onglets (classiques)"))
         }
         #else
-        classicTabs
+        classicTabs.modifier(DiagnosticProbe(name: "onglets (classiques)"))
         #endif
     }
 

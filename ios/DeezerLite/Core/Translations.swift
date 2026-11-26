@@ -53,6 +53,8 @@ enum Translations {
         "ARL invalide ou expiré.": ("Invalid or expired ARL.", "ARL no válido o caducado."),
         "Copier le journal": ("Copy log", "Copiar registro"),
         "Copier le journal de connexion": ("Copy sign-in log", "Copiar registro de conexión"),
+        "Copier le journal de diagnostic": ("Copy diagnostic log", "Copiar registro de diagnóstico"),
+        "Journal copié": ("Log copied", "Registro copiado"),
         "Session Deezer expirée : reconnecte-toi.": ("Deezer session expired: please sign in again.", "La sesión de Deezer ha caducado: vuelve a iniciar sesión."),
         "Deezer a refusé la session enregistrée sur ce téléphone (ARL expiré ou remplacé) : reconnecte-toi.": ("Deezer refused the session saved on this phone (ARL expired or replaced): please sign in again.", "Deezer rechazó la sesión guardada en este teléfono (ARL caducado o sustituido): vuelve a iniciar sesión."),
         "Session introuvable sur ce téléphone (app réinstallée ou certificat changé) : reconnecte-toi.": ("Session not found on this phone (app reinstalled or certificate changed): please sign in again.", "Sesión no encontrada en este teléfono (app reinstalada o certificado cambiado): vuelve a iniciar sesión."),
