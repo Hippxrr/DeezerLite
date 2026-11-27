@@ -400,14 +400,17 @@ final class Player {
         return task
     }
 
-    /// Nombre de titres et durée (secondes) des playlists, par identifiant : Deezer ne donne pas la durée avec la liste des
-    /// playlists. Notés à chaque lecture d'une playlist, gardés entre les lancements.
+    /// Nombre de titres reçus, durée (secondes) et, s'il diffère, nombre de titres annoncé par Deezer, des playlists, par
+    /// identifiant : Deezer ne donne pas la durée avec la liste des playlists. Notés à chaque lecture d'une playlist,
+    /// gardés entre les lancements.
     private(set) var playlistLengths: [String: [Int]] =
         UserDefaults.standard.dictionary(forKey: "playlistLengths") as? [String: [Int]] ?? [:]
     @ObservationIgnored private var lengthQueue: Task<Void, Never>?
 
     private func notePlaylistLength(_ id: UInt64, _ tracks: [Track]) {
-        let value = [tracks.count, tracks.reduce(0) { $0 + Int($1.durationS) }]
+        var value = [tracks.count, tracks.reduce(0) { $0 + Int($1.durationS) }]
+        // Même liste qu'avant : le nombre annoncé par Deezer, noté avec elle, reste valable.
+        if let old = playlistLengths[String(id)], old.count == 3, old[0] == value[0], old[1] == value[1] { value.append(old[2]) }
         guard playlistLengths[String(id)] != value else { return }
         playlistLengths[String(id)] = value
         UserDefaults.standard.set(playlistLengths, forKey: "playlistLengths")
@@ -416,9 +419,12 @@ final class Player {
     /// « 29 titres · 1 h 20 min » d'une playlist de la Bibliothèque, si sa durée est connue et toujours juste (même nombre de
     /// titres que celui donné par Deezer) ; sinon `nil`.
     func playlistSummary(_ card: Card) -> String? {
-        guard card.kind == "playlist", let v = playlistLengths[String(card.id)], v.count == 2 else { return nil }
-        if let count = Int(card.subtitle.prefix { $0.isNumber }), count != v[0] { return nil }
-        return DetailView.summary(count: v[0], seconds: v[1])
+        guard card.kind == "playlist", let v = playlistLengths[String(card.id)], v.count >= 2 else { return nil }
+        guard let count = Int(card.subtitle.prefix { $0.isNumber }) else { return DetailView.summary(count: v[0], seconds: v[1]) }
+        // Deezer compte parfois des titres indisponibles qu'il n'envoie pas : son nombre annoncé, noté à la lecture de la
+        // liste, compte aussi (voir `ensurePlaylistLength`). Un autre nombre : la playlist a changé, durée à relire.
+        guard count == v[0] || (v.count == 3 && count == v[2]) else { return nil }
+        return DetailView.summary(count: count, seconds: v[1])
     }
 
     /// Durée d'une playlist inconnue (ou plus à jour) : sa liste de titres est lue, une playlist à la fois.
@@ -429,6 +435,15 @@ final class Player {
             await previous?.value
             guard playlistSummary(card) == nil else { return }
             _ = await detail(.detail(kind: "playlist", id: card.id, title: card.title), force: false)
+            // Liste lue, mais Deezer annonce un autre nombre de titres (indisponibles comptés) : ce nombre est noté avec
+            // elle. Avant, la durée ne s'affichait jamais pour cette playlist, relue à chaque lancement.
+            let key = String(card.id)
+            if playlistSummary(card) == nil, var v = playlistLengths[key], v.count >= 2,
+               let count = Int(card.subtitle.prefix { $0.isNumber }) {
+                v = Array(v.prefix(2)) + [count]
+                playlistLengths[key] = v
+                UserDefaults.standard.set(playlistLengths, forKey: "playlistLengths")
+            }
         }
     }
 
