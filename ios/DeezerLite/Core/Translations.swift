@@ -292,7 +292,7 @@ enum Translations {
         "Déjà en cours": ("Already in progress", "Ya en curso"),
         "Mettre à jour": ("Update", "Actualizar"),
         "Barre d'iOS en un seul bloc (test)": ("iOS tab bar in one block (test)", "Barra de iOS en un solo bloque (prueba)"),
-        "La recherche rejoint Accueil et Bibliothèque, comme dans Apple Music": ("Search joins Home and Library, like in Apple Music", "La búsqueda se une a Inicio y Biblioteca, como en Apple Music"),
+        "La recherche rejoint Accueil et Bibliothèque, comme dans Apple Music (iOS 27)": ("Search joins Home and Library, like in Apple Music (iOS 27)", "La búsqueda se une a Inicio y Biblioteca, como en Apple Music (iOS 27)"),
         "CD %@": ("Disc %@", "Disco %@"),
         "Pas mieux chez Deezer pour ce titre.": ("Deezer has nothing better for this track.", "Deezer no tiene nada mejor para esta canción."),
         "Volume égal entre les titres": ("Even volume across tracks", "Volumen igual entre canciones"),

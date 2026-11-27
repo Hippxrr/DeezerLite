@@ -583,7 +583,7 @@ struct SettingsView: View {
                             Image(systemName: "rectangle.split.3x1").foregroundStyle(Theme.accent).frame(width: 26)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(tr("Barre d'iOS en un seul bloc (test)"))
-                                Text(tr("La recherche rejoint Accueil et Bibliothèque, comme dans Apple Music")).font(.caption).foregroundStyle(.secondary)
+                                Text(tr("La recherche rejoint Accueil et Bibliothèque, comme dans Apple Music (iOS 27)")).font(.caption).foregroundStyle(.secondary)
                             }
                         }
                     }

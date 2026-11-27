@@ -16,14 +16,16 @@ concurrency:
 
 jobs:
   ipa:
-    runs-on: macos-15
+    # Machine Xcode 27 (SDK d'iOS 27) : avant, macos-15 et Xcode 26, et sur iOS 27 l'app gardait la barre d'onglets
+    # d'iOS 26 (la recherche toujours à part). Construite avec le SDK d'iOS 27, elle a celle des apps d'Apple.
+    runs-on: xcode-27
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
       - name: Xcode le plus récent
         run: |
-          # SDK d'iOS 26 (Liquid Glass) si le runner l'a ; sinon le Xcode par défaut (l'app se construit sans le verre).
+          # Le plus récent installé, hors beta (SDK d'iOS 27).
           latest=$(ls -d /Applications/Xcode_*.app 2>/dev/null | grep -v -i beta | sort -V | tail -1)
           if [ -n "$latest" ]; then sudo xcode-select -s "$latest"; fi
           xcodebuild -version

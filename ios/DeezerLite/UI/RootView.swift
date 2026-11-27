@@ -287,7 +287,7 @@ struct MainTabs: View {
     /// Valeur figée tant que les Réglages sont ouverts (voir `Player.settingsOpen`).
     private var barFullShown: Bool { player.tabBarFullHeld ?? tabBarFull }
     /// Réglages › Apparence, en test : la recherche dans le même bloc que les autres onglets de la barre d'iOS, comme dans
-    /// Apple Music (sinon, iOS la pose à part, à droite).
+    /// Apple Music sur iOS 27 (voir `searchRole`).
     @AppStorage("tabBarOneBlock") private var tabBarOneBlock = false
     /// Barre de l'app réduite par le défilement.
     @State private var barCollapsed = false
@@ -367,7 +367,7 @@ struct MainTabs: View {
             } label: {
                 tabLabel(tr("Bibliothèque"), Image(uiImage: TabIcons.library))
             }
-            Tab(value: 1, role: (player.tabBarOneBlockHeld ?? tabBarOneBlock) ? nil : TabRole.search) {
+            Tab(value: 1, role: searchRole) {
                 TabStack(active: tab == 1, popRequest: searchFocus) { SearchView(focusRequest: searchFocus) }
             } label: {
                 tabLabel(tr("Recherche"), Image(systemName: "magnifyingglass"))
@@ -379,6 +379,16 @@ struct MainTabs: View {
         .tabViewBottomAccessory(isEnabled: player.miniShown) {
             BarMiniPlayer().environment(player)
         }
+    }
+
+    /// Rôle de l'onglet Recherche. Barre de test, sur iOS 27 : simple onglet de recherche, qu'iOS 27 range dans le bloc des
+    /// onglets et sort en rond à droite quand la barre se réduit, comme Apple Music. Sinon, la disposition d'avant (à part, à
+    /// droite) : sur iOS 27, c'est le rôle « mis en avant » qui la donne. Avant, l'app construite avec le SDK d'iOS 26 gardait
+    /// la recherche à part, et la barre de test (sans rôle) la perdait une fois réduite.
+    @available(iOS 26.1, *)
+    private var searchRole: TabRole {
+        if !(player.tabBarOneBlockHeld ?? tabBarOneBlock), #available(iOS 27.0, *) { return .prominent }
+        return .search
     }
     #endif
 
