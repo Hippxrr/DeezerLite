@@ -345,7 +345,12 @@ struct SettingsView: View {
     /// Onglets du bas sans leur nom (voir `MainTabs`).
     @AppStorage("tabLabelsHidden") private var tabLabelsHidden = false
     @AppStorage("tabBarFull") private var tabBarFull = true
-    @AppStorage("tabBarOneBlock") private var tabBarOneBlock = false
+    @AppStorage("tabBarSearchApart") private var tabBarSearchApart = false
+    /// iOS 27 ou plus (« Recherche à part » n'a d'effet qu'à partir de là).
+    private static var iOS27: Bool {
+        if #available(iOS 27.0, *) { return true }
+        return false
+    }
     @AppStorage("miniProgress") private var miniProgress = true
     @AppStorage("fullBleedCover") private var fullBleedCover = false
     @AppStorage("saveCoverOnLongPress") private var saveCoverOnLongPress = false
@@ -575,15 +580,15 @@ struct SettingsView: View {
                 }
                 .tint(Theme.accent)
                 .padding(14)
-                // Seulement pour la barre d'iOS (la barre complète a déjà la recherche dans son bloc).
-                if !tabBarFull {
+                // Seulement pour la barre d'iOS, et sur iOS 27 : avant, la recherche y est toujours à part.
+                if !tabBarFull, Self.iOS27 {
                     divider
-                    Toggle(isOn: $tabBarOneBlock) {
+                    Toggle(isOn: $tabBarSearchApart) {
                         HStack(spacing: 12) {
-                            Image(systemName: "rectangle.split.3x1").foregroundStyle(Theme.accent).frame(width: 26)
+                            Image(systemName: "magnifyingglass.circle").foregroundStyle(Theme.accent).frame(width: 26)
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(tr("Barre d'iOS en un seul bloc (test)"))
-                                Text(tr("La recherche rejoint Accueil et Bibliothèque, comme dans Apple Music (iOS 27)")).font(.caption).foregroundStyle(.secondary)
+                                Text(tr("Recherche à part"))
+                                Text(tr("Accueil et Bibliothèque à gauche, la recherche dans un rond à droite. Désactivée : les trois ensemble, comme Apple Music")).font(.caption).foregroundStyle(.secondary)
                             }
                         }
                     }

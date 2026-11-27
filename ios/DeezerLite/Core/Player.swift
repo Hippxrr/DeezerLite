@@ -1308,13 +1308,13 @@ final class Player {
         didSet {
             guard settingsOpen != oldValue else { return }
             tabBarFullHeld = settingsOpen ? (UserDefaults.standard.object(forKey: "tabBarFull") as? Bool ?? true) : nil
-            tabBarOneBlockHeld = settingsOpen ? UserDefaults.standard.bool(forKey: "tabBarOneBlock") : nil
+            tabBarSearchApartHeld = settingsOpen ? UserDefaults.standard.bool(forKey: "tabBarSearchApart") : nil
         }
     }
     /// Valeur de « Barre d'onglets complète » affichée pendant que les Réglages sont ouverts (voir `settingsOpen`).
     private(set) var tabBarFullHeld: Bool?
-    /// Pareil pour « Barre d'iOS en un seul bloc ».
-    private(set) var tabBarOneBlockHeld: Bool?
+    /// Pareil pour « Recherche à part ».
+    private(set) var tabBarSearchApartHeld: Bool?
     /// Change à chaque changement de profil (et à la déconnexion) : une réponse de Deezer demandée pour le profil
     /// d'avant, arrivée après, n'est pas affichée.
     @ObservationIgnored private var profileGeneration = 0
@@ -3012,49 +3012,77 @@ final class Player {
 
     // MARK: Session audio : interruptions et sortie
 
+    /// Début d'une coupure (appel, vocal, autre app). `suspended` : app suspendue par iOS pendant une pause (raison 1,
+    /// `.appWasSuspended`), annoncée comme une coupure sans fin à venir. Ignorée (rien ne jouait), sinon elle restait « en
+    /// cours » et bloquait les reprises automatiques : la session est seulement marquée inactive, et la prochaine lecture
+    /// (écran verrouillé, CarPlay) la réactive tout de suite au lieu d'attendre un nouvel essai.
+    private func interruptionBegan(suspended: Bool) {
+        if suspended {
+            AudioSession.invalidate()
+            return
+        }
+        guard let core else { return }
+        // « En train de démarrer » compte comme jouer : un titre lancé juste avant l'appel repart après.
+        resumePolicy.interruptionBegan(playing: core.status().playing || loading)
+        // Comme les autres apps de musique : pause, et l'app reste sur l'écran verrouillé.
+        AudioSession.invalidate()
+        core.audioInterrupted()
+        refreshStatus()
+    }
+
+    /// Fin d'une coupure : reprise seulement si l'app qui a pris le son le permet et si la musique jouait.
+    private func interruptionEnded(shouldResume: Bool) {
+        guard let core else { return }
+        if resumePolicy.interruptionEnded(shouldResume: shouldResume) {
+            AudioSession.activate()
+            core.audioResumed(shouldResume: true)
+        } else {
+            // Pas de reprise : on ne reprend pas la main sur le son des autres apps.
+            needsReopen = true
+        }
+        refreshStatus()
+    }
+
     /// Sorties « dans les oreilles » : une pause à leur retrait est reprise à leur retour.
     nonisolated private static let earPorts: Set<AVAudioSession.Port> = [.headphones, .bluetoothA2DP, .bluetoothLE, .bluetoothHFP]
 
     private func observeAudioSession() {
         let center = NotificationCenter.default
         let session = AVAudioSession.sharedInstance()
-        center.addObserver(forName: AVAudioSession.interruptionNotification, object: session, queue: .main) { [weak self] n in
-            let info = n.userInfo ?? [:]
-            let type = (info[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap(AVAudioSession.InterruptionType.init)
-            let options = AVAudioSession.InterruptionOptions(rawValue: info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0)
-            // App suspendue par iOS pendant une pause : iOS l'annonce comme une coupure, sans fin à venir. Ignorée (rien ne
-            // jouait), sinon elle restait « en cours » et bloquait les reprises automatiques. Valeur 1 = `.appWasSuspended`
-            // (nom déclaré dépassé par Apple, valeur encore envoyée par certaines versions d'iOS).
-            let suspended = (info[AVAudioSessionInterruptionReasonKey] as? UInt) == 1
-            if type == .began && suspended {
-                // iOS a coupé la session : marquée inactive, la prochaine lecture (écran verrouillé, CarPlay) la réactive
-                // tout de suite au lieu d'attendre un nouvel essai.
-                MainActor.assumeIsolated { AudioSession.invalidate() }
-                return
+        // Coupures traitées tout de suite (file principale), comme les changements de sortie : avec un `Task`, une fin
+        // d'appel pouvait passer après le changement de sortie qui l'accompagne, et la reprise était perdue.
+        if #available(iOS 27.0, *) {
+            // iOS 27 : début d'une coupure = session désactivée par le système ; fin = recommandation de reprendre ou non.
+            // L'ancienne notification y est dépassée ; une seule des deux familles est suivie (sinon chaque coupure serait
+            // traitée deux fois). Les désactivations demandées par l'app elle-même ne sont pas des coupures.
+            center.addObserver(forName: AVAudioSession.didBecomeInactiveNotification, object: session, queue: .main) { [weak self] n in
+                guard let context = n.userInfo?[AVAudioSession.deactivationContextKey] as? AVAudioSession.DeactivationContext,
+                      context.source == .system else { return }
+                let suspended = context.interruptionContext?.reason.rawValue == 1
+                MainActor.assumeIsolated { self?.interruptionBegan(suspended: suspended) }
             }
-            // Traité tout de suite (file principale), comme les changements de sortie : avec un `Task`, une fin d'appel
-            // pouvait passer après le changement de sortie qui l'accompagne, et la reprise était perdue.
-            MainActor.assumeIsolated {
-                guard let self, let core = self.core else { return }
-                switch type {
-                case .began:
-                    // « En train de démarrer » compte comme jouer : un titre lancé juste avant l'appel repart après.
-                    self.resumePolicy.interruptionBegan(playing: core.status().playing || self.loading)
-                    // Comme les autres apps de musique : pause, et l'app reste sur l'écran verrouillé.
-                    AudioSession.invalidate()
-                    core.audioInterrupted()
-                case .ended:
-                    if self.resumePolicy.interruptionEnded(shouldResume: options.contains(.shouldResume)) {
-                        AudioSession.activate()
-                        core.audioResumed(shouldResume: true)
-                    } else {
-                        // Pas de reprise : on ne reprend pas la main sur le son des autres apps.
-                        self.needsReopen = true
-                    }
-                default:
-                    break
+            center.addObserver(forName: AVAudioSession.resumptionRecommendationNotification, object: session, queue: .main) { [weak self] n in
+                let context = n.userInfo?[AVAudioSession.resumptionContextKey] as? AVAudioSession.ResumptionContext
+                let resume = context?.recommendation == .shouldResume
+                MainActor.assumeIsolated {
+                    // Aussi envoyée par iOS 27 après une activation refusée, hors de toute coupure : rien à faire alors.
+                    guard let self, self.resumePolicy.interrupted else { return }
+                    self.interruptionEnded(shouldResume: resume)
                 }
-                self.refreshStatus()
+            }
+        } else {
+            center.addObserver(forName: AVAudioSession.interruptionNotification, object: session, queue: .main) { [weak self] n in
+                let info = n.userInfo ?? [:]
+                let type = (info[AVAudioSessionInterruptionTypeKey] as? UInt).flatMap(AVAudioSession.InterruptionType.init)
+                let options = AVAudioSession.InterruptionOptions(rawValue: info[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0)
+                let suspended = (info[AVAudioSessionInterruptionReasonKey] as? UInt) == 1
+                MainActor.assumeIsolated {
+                    switch type {
+                    case .began: self?.interruptionBegan(suspended: suspended)
+                    case .ended: self?.interruptionEnded(shouldResume: options.contains(.shouldResume))
+                    default: break
+                    }
+                }
             }
         }
         center.addObserver(forName: AVAudioSession.routeChangeNotification, object: session, queue: .main) { [weak self] n in

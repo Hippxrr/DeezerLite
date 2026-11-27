@@ -31,16 +31,22 @@ enum AudioOutput {
                 start(id: startID)
             }
         }
-        // Coupure (appel, vocal, autre app) : moteur arrêté pour de bon. Seulement suspendu, il pouvait rester muet à la
-        // reprise (iOS a détaché le matériel) ; arrêté, il repart proprement.
-        NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) { note in
-            guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
-                  AVAudioSession.InterruptionType(rawValue: raw) == .began else { return }
-            // App suspendue pendant une pause (raison 1) : iOS ne l'annonce qu'au réveil, souvent juste après l'appui sur
-            // lecture qui l'a réveillée. Avant, le moteur que cet appui venait de relancer était arrêté : silence, puis le
-            // son ne revenait qu'au relancement suivant (environ 1 s). Arrêté seulement s'il est encore en pause.
-            let suspended = (note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt) == 1
-            queue.async { if !(suspended && wanted) { engine?.stop() } }
+        // Coupure (appel, vocal, autre app) : moteur arrêté pour de bon (voir `interrupted`).
+        if #available(iOS 27.0, *) {
+            // iOS 27 : une coupure arrive comme une désactivation de la session par le système. L'ancienne notification y
+            // est dépassée ; une seule des deux est suivie (sinon chaque coupure serait traitée deux fois). Les
+            // désactivations demandées par l'app elle-même ne sont pas des coupures.
+            NotificationCenter.default.addObserver(forName: AVAudioSession.didBecomeInactiveNotification, object: nil, queue: nil) { note in
+                guard let context = note.userInfo?[AVAudioSession.deactivationContextKey] as? AVAudioSession.DeactivationContext,
+                      context.source == .system else { return }
+                interrupted(suspended: context.interruptionContext?.reason.rawValue == 1)
+            }
+        } else {
+            NotificationCenter.default.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: nil) { note in
+                guard let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
+                      AVAudioSession.InterruptionType(rawValue: raw) == .began else { return }
+                interrupted(suspended: (note.userInfo?[AVAudioSessionInterruptionReasonKey] as? UInt) == 1)
+            }
         }
         // Service audio d'iOS redémarré : l'ancien moteur n'est plus utilisable, un neuf est créé à la prochaine
         // lecture. Pas de redémarrage ici : la session audio n'est pas encore reconfigurée (le lecteur s'en charge,
@@ -51,6 +57,15 @@ enum AudioOutput {
                 startID += 1 // une série d'essais en cours s'arrête
             }
         }
+    }
+
+    /// Début d'une coupure : moteur arrêté pour de bon. Seulement suspendu, il pouvait rester muet à la reprise (iOS a
+    /// détaché le matériel) ; arrêté, il repart proprement. `suspended` : app suspendue pendant une pause (raison 1,
+    /// `.appWasSuspended`), annoncée seulement au réveil, souvent juste après l'appui sur lecture qui l'a réveillée. Avant,
+    /// le moteur que cet appui venait de relancer était arrêté : silence, puis le son ne revenait qu'au relancement suivant
+    /// (environ 1 s). Arrêté seulement s'il est encore en pause.
+    private static func interrupted(suspended: Bool) {
+        queue.async { if !(suspended && wanted) { engine?.stop() } }
     }
 
     /// Pause plus longue que ça : le moteur est arrêté pour de bon (batterie), comme la sortie du bureau.

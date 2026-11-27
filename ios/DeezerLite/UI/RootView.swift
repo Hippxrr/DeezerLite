@@ -286,9 +286,8 @@ struct MainTabs: View {
     @AppStorage("tabBarFull") private var tabBarFull = true
     /// Valeur figée tant que les Réglages sont ouverts (voir `Player.settingsOpen`).
     private var barFullShown: Bool { player.tabBarFullHeld ?? tabBarFull }
-    /// Réglages › Apparence, en test : la recherche dans le même bloc que les autres onglets de la barre d'iOS, comme dans
-    /// Apple Music sur iOS 27 (voir `searchRole`).
-    @AppStorage("tabBarOneBlock") private var tabBarOneBlock = false
+    /// Réglages › Apparence, option : la recherche à part, à droite de la barre d'iOS (voir `searchRole`).
+    @AppStorage("tabBarSearchApart") private var tabBarSearchApart = false
     /// Barre de l'app réduite par le défilement.
     @State private var barCollapsed = false
     /// Onglets déjà ouverts : une page n'est construite qu'à sa première visite.
@@ -381,13 +380,13 @@ struct MainTabs: View {
         }
     }
 
-    /// Rôle de l'onglet Recherche. Barre de test, sur iOS 27 : simple onglet de recherche, qu'iOS 27 range dans le bloc des
-    /// onglets et sort en rond à droite quand la barre se réduit, comme Apple Music. Sinon, la disposition d'avant (à part, à
-    /// droite) : sur iOS 27, c'est le rôle « mis en avant » qui la donne. Avant, l'app construite avec le SDK d'iOS 26 gardait
-    /// la recherche à part, et la barre de test (sans rôle) la perdait une fois réduite.
+    /// Rôle de l'onglet Recherche. Par défaut, sur iOS 27 : simple onglet de recherche, qu'iOS 27 range dans le bloc des
+    /// onglets et sort en rond à droite quand la barre se réduit, comme Apple Music. Option « Recherche à part » : Accueil et
+    /// Bibliothèque à gauche, la recherche à droite, comme sur iOS 26 ; sur iOS 27, c'est le rôle « mis en avant » qui la
+    /// donne. Sur iOS 26, la recherche est toujours à part.
     @available(iOS 26.1, *)
     private var searchRole: TabRole {
-        if !(player.tabBarOneBlockHeld ?? tabBarOneBlock), #available(iOS 27.0, *) { return .prominent }
+        if player.tabBarSearchApartHeld ?? tabBarSearchApart, #available(iOS 27.0, *) { return .prominent }
         return .search
     }
     #endif
