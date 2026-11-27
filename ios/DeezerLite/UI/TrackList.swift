@@ -40,6 +40,9 @@ struct TrackList<Header: View>: View {
     var onRefresh: (() async -> Void)?
     /// Liste reprise au doigt.
     var onDrag: (() -> Void)?
+    /// Change quand l'en-tête change (titre, pochette, tri, boutons) : sinon il n'est pas refait ni remesuré à chaque mise
+    /// à jour de la page (par exemple à chaque image pendant que le clavier monte). `nil` : refait à chaque fois.
+    var headerKey: String?
     @ViewBuilder let header: () -> Header
     @State private var unlike: Track? = nil
 
@@ -94,10 +97,45 @@ private struct RowEnvironment: ViewModifier {
             .environment(\.askUnlike, askUnlike)
             // Couleur du thème (barres de téléchargement, boutons) : posée sur l'app, elle n'arrive pas jusqu'ici.
             .tint(Theme.accent)
-            // La liste passe sous les barres (navigation en haut, onglets et mini-lecteur en bas) : une ligne sous une barre
-            // recevait sa marge et son contenu était poussé, écrasé contre les lignes voisines. Les marges de la liste sont
-            // déjà gérées par elle (voir `applyInsets`).
-            .ignoresSafeArea()
+    }
+}
+
+/// Case de la liste qui affiche une vue SwiftUI sans tenir compte des zones des barres. La liste passe sous la barre du
+/// haut et sous celle des onglets ; avec le conteneur d'iOS (`UIHostingConfiguration`), une case passée sous une barre
+/// recevait sa marge : son contenu était poussé contre la ligne voisine (lignes superposées en haut et en bas, pochette
+/// de l'en-tête qui descendait sur les titres). Ce conteneur-ci (`UIHostingController`) permet de couper ces marges.
+private final class HostingCell: UICollectionViewCell {
+    private let host = UIHostingController(rootView: AnyView(EmptyView()))
+    /// En-tête et message : hauteur mesurée. Les titres et les CD ont une hauteur fixe (voir `rowsSection`).
+    var measured = false
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        host.safeAreaRegions = []
+        host.view.backgroundColor = .clear
+        host.view.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(host.view)
+        NSLayoutConstraint.activate([
+            host.view.topAnchor.constraint(equalTo: contentView.topAnchor),
+            host.view.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+            host.view.leadingAnchor.constraint(equalTo: contentView.leadingAnchor),
+            host.view.trailingAnchor.constraint(equalTo: contentView.trailingAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    func show(_ view: AnyView) {
+        host.rootView = view
+        // En-tête refait (page rechargée, boutons) : sa hauteur est remesurée.
+        if measured { invalidateIntrinsicContentSize() }
+    }
+
+    /// Hauteur de l'en-tête ou du message pour la largeur de la liste.
+    override func preferredLayoutAttributesFitting(_ attributes: UICollectionViewLayoutAttributes) -> UICollectionViewLayoutAttributes {
+        guard measured, let fitted = attributes.copy() as? UICollectionViewLayoutAttributes else { return attributes }
+        fitted.size.height = host.sizeThatFits(in: CGSize(width: attributes.size.width, height: .greatestFiniteMagnitude)).height.rounded(.up)
+        return fitted
     }
 }
 
@@ -121,6 +159,7 @@ private struct TrackCollection: UIViewRepresentable {
     let memory: TrackListPosition?
     let onRefresh: (() async -> Void)?
     let onDrag: (() -> Void)?
+    let headerKey: String?
     let header: AnyView
     let insets: EdgeInsets
     let askUnlike: (Track) -> Void
@@ -138,6 +177,7 @@ private struct TrackCollection: UIViewRepresentable {
         memory = page.position
         onRefresh = page.onRefresh
         onDrag = page.onDrag
+        headerKey = page.headerKey
         self.header = header
         self.insets = insets
         self.askUnlike = askUnlike
@@ -182,6 +222,8 @@ private struct TrackCollection: UIViewRepresentable {
         private var filtered = false
         /// Ligne à amener en haut dès que la liste a sa taille.
         private var pendingTop: String?
+        /// En-tête affiché (voir `TrackList.headerKey`).
+        private var shownHeader: String?
         /// Environnement de la page, lu à la dernière mise à jour.
         private var env: RowEnvironment!
         private var envKey = ""
@@ -203,7 +245,6 @@ private struct TrackCollection: UIViewRepresentable {
             view.backgroundColor = .clear
             // Marges des barres posées à la main (voir `TrackList`) : celles d'iOS s'y ajouteraient.
             view.contentInsetAdjustmentBehavior = .never
-            view.insetsLayoutMarginsFromSafeArea = false
             view.keyboardDismissMode = .interactive
             view.alwaysBounceVertical = true
             view.delegate = self
@@ -211,14 +252,7 @@ private struct TrackCollection: UIViewRepresentable {
             view.onLayout = { [weak self] in self?.laidOut() }
             self.view = view
 
-            // Cases simples (pas des cases de liste d'iOS) qui ne tiennent pas compte des zones des barres : sous la barre du
-            // haut ou celle des onglets, une case de liste recevait leur marge et son contenu était poussé contre la ligne
-            // voisine (lignes qui se chevauchaient en haut et en bas de l'écran).
-            let cell = UICollectionView.CellRegistration<UICollectionViewCell, Item> { [weak self] cell, _, item in
-                cell.insetsLayoutMarginsFromSafeArea = false
-                cell.contentView.insetsLayoutMarginsFromSafeArea = false
-                cell.preservesSuperviewLayoutMargins = false
-                cell.contentView.preservesSuperviewLayoutMargins = false
+            let cell = UICollectionView.CellRegistration<HostingCell, Item> { [weak self] cell, _, item in
                 self?.configure(cell, item)
             }
             dataSource = UICollectionViewDiffableDataSource(collectionView: view) { view, path, item in
@@ -244,10 +278,13 @@ private struct TrackCollection: UIViewRepresentable {
             let envNow = "\(env.pageVisible)|\(env.glassReacts)|\(env.phase)|\(page.likeButton)|\(page.hideLiked)"
             if key != page.key || !Self.same(page.tracks, tracks) || !Self.same(page.list, list) {
                 envKey = envNow
+                shownHeader = page.headerKey
                 rebuild()
             } else {
-                // En-tête refait avec l'état de la page (il en dépend : page rechargée, tri, boutons).
-                if let path = dataSource.indexPath(for: .header), let cell = view?.cellForItem(at: path) {
+                // En-tête refait avec l'état de la page (il en dépend : page rechargée, tri, boutons), seulement s'il a changé.
+                if page.headerKey == nil || page.headerKey != shownHeader,
+                   let path = dataSource.indexPath(for: .header), let cell = view?.cellForItem(at: path) as? HostingCell {
+                    shownHeader = page.headerKey
                     configure(cell, .header)
                 }
                 if envNow != envKey {
@@ -368,37 +405,38 @@ private struct TrackCollection: UIViewRepresentable {
             dataSource.apply(snapshot, animatingDifferences: false)
         }
 
-        private func configure(_ cell: UICollectionViewCell, _ item: Item) {
-            cell.backgroundConfiguration = .clear()
+        private func configure(_ cell: HostingCell, _ item: Item) {
             let env = env!
             switch item {
             case .header:
-                let header = page.header
-                cell.contentConfiguration = UIHostingConfiguration { header.modifier(env) }.margins(.all, 0)
+                cell.measured = true
+                cell.show(AnyView(page.header.modifier(env)))
             case .message:
-                let text = page.message ?? ""
-                cell.contentConfiguration = UIHostingConfiguration {
-                    Text(text).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                cell.measured = true
+                cell.show(AnyView(
+                    Text(page.message ?? "").foregroundStyle(.secondary).multilineTextAlignment(.center)
                         .frame(maxWidth: .infinity).padding(.top, 20)
-                }.margins(.horizontal, 16).margins(.vertical, 7)
+                        .padding(.horizontal, 16).padding(.vertical, 7)
+                        .modifier(env)))
             case .disc(let disk, let at):
-                let top: CGFloat = at == 0 ? 0 : 14
-                cell.contentConfiguration = UIHostingConfiguration {
-                    Text(tr("CD %@", "\(disk)")).font(.headline).frame(maxWidth: .infinity, alignment: .leading).padding(.top, top)
-                }.margins(.horizontal, 16).margins(.vertical, 7)
+                cell.measured = false
+                cell.show(AnyView(
+                    Text(tr("CD %@", "\(disk)")).font(.headline).frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, at == 0 ? 0 : 14)
+                        .padding(.horizontal, 16).padding(.vertical, 7)
+                        .modifier(env)))
             case .track(let id):
                 guard let row = rows[id] else { return }
-                let list = list
+                cell.measured = false
                 let remove = page.onRemove.map { remove in { remove(row.track) } }
-                let likeButton = page.likeButton, hideLiked = page.hideLiked
-                cell.contentConfiguration = UIHostingConfiguration {
-                    TrackRow(track: row.track, list: list, index: row.index, number: row.number, likeButton: likeButton,
-                             hideLiked: hideLiked, onRemove: remove)
+                cell.show(AnyView(
+                    TrackRow(track: row.track, list: list, index: row.index, number: row.number, likeButton: page.likeButton,
+                             hideLiked: page.hideLiked, onRemove: remove)
                         // État de la ligne (glissement, suivi du téléchargement) propre à ce titre : une case réutilisée
                         // pour un autre titre repart de zéro.
                         .id(id)
-                        .modifier(env)
-                }.margins(.horizontal, 16).margins(.vertical, 7)
+                        .padding(.horizontal, 16).padding(.vertical, 7)
+                        .modifier(env)))
             }
         }
 

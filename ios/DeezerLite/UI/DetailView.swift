@@ -224,7 +224,10 @@ struct DetailView: View {
                          likeButton: ["album", "playlist", "mix"].contains(d.kind), hideLiked: d.kind == "loved",
                          onRemove: d.kind == "playlist" && d.owned ? { (t: Track) in remove(t) } : nil,
                          position: scrollMemory, onRefresh: { await load(force: true) },
-                         onDrag: { if toolsOpen { withAnimation(.snappy) { toolsOpen = false } } }) {
+                         onDrag: { if toolsOpen { withAnimation(.snappy) { toolsOpen = false } } },
+                         // Tout ce que l'en-tête affiche : titres et ordre (lastKey), noms, pochette, état de l'aléatoire, langue.
+                         headerKey: "\(sorted.lastKey)|\(d.title)|\(d.subtitle)|\(d.owned)|\(coverURL(d) ?? "")|\(player.lovedTitle)|"
+                             + "\(player.mp3Title)|\(shuffleTaps)|\(LanguageStore.shared.current.rawValue)") {
             header(d, tracks: ordered).padding(.bottom, 17)
         }
     }
