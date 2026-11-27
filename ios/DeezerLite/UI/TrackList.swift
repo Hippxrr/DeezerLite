@@ -188,7 +188,14 @@ private struct TrackCollection: UIViewRepresentable {
             var config = UICollectionLayoutListConfiguration(appearance: .plain)
             config.showsSeparators = false
             config.backgroundColor = .clear
-            let view = PageCollectionView(frame: .zero, collectionViewLayout: UICollectionViewCompositionalLayout.list(using: config))
+            // Section 0 : en-tête et message, mesurés par iOS. Section 1 : titres (et CD), à hauteur fixe (voir `rowsSection`).
+            let layout = UICollectionViewCompositionalLayout { [weak self] section, environment in
+                MainActor.assumeIsolated {
+                    if section == 1, let rows = self?.rowsSection(environment) { return rows }
+                    return NSCollectionLayoutSection.list(using: config, layoutEnvironment: environment)
+                }
+            }
+            let view = PageCollectionView(frame: .zero, collectionViewLayout: layout)
             view.backgroundColor = .clear
             // Marges des barres posées à la main (voir `TrackList`) : celles d'iOS s'y ajouteraient.
             view.contentInsetAdjustmentBehavior = .never
@@ -262,8 +269,9 @@ private struct TrackCollection: UIViewRepresentable {
             let discs = page.numbered && disks.count > 1 && !disks.contains(0)
             var counts: [UInt32: Int] = [:]
             var seen: [Int64: Int] = [:]
-            var items: [Item] = [.header]
-            if page.message != nil { items.append(.message) }
+            var top: [Item] = [.header]
+            if page.message != nil { top.append(.message) }
+            var items: [Item] = []
             rows = [:]
             rowAt = [:]
             trackItems = []
@@ -287,10 +295,11 @@ private struct TrackCollection: UIViewRepresentable {
             }
 
             var snapshot = NSDiffableDataSourceSnapshot<Int, Item>()
-            snapshot.appendSections([0])
-            snapshot.appendItems(items)
+            snapshot.appendSections([0, 1])
+            snapshot.appendItems(top, toSection: 0)
+            snapshot.appendItems(items, toSection: 1)
             // Lignes déjà là : refaites avec leurs nouvelles données (numéro, place, titre mis à jour).
-            snapshot.reconfigureItems(items.filter { dataSource.indexPath(for: $0) != nil })
+            snapshot.reconfigureItems((top + items).filter { dataSource.indexPath(for: $0) != nil })
             // Un titre retiré (de la playlist, ou du téléphone) : il s'efface en douceur. Tout autre changement (tri,
             // recherche, page rechargée) : la liste est remplacée d'un coup, sans animer des milliers de lignes.
             let removal = !first && !wasFiltered && !filtered && trackItems.count == before.count - 1
@@ -305,6 +314,39 @@ private struct TrackCollection: UIViewRepresentable {
                 // Résultats d'une recherche : en haut.
                 view.setContentOffset(CGPoint(x: 0, y: -view.contentInset.top), animated: false)
             }
+        }
+
+        /// Titres à hauteur fixe, calculée d'après la taille du texte (pochette de 48 points, ou les deux lignes de texte si
+        /// elles sont plus hautes), comme les lignes de `TrackRow`. Avant, iOS mesurait chaque ligne à son arrivée à l'écran,
+        /// en partant d'une hauteur estimée bien plus petite : en défilant dans une longue playlist, ces mesures relançaient
+        /// la mise en page en boucle, jusqu'à l'arrêt de l'app par iOS (plus de 100 passes imbriquées). Sans mesure, plus de
+        /// boucle, et un défilement plus léger.
+        private func rowsSection(_ environment: NSCollectionLayoutEnvironment) -> NSCollectionLayoutSection {
+            let traits = environment.traitCollection
+            func line(_ style: UIFont.TextStyle) -> CGFloat { UIFont.preferredFont(forTextStyle: style, compatibleWith: traits).lineHeight }
+            // Marges de la ligne : 7 points en haut et en bas.
+            let row = (max(48, line(.body) + line(.subheadline) + 3) + 14).rounded(.up)
+            let width = environment.container.effectiveContentSize.width
+            // Liste pas encore prête (première mise en page) : aucune ligne.
+            let snapshot = dataSource?.snapshot()
+            let ids = snapshot.flatMap { $0.indexOfSection(1) == nil ? nil : $0.itemIdentifiers(inSection: 1) } ?? []
+            guard ids.contains(where: { if case .disc = $0 { true } else { false } }) else {
+                // Que des titres (playlists) : une même hauteur pour toutes les lignes.
+                let size = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(row))
+                let group = NSCollectionLayoutGroup.vertical(layoutSize: size, subitems: [NSCollectionLayoutItem(layoutSize: size)])
+                return NSCollectionLayoutSection(group: group)
+            }
+            // Album à plusieurs CD (quelques dizaines de lignes) : « CD 2 » a sa propre hauteur.
+            var frames: [NSCollectionLayoutGroupCustomItem] = []
+            var y: CGFloat = 0
+            for id in ids {
+                var height = row
+                if case .disc(_, let at) = id { height = (line(.headline) + (at == 0 ? 0 : 14) + 14).rounded(.up) }
+                frames.append(NSCollectionLayoutGroupCustomItem(frame: CGRect(x: 0, y: y, width: width, height: height)))
+                y += height
+            }
+            let size = NSCollectionLayoutSize(widthDimension: .fractionalWidth(1), heightDimension: .absolute(max(y, 1)))
+            return NSCollectionLayoutSection(group: NSCollectionLayoutGroup.custom(layoutSize: size) { _ in frames })
         }
 
         private func reconfigureVisible() {
