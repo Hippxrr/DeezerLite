@@ -345,6 +345,7 @@ struct SettingsView: View {
     /// Onglets du bas sans leur nom (voir `MainTabs`).
     @AppStorage("tabLabelsHidden") private var tabLabelsHidden = false
     @AppStorage("tabBarFull") private var tabBarFull = true
+    @AppStorage("tabBarOneBlock") private var tabBarOneBlock = false
     @AppStorage("miniProgress") private var miniProgress = true
     @AppStorage("fullBleedCover") private var fullBleedCover = false
     @AppStorage("saveCoverOnLongPress") private var saveCoverOnLongPress = false
@@ -574,6 +575,21 @@ struct SettingsView: View {
                 }
                 .tint(Theme.accent)
                 .padding(14)
+                // Seulement pour la barre d'iOS (la barre complète a déjà la recherche dans son bloc).
+                if !tabBarFull {
+                    divider
+                    Toggle(isOn: $tabBarOneBlock) {
+                        HStack(spacing: 12) {
+                            Image(systemName: "rectangle.split.3x1").foregroundStyle(Theme.accent).frame(width: 26)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(tr("Barre d'iOS en un seul bloc (test)"))
+                                Text(tr("La recherche rejoint Accueil et Bibliothèque, comme dans Apple Music")).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    .tint(Theme.accent)
+                    .padding(14)
+                }
             }
         }
     }

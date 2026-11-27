@@ -286,6 +286,9 @@ struct MainTabs: View {
     @AppStorage("tabBarFull") private var tabBarFull = true
     /// Valeur figée tant que les Réglages sont ouverts (voir `Player.settingsOpen`).
     private var barFullShown: Bool { player.tabBarFullHeld ?? tabBarFull }
+    /// Réglages › Apparence, en test : la recherche dans le même bloc que les autres onglets de la barre d'iOS, comme dans
+    /// Apple Music (sinon, iOS la pose à part, à droite).
+    @AppStorage("tabBarOneBlock") private var tabBarOneBlock = false
     /// Barre de l'app réduite par le défilement.
     @State private var barCollapsed = false
     /// Onglets déjà ouverts : une page n'est construite qu'à sa première visite.
@@ -364,7 +367,7 @@ struct MainTabs: View {
             } label: {
                 tabLabel(tr("Bibliothèque"), Image(uiImage: TabIcons.library))
             }
-            Tab(value: 1, role: .search) {
+            Tab(value: 1, role: (player.tabBarOneBlockHeld ?? tabBarOneBlock) ? nil : TabRole.search) {
                 TabStack(active: tab == 1, popRequest: searchFocus) { SearchView(focusRequest: searchFocus) }
             } label: {
                 tabLabel(tr("Recherche"), Image(systemName: "magnifyingglass"))

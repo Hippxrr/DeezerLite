@@ -1308,10 +1308,13 @@ final class Player {
         didSet {
             guard settingsOpen != oldValue else { return }
             tabBarFullHeld = settingsOpen ? (UserDefaults.standard.object(forKey: "tabBarFull") as? Bool ?? true) : nil
+            tabBarOneBlockHeld = settingsOpen ? UserDefaults.standard.bool(forKey: "tabBarOneBlock") : nil
         }
     }
     /// Valeur de « Barre d'onglets complète » affichée pendant que les Réglages sont ouverts (voir `settingsOpen`).
     private(set) var tabBarFullHeld: Bool?
+    /// Pareil pour « Barre d'iOS en un seul bloc ».
+    private(set) var tabBarOneBlockHeld: Bool?
     /// Change à chaque changement de profil (et à la déconnexion) : une réponse de Deezer demandée pour le profil
     /// d'avant, arrivée après, n'est pas affichée.
     @ObservationIgnored private var profileGeneration = 0
