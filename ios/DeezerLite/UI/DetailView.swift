@@ -110,7 +110,9 @@ struct DetailView: View {
     /// Confirmation avant de supprimer le téléchargement de la collection (corbeille de la barre du haut).
     @State private var confirmRemoveDownload = false
     /// Boutons du haut (télécharger, partager, épingler, rechercher, trier) dépliés par « … » : repliés à chaque ouverture
-    /// de la page, ils ne servent pas à chaque visite.
+    /// de la page, ils ne servent pas à chaque visite. Repliés aussi en faisant défiler la liste, en ouvrant la recherche
+    /// ou en changeant le tri : pas de bouton pour les replier, la barre n'a la place que pour 5 boutons. Avant, avec une
+    /// croix en plus, iOS rangeait le tri et la croix dans son propre menu « … », qu'on prenait pour celui de l'app.
     @State private var toolsOpen = false
     @AppStorage private var sortRaw: String
     @AppStorage private var sortReversed: Bool
@@ -247,7 +249,8 @@ struct DetailView: View {
         }
         // Collection téléchargée : vérifié dans le bouton lui-même. Lu ici, il faisait recalculer toute la page à chaque
         // relecture des listes de téléchargements (plusieurs fois pendant le téléchargement d'une collection).
-        if let d = detail, !d.offline {
+        // Masqué pendant que les boutons sont dépliés : il en ferait un de trop pour la barre (voir `toolsOpen`).
+        if let d = detail, !d.offline, !toolsOpen {
             ToolbarItem(placement: .topBarTrailing) { DownloadRestButton(detail: d) }
         }
         if detail != nil, !toolsOpen {
@@ -259,7 +262,7 @@ struct DetailView: View {
         if toolsOpen { pageTools }
     }
 
-    /// Boutons dépliés par « … », puis de quoi les replier.
+    /// Boutons dépliés par « … » (5 au plus, voir `toolsOpen`).
     @ToolbarContentBuilder
     private var pageTools: some ToolbarContent {
         if compactBar, let d = detail {
@@ -287,7 +290,7 @@ struct DetailView: View {
         if let d = detail, d.kind != "artist", d.tracks.count > 1 {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
-                    withAnimation { searching = true }
+                    withAnimation { searching = true; toolsOpen = false }
                 } label: { Image(systemName: "magnifyingglass") }
                 .accessibilityLabel(tr("Rechercher dans la liste"))
             }
@@ -306,9 +309,6 @@ struct DetailView: View {
                 }
                 .accessibilityLabel(tr("Trier par"))
             }
-        }
-        ToolbarItem(placement: .topBarTrailing) {
-            Button { withAnimation(.snappy) { toolsOpen = false } } label: { Image(systemName: "xmark") }
         }
     }
 
@@ -344,6 +344,8 @@ struct DetailView: View {
                 // (`scrollPosition`), SwiftUI la réappliquait parfois quand la page se mettait à jour (changement de titre
                 // depuis le mini-lecteur…) et la liste sautait ailleurs.
                 .modifier(TopRowTracker { index in
+                    // Liste qui défile : les boutons dépliés se replient (écrit seulement s'ils l'étaient, pas à chaque ligne).
+                    if toolsOpen, index != memory.top { withAnimation(.snappy) { toolsOpen = false } }
                     memory.top = index
                     // Positions de la liste complète seulement (pas des résultats filtrés, ni loupe ouverte), et pas pendant
                     // la reconstruction (liste recréée par la loupe, pas encore remise à sa place : elle signalerait la ligne
@@ -389,6 +391,7 @@ struct DetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .modifier(ListSearch(active: searching, text: $query, presented: $searching))
         .toolbar { pageToolbar }
+        .onChange(of: "\(sortRaw)|\(sortReversed)") { if toolsOpen { withAnimation(.snappy) { toolsOpen = false } } }
         // Pochettes supprimées chez Deezer : vérifiées en arrière-plan, sans retarder l'affichage de la page.
         .task(id: detail?.tracks.count ?? 0) {
             if let d = detail, !d.offline { await player.checkCovers(d.tracks) }
