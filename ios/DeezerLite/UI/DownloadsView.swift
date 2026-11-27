@@ -16,7 +16,25 @@ struct DownloadsView: View {
         Self.byteFormatter.string(fromByteCount: Int64(player.downloadBytes))
     }
 
+    /// Titres téléchargés un par un dans une liste d'iOS (voir `TrackList`), sous le reste de la page.
     var body: some View {
+        // Tirer pour actualiser : listes des téléchargements relues.
+        TrackList(key: "downloads", tracks: player.downloads, list: player.downloads,
+                  onRefresh: { await player.refreshDownloadsInBackground() }) {
+            content
+                .padding(.horizontal, 16)
+                .padding(.top, 8)
+                .padding(.bottom, player.downloads.isEmpty ? 0 : 11)
+        }
+        .confirmationDialog(tr("Effacer tous les téléchargements ?"), isPresented: $confirmClear, titleVisibility: .visible) {
+            Button(tr("Tout effacer"), role: .destructive) { player.clearDownloads() }
+        } message: {
+            Text(tr("Les fichiers audio et leurs pochettes seront supprimés de ce téléphone."))
+        }
+    }
+
+    /// Haut de la page : téléchargements en cours, place prise, playlists et albums, boutons des titres individuels.
+    private var content: some View {
         VStack(alignment: .leading, spacing: 18) {
             // Parties qui suivent la progression des téléchargements : à part, seules redessinées à chaque mise à jour
             // (avant, toute la page, liste des titres téléchargés comprise, l'était plusieurs fois par seconde).
@@ -85,19 +103,8 @@ struct DownloadsView: View {
                         }
                     }
                     .buttonStyle(.pressable)
-
-                    LazyVStack(spacing: 14) {
-                        ForEach(Array(player.downloads.enumerated()), id: \.element.id) { i, track in
-                            TrackRow(track: track, list: player.downloads, index: i)
-                        }
-                    }
                 }
             }
-        }
-        .confirmationDialog(tr("Effacer tous les téléchargements ?"), isPresented: $confirmClear, titleVisibility: .visible) {
-            Button(tr("Tout effacer"), role: .destructive) { player.clearDownloads() }
-        } message: {
-            Text(tr("Les fichiers audio et leurs pochettes seront supprimés de ce téléphone."))
         }
     }
 

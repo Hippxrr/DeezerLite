@@ -332,10 +332,12 @@ final class CarouselSteps {
         }
         // Filet de sécurité si la fin d'animation n'arrive jamais (vue retirée…) : l'arrivée est validée quand même, sinon
         // le swipe était perdu (le lecteur n'était prévenu que de ce qui était déjà validé).
+        // Gardé par la tâche (pas `weak`) : le grand lecteur, détruit à sa fermeture, emportait ce carrousel avec lui, et le
+        // changement de titre déjà pris par un glissement était perdu.
         if delta != 0 {
-            Task { @MainActor [weak self] in
+            Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(1500))
-                guard let self, id == self.landingID, self.landing != 0, slide.axis == nil else { return }
+                guard id == self.landingID, self.landing != 0, slide.axis == nil else { return }
                 self.landingID += 1
                 self.commitLanding(slide: slide)
                 self.schedule(slide: slide, player: player, after: .zero)
@@ -373,9 +375,11 @@ final class CarouselSteps {
     @MainActor private func schedule(slide: SlideState, player: Player, after delay: Duration) {
         flush?.cancel()
         let queue = pendingQueue
-        flush = Task { @MainActor [weak self] in
+        // Gardé par la tâche (pas `weak`) : glisser vers le titre suivant puis fermer le grand lecteur aussitôt détruisait
+        // ce carrousel avant l'envoi, et le titre ne changeait pas.
+        flush = Task { @MainActor in
             try? await Task.sleep(for: delay)
-            guard let self, !Task.isCancelled, self.pending != 0, slide.axis == nil else { return }
+            guard !Task.isCancelled, self.pending != 0, slide.axis == nil else { return }
             // Autre liste lancée entre-temps : les pas comptés concernaient l'ancienne (avant, ils faisaient sauter les
             // premiers titres de la nouvelle).
             guard player.queueGeneration == queue else { self.pending = 0; return }
@@ -509,6 +513,8 @@ struct PlayButton: View {
 /// Cœur « J'aime » : animé, avec une petite vibration à l'ajout.
 struct LikeButton: View {
     @Environment(Player.self) private var player
+    /// Ligne d'une liste d'iOS (voir `TrackList`) : la confirmation est affichée par la page.
+    @Environment(\.askUnlike) private var askUnlike
     let track: Track
     let size: CGFloat
     /// Ajouts faits par un appui : seul cela déclenche le rebond et la vibration (pas l'arrivée sur un titre aimé).
@@ -521,7 +527,7 @@ struct LikeButton: View {
         let liked = player.lovedIds.contains(track.id)
         Button {
             if liked {
-                unlike = track
+                if let askUnlike { askUnlike(track) } else { unlike = track }
             } else {
                 likes += 1
                 player.setLiked(track, true)
@@ -571,6 +577,8 @@ final class PullState {
     /// Position visée par le ressort en cours.
     private(set) var target: CGFloat = 0
     private var speed = FingerSpeed()
+    /// Doigt sur le lecteur (glissement commencé, pas encore lâché).
+    private var held = false
 
     private var height: CGFloat { view?.bounds.height ?? UIScreen.main.bounds.height }
 
@@ -586,6 +594,7 @@ final class PullState {
     /// Lecteur tiré par le doigt : vertical seulement, jamais au-dessus de sa place.
     func drag(to y: CGFloat) {
         if target != y { view?.layer.removeAllAnimations() } // ressort en cours rattrapé par le doigt
+        held = true
         round(y > 0)
         self.y = y
         target = y
@@ -598,16 +607,19 @@ final class PullState {
         settle(open: open, velocity: speed.velocity(fallback: fallback), done: done)
     }
 
-    /// Geste annulé par le système alors que le lecteur était tiré vers le bas : il revient en place.
+    /// Geste annulé par le système alors que le lecteur était tiré vers le bas : il revient en place. Après un lâcher
+    /// normal, le ressort est déjà parti : rien à faire. Avant, un lâcher pour fermer (tiré ailleurs que sur la pochette)
+    /// était pris pour un geste annulé : le lecteur remontait, ou disparaissait d'un coup pendant qu'il remontait.
     func recover() {
         Task { @MainActor in
             await Task.yield()
-            if y > 0, target == y { settle(open: true) }
+            if held, y > 0 { settle(open: true) }
         }
     }
 
     /// Ressort qui part à la vitesse du doigt, sans rebond : remonte en place, ou descend jusqu'en bas (`done` ensuite).
     func settle(open: Bool, velocity: CGFloat = 0, done: (() -> Void)? = nil) {
+        held = false
         guard let view else { done?(); return }
         target = open ? 0 : height
         let distance = target - y
@@ -631,9 +643,17 @@ final class PullState {
 struct PlayerSheet: View {
     @Environment(Player.self) private var player
     @State private var pull = PullState()
+    /// Marges de l'écran (heure en haut, barre du bas), fixes. Celles d'iOS suivent la position du lecteur : tiré vers le
+    /// bas, il n'est plus sous l'heure et sa marge du haut fondait. La pochette pleine largeur, posée sous l'heure, montait
+    /// alors avec le doigt (et son fond était refait à chaque image du geste) ; au lâcher, la marge revenait d'un coup avant
+    /// la remontée du lecteur, et la pochette retombait : le petit rebond.
+    private let screen = PlayerSheet.screenInsets()
 
     var body: some View {
         NowPlayingView(pull: pull)
+            .safeAreaInset(edge: .top, spacing: 0) { Color.clear.frame(height: screen.top) }
+            .safeAreaInset(edge: .bottom, spacing: 0) { Color.clear.frame(height: screen.bottom) }
+            .ignoresSafeArea(.container, edges: .vertical)
             // Toujours en sombre, quel que soit le mode : son fond est la pochette assombrie (comme Apple Music).
             .environment(\.colorScheme, .dark)
             // Très grandes tailles de texte : bornées, sinon sur un petit iPhone (SE) le bas passait sous la barre.
@@ -643,6 +663,14 @@ struct PlayerSheet: View {
             .presentationBackground(.clear)
             // Fermé sans le geste (navigation, VoiceOver) : il redescend avec les coins de l'écran.
             .onChange(of: player.showFullPlayer) { _, open in if !open { pull.round(true) } }
+    }
+}
+
+extension PlayerSheet {
+    /// Marges de l'écran de l'app (heure, île, barre du bas).
+    static func screenInsets() -> UIEdgeInsets {
+        let window = UIApplication.shared.connectedScenes.compactMap { ($0 as? UIWindowScene)?.keyWindow }.first
+        return window?.safeAreaInsets ?? .zero
     }
 }
 
@@ -1623,7 +1651,8 @@ private struct QueuePanel: View {
     }
 
     var body: some View {
-        QueueList(player: player, rows: rows, current: player.queueIndex)
+        // Pochettes réparées suivies ici : leurs lignes sont alors refaites (la liste d'iOS ne les suit pas elle-même).
+        QueueList(player: player, rows: rows, current: player.queueIndex, fixes: player.coverFixes.count)
     }
 }
 
@@ -1643,6 +1672,8 @@ private struct QueueList: UIViewRepresentable {
     let player: Player
     let rows: [QueueRow]
     let current: Int
+    /// Nombre de pochettes réparées : en changeant, il fait refaire les lignes (voir `Coordinator.update`).
+    let fixes: Int
 
     func makeCoordinator() -> Coordinator { Coordinator(player: player) }
 
@@ -1931,6 +1962,10 @@ private struct LyricsPanel: View {
     @Environment(\.scenePhase) private var phase
     /// Ligne en cours (-1 : avant la première).
     @State private var active = -1
+    /// Ligne touchée et moment de l'appui : elle reste la ligne en cours jusqu'à ce que la lecture y soit (2 s au plus).
+    /// Avant, la position du lecteur, juste après le saut, était encore un peu avant la ligne (ou l'ancienne position) : la
+    /// ligne d'au-dessus s'allumait une demi-seconde, et le texte allait vers elle avant de revenir.
+    @State private var tapped: (line: Int, at: Date)?
     /// Lignes à partager en image (appui long sur une ligne).
     @State private var share: LyricsShareRequest?
 
@@ -1942,12 +1977,21 @@ private struct LyricsPanel: View {
                 LyricsList(lyrics: lyrics, active: active, onTap: { i in
                     // Paroles synchronisées : un appui amène la lecture à cette ligne.
                     player.seek(seconds: Double(lyrics.lines[i].ms) / 1000)
+                    tapped = (i, Date())
                     active = i
                 }, onShare: { i in shareLine(i, lyrics) })
                 // Paroles rechargées (autre titre, nouvel essai) : liste refaite, à la bonne ligne.
                 .id(shownFor)
                 .background {
-                    if lyrics.synced { LyricsClock(lines: lyrics.lines) { active = $0 } }
+                    if lyrics.synced {
+                        LyricsClock(lines: lyrics.lines) { i in
+                            // Seule une ligne d'avant la ligne touchée est ignorée (le saut pas encore fait) : la ligne
+                            // suivante s'allume normalement, même si on a touché la ligne en cours.
+                            if let t = tapped, i < t.line, Date().timeIntervalSince(t.at) < 2 { return }
+                            tapped = nil
+                            active = i
+                        }
+                    }
                 }
             } else if failed {
                 VStack(spacing: 12) {
@@ -1982,6 +2026,7 @@ private struct LyricsPanel: View {
                     loaded = false
                     failed = false
                     active = -1
+                    tapped = nil
                 }
                 return
             }
@@ -1991,6 +2036,7 @@ private struct LyricsPanel: View {
             loaded = false
             failed = false
             active = -1
+            tapped = nil
             lyrics = nil
             if let track = player.current, track.id != 0 {
                 // Interrompu (arrière-plan, autre titre) : rien n'est affiché (les paroles de l'ancien titre remplaçaient

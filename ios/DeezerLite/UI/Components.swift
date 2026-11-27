@@ -412,7 +412,9 @@ struct TrackRow: View {
         if let mp3 = player.mp3Cover(track) { return mp3 }
         if let saved = track.coverUrl, !saved.hasPrefix("http") { return saved }
         if let fixed = player.coverFixes[track.id] { return fixed }
-        if isCurrent, let shown = player.current?.coverUrl { return shown }
+        // Seulement si c'est bien le titre en cours : pendant que le grand lecteur est ouvert, la ligne marquée en cours ne
+        // suit pas les changements de titre (voir `Player.currentId`), et prenait la pochette du nouveau titre.
+        if isCurrent, player.current?.id == track.id, let shown = player.current?.coverUrl { return shown }
         return track.coverUrl
     }
 

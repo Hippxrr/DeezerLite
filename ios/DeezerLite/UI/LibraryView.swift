@@ -306,25 +306,26 @@ struct LibrarySectionView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                switch section {
-                case .downloads: DownloadsView()
-                case .stats: MonthView(refresh: statsRefresh)
-                case .albums, .artists: rows
+        Group {
+            if section == .downloads {
+                // Sa propre liste (titres téléchargés dans une liste d'iOS, voir `DownloadsView`).
+                DownloadsView()
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        if section == .stats { MonthView(refresh: statsRefresh) } else { rows }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                }
+                .refreshable {
+                    if section == .stats { statsRefresh += 1 }
+                    if let list { await player.loadLibrary(list, force: true) }
                 }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
         }
         .navigationTitle(section.title)
         .navigationBarTitleDisplayMode(.large)
-        .refreshable {
-            if section == .stats { statsRefresh += 1 }
-            // Téléchargements : listes relues (avant, le geste ne faisait rien).
-            if section == .downloads { await player.refreshDownloadsInBackground() }
-            if let list { await player.loadLibrary(list, force: true) }
-        }
         .task(id: player.profileEpoch) {
             if let list { await player.loadLibrary(list, force: false) }
         }

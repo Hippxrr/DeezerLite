@@ -464,27 +464,43 @@ final class Player {
         if let tab = favoriteTab(kind) { await loadLibrary(tab, force: false) }
     }
 
+    /// Envoi en cours par album ou artiste : les suivants attendent (ajouter puis retirer vite arrivent dans cet ordre).
+    @ObservationIgnored private var favoriteTasks: [String: Task<Void, Never>] = [:]
+
     /// Ajoute ou retire des favoris, tout de suite à l'écran ; remis comme avant si Deezer refuse.
     func setFavorite(_ card: Card, _ on: Bool) {
         guard let core, let tab = favoriteTab(card.kind) else { return }
-        let before = library[tab]
+        let gen = profileGeneration
         // Liste pas encore lue (réseau, chargement en cours) : pas touchée ici, elle est relue après l'envoi. Avant, elle
         // devenait une liste d'un seul élément, et la page Albums ou Artistes n'affichait plus que lui.
-        if let before {
-            library[tab] = on ? [card] + before.filter { $0.id != card.id } : before.filter { $0.id != card.id }
-        }
-        Task {
+        let known = library[tab] != nil
+        if let list = library[tab] { library[tab] = Self.favorites(list, card, on) }
+        let key = "\(card.kind)|\(card.id)"
+        let previous = favoriteTasks[key]
+        favoriteTasks[key] = Task {
+            // Envois dans l'ordre des appuis : avant, un ajout puis un retrait rapides pouvaient arriver à l'envers chez
+            // Deezer (album gardé en favori, cœur vide).
+            await previous?.value
             do {
                 try await core.setFavorite(kind: card.kind, id: card.id, on: on)
-                if before == nil { await loadLibrary(tab, force: true) }
+                guard gen == profileGeneration else { return }
+                if !known { await loadLibrary(tab, force: true) }
                 showToast(on ? tr("Ajouté à ta bibliothèque") : tr("Retiré de ta bibliothèque"))
             } catch {
-                // Liste pas touchée (pas encore lue) : rien à remettre. Avant, elle était remise à vide, y compris si elle
-                // venait d'arriver pendant l'envoi.
-                if before != nil { library[tab] = before }
+                // Autre profil ouvert entre-temps : sa liste n'est pas touchée.
+                guard gen == profileGeneration else { return }
+                // Seule cette carte est remise comme avant, dans la liste du moment. Avant, toute la liste d'avant l'appui
+                // revenait : un autre album aimé entre-temps, ou une liste relue pendant l'envoi, disparaissaient.
+                if let list = library[tab] { library[tab] = Self.favorites(list, card, !on) }
                 showToast(describe(error), seconds: 4)
             }
         }
+    }
+
+    /// La liste avec la carte en tête (`on`) ou sans elle.
+    private static func favorites(_ list: [Card], _ card: Card, _ on: Bool) -> [Card] {
+        let others = list.filter { $0.id != card.id }
+        return on ? [card] + others : others
     }
 
     func downloadedCollection(kind: String, id: UInt64) -> DownloadCollection? {
@@ -972,6 +988,7 @@ final class Player {
         guard let core, let id = entry.trackId else { return }
         let before = beforePlay()
         pendingRestore = nil
+        endSkipBurst()
         activateOutput()
         current = Track(id: id, title: entry.title ?? "", artist: entry.subtitle ?? "", album: "", durationS: 0, coverUrl: entry.coverUrl,
                         quality: nil, artistId: 0, albumId: 0, addedAt: nil, releaseDate: nil, artists: [])
@@ -2124,6 +2141,7 @@ final class Player {
         guard let core else { return }
         let before = beforePlay()
         pendingRestore = nil
+        endSkipBurst()
         activateOutput()
         current = tracks[index]
         isFlow = false
@@ -2181,6 +2199,7 @@ final class Player {
         let before = beforePlay()
         beforeFlow = before
         pendingRestore = nil
+        endSkipBurst()
         activateOutput()
         isFlow = true
         // Le Flow met un moment à arriver (recommandations, puis premier titre) : le mini-lecteur s'affiche aussitôt,
@@ -2205,6 +2224,7 @@ final class Player {
         // d'avant Flow : un mix en échec pendant le chargement de Flow ne montrait aucun message, et le chargement restait 20 s.
         let showing = current?.id
         pendingRestore = nil
+        endSkipBurst()
         activateOutput()
         isFlow = false
         startLoading()
@@ -2281,6 +2301,17 @@ final class Player {
     @ObservationIgnored private var skipTarget: Int?
     @ObservationIgnored private var sentTarget: Int?
     @ObservationIgnored private var skipWindow: Task<Void, Never>?
+
+    /// Rafale de suivant / précédent encore ouverte : abandonnée par une nouvelle lecture. Sinon, à sa fin (180 ms), elle
+    /// envoyait son titre dans la nouvelle file (un autre titre partait), et les annonces du titre demandé étaient
+    /// ignorées en attendant. Avant, seul l'appui sur un titre de la file l'abandonnait.
+    private func endSkipBurst() {
+        skipWindow?.cancel()
+        skipWindow = nil
+        skipTarget = nil
+        sentTarget = nil
+        awaiting = nil
+    }
 
     /// Le premier appui part tout de suite ; les suivants (dans les 180 ms) sont regroupés en un seul saut
     /// vers le bon titre, au lieu de faire charger au cœur chaque titre intermédiaire.
@@ -2813,12 +2844,8 @@ final class Player {
             return
         }
         activateOutput()
-        // Rafale de suivant / précédent encore ouverte : abandonnée (sinon sa fin renvoyait son titre par-dessus celui
-        // touché), et le titre touché devient celui attendu (le « suivant » d'après part de lui, ses annonces s'affichent).
-        skipWindow?.cancel()
-        skipWindow = nil
-        skipTarget = nil
-        sentTarget = nil
+        // Le titre touché devient celui attendu (le « suivant » d'après part de lui, ses annonces s'affichent).
+        endSkipBurst()
         if queue.indices.contains(index) {
             current = queue[index]
             shownIndex = index

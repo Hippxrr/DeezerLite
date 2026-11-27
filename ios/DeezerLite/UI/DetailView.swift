@@ -60,31 +60,6 @@ final class SortedTracks {
     var lastKey: String { key }
 }
 
-/// Position de la liste (voir `DetailView.scrollMemory`) : une classe simple, que SwiftUI ne surveille pas.
-private final class ScrollMemory {
-    var top: Int?
-    var kept: Int?
-    /// Pas de recherche tapée : la position est celle de la liste complète.
-    var tracking = true
-    var toggledAt = Date.distantPast
-    /// Loupe ouverte ou non lors du dernier affichage de la liste (voir `DetailView.pageWithPosition`).
-    var searching = false
-}
-
-/// Signale la première ligne visible de la liste (iOS 18 et plus ; avant, la position n'est pas gardée à l'ouverture de
-/// la loupe).
-private struct TopRowTracker: ViewModifier {
-    let onTop: (Int?) -> Void
-
-    func body(content: Content) -> some View {
-        if #available(iOS 18.0, *) {
-            content.onScrollTargetVisibilityChange(idType: Int.self, threshold: 0.5) { ids in onTop(ids.min()) }
-        } else {
-            content
-        }
-    }
-}
-
 /// Page d'une playlist, d'un album, d'un artiste, d'un mix ou des titres aimés.
 struct DetailView: View {
     @Environment(Player.self) private var player
@@ -102,11 +77,9 @@ struct DetailView: View {
     @State private var filtered = SortedTracks()
     /// Champ de recherche affiché seulement après un appui sur la loupe.
     @State private var searching = false
-    /// Ligne en haut de l'écran et dernière position dans la liste complète (hors recherche tapée), remise à l'ouverture
-    /// et à la fermeture de la loupe. Gardées hors de l'état de la vue : avant, chaque ligne qui passait en haut pendant
-    /// le défilement reconstruisait toute la page (en-tête, barre du haut, liste de centaines de titres), d'où des
-    /// saccades dans les longues playlists.
-    @State private var scrollMemory = ScrollMemory()
+    /// Position dans la liste complète (hors recherche tapée), remise à l'ouverture et à la fermeture de la loupe (qui
+    /// recréent la liste). Gardée hors de l'état de la vue : rien n'est redessiné pendant le défilement.
+    @State private var scrollMemory = TrackListPosition()
     /// Confirmation avant de supprimer le téléchargement de la collection (bouton de téléchargement de l'en-tête).
     @State private var confirmRemoveDownload = false
     /// Confirmation avant de la télécharger, avec la place que ça prendra.
@@ -203,41 +176,57 @@ struct DetailView: View {
 
     /// Contenu de la page (à part de `body` : tout au même endroit dépassait ce que le compilateur sait vérifier).
     private var pageContent: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                if let d = detail {
-                    if d.kind == "artist" {
-                        artistHeader(d)
-                        artistBody(d)
-                    } else {
-                        // Toute la playlist dans l'ordre choisi : c'est elle qui part en lecture, même pendant une recherche
-                        // (lancer un titre trouvé enchaîne avec la suite de la playlist, pas seulement les résultats).
-                        let ordered = full(d)
-                        let tracks = shown(d)
-                        header(d, tracks: ordered)
-                        if tracks.isEmpty && !query.isEmpty {
-                            Text(tr("Aucun titre ne correspond à « %@ ».", query)).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.top, 20)
-                        } else if d.kind == "mp3", d.tracks.isEmpty {
-                            Text(tr("Aucun MP3 pour l'instant : appuie sur + pour en importer un.")).foregroundStyle(.secondary)
-                                .multilineTextAlignment(.center).frame(maxWidth: .infinity).padding(.top, 20)
+        Group {
+            if let d = detail, d.kind != "artist" {
+                trackPage(d)
+            } else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        if let d = detail {
+                            artistHeader(d)
+                            artistBody(d)
+                        } else if failed {
+                            Text(tr("Impossible de charger la page.")).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.top, 60)
+                        } else {
+                            skeletonHeader
+                            SkeletonRows()
                         }
-                        // Numéros de piste seulement dans l'ordre de l'album. Cœur sur chaque titre, sauf dans les titres aimés
-                        // (tous aimés : aucun cœur).
-                        trackList(tracks, in: ordered, numbered: d.kind == "album" && sort == .standard && !sortReversed && query.isEmpty,
-                                  likeButton: ["album", "playlist", "mix"].contains(d.kind), hideLiked: d.kind == "loved", removable: d.kind == "playlist" && d.owned)
                     }
-                } else if failed {
-                    Text(tr("Impossible de charger la page.")).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.top, 60)
-                } else {
-                    skeletonHeader
-                    SkeletonRows()
+                    .padding(.bottom, 12)
                 }
+                // Artiste : sa photo commence tout en haut de l'écran, sous la barre (comme l'app Deezer).
+                .ignoresSafeArea(.container, edges: detail?.kind == "artist" ? .top : [])
+                .scrollDismissesKeyboard(.interactively)
+                // Liste reprise au doigt : les boutons dépliés se replient (voir `toolsOpen`).
+                .modifier(ScrollWatch { dragging in
+                    if dragging, toolsOpen { withAnimation(.snappy) { toolsOpen = false } }
+                })
+                .refreshable { await load(force: true) }
             }
-            .padding(.bottom, 12)
-            .animation(.easeOut(duration: 0.25), value: detail == nil)
         }
-        // Artiste : sa photo commence tout en haut de l'écran, sous la barre (comme l'app Deezer).
-        .ignoresSafeArea(.container, edges: detail?.kind == "artist" ? .top : [])
+        .animation(.easeOut(duration: 0.25), value: detail == nil)
+    }
+
+    /// Playlist, album, mix, titres aimés, MP3 : l'en-tête puis les titres, dans une liste d'iOS (voir `TrackList`).
+    private func trackPage(_ d: Detail) -> some View {
+        // Toute la playlist dans l'ordre choisi : c'est elle qui part en lecture, même pendant une recherche (lancer un titre
+        // trouvé enchaîne avec la suite de la playlist, pas seulement les résultats).
+        let ordered = full(d)
+        let tracks = shown(d)
+        let q = query.trimmingCharacters(in: .whitespaces)
+        // Numéros de piste seulement dans l'ordre de l'album.
+        let numbered = d.kind == "album" && sort == .standard && !sortReversed && query.isEmpty
+        let message: String? = tracks.isEmpty && !query.isEmpty ? tr("Aucun titre ne correspond à « %@ ».", query)
+            : d.kind == "mp3" && d.tracks.isEmpty ? tr("Aucun MP3 pour l'instant : appuie sur + pour en importer un.") : nil
+        // Cœur sur chaque titre, sauf dans les titres aimés (tous aimés : aucun cœur).
+        return TrackList(key: "\(sorted.lastKey)|\(q)|\(numbered)|\(message ?? "")", tracks: tracks, list: ordered,
+                         numbered: numbered, filtered: !q.isEmpty, message: message,
+                         likeButton: ["album", "playlist", "mix"].contains(d.kind), hideLiked: d.kind == "loved",
+                         onRemove: d.kind == "playlist" && d.owned ? { (t: Track) in remove(t) } : nil,
+                         position: scrollMemory, onRefresh: { await load(force: true) },
+                         onDrag: { if toolsOpen { withAnimation(.snappy) { toolsOpen = false } } }) {
+            header(d, tracks: ordered).padding(.bottom, 17)
+        }
     }
 
     @ToolbarContentBuilder
@@ -303,61 +292,8 @@ struct DetailView: View {
         }
     }
 
-    /// Contenu de la page avec sa position gardée quand la loupe s'ouvre ou se ferme (à part de `body` : tout au même
-    /// endroit dépassait ce que le compilateur sait vérifier).
-    private var pageWithPosition: some View {
-        let memory = scrollMemory
-        return ScrollViewReader { proxy in
-            pageContent
-                // Ligne du haut seulement observée (aucune position imposée à la liste) : avec une position liée
-                // (`scrollPosition`), SwiftUI la réappliquait parfois quand la page se mettait à jour (changement de titre
-                // depuis le mini-lecteur…) et la liste sautait ailleurs.
-                .modifier(TopRowTracker { index in
-                    memory.top = index
-                    // Positions de la liste complète seulement (pas des résultats filtrés, ni loupe ouverte), et pas pendant
-                    // la reconstruction (liste recréée par la loupe, pas encore remise à sa place : elle signalerait la ligne
-                    // du haut). Avant, en touchant Annuler, iOS vide d'abord le texte puis ferme la loupe un instant après :
-                    // entre les deux, la liste complète revenue en haut était enregistrée comme position, et on y retournait.
-                    if memory.tracking, !searching, memory.searching == searching, Date().timeIntervalSince(memory.toggledAt) > 0.5 { memory.kept = index }
-                })
-                // Liste reprise au doigt : les boutons dépliés se replient. Pas pendant la lancée d'un défilement d'avant : un
-                // appui sur « … » pendant qu'elle défilait encore les ouvrait, puis ils se repliaient aussitôt.
-                .modifier(ScrollWatch { dragging in
-                    if dragging, toolsOpen { withAnimation(.snappy) { toolsOpen = false } }
-                })
-                .onChange(of: query.isEmpty, initial: true) { _, empty in
-                    memory.tracking = empty
-                    // Recherche effacée, loupe encore ouverte (Annuler, ou champ vidé) : la liste complète revient tout de
-                    // suite à sa place, sans attendre que la loupe se ferme.
-                    if empty, searching { restorePosition(proxy) }
-                }
-                // Ouvrir ou fermer la loupe ajoute ou retire la recherche : toute la page est alors recréée, et la nouvelle
-                // liste partait en haut. La position est remise ici, dans la nouvelle liste. Avant, c'était fait par
-                // l'ancienne, déjà retirée : la liste restait en haut en annulant une recherche.
-                .onAppear {
-                    guard memory.searching != searching else { return }
-                    memory.searching = searching
-                    restorePosition(proxy)
-                }
-        }
-    }
-
-    private func restorePosition(_ proxy: ScrollViewProxy) {
-        let memory = scrollMemory
-        memory.toggledAt = Date()
-        guard let target = memory.kept else { return }
-        // Tout de suite, sans animation : la liste ne s'affiche pas d'abord en haut avant de sauter. Puis une seconde fois,
-        // la mise en page faite, seulement si elle n'y est pas encore (longue liste pas encore prête).
-        proxy.scrollTo(target, anchor: .top)
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(60))
-            if memory.top != target { proxy.scrollTo(target, anchor: .top) }
-        }
-    }
-
     var body: some View {
-        pageWithPosition
-        .scrollDismissesKeyboard(.interactively)
+        pageContent
         .background(alignment: .top) { tintGradient }
         // Artiste : son nom est déjà en grand sur sa photo.
         .navigationTitle(detail?.kind == "artist" ? "" : pageTitle)
@@ -399,7 +335,6 @@ struct DetailView: View {
             }
             if let c = await CoverLoader.shared.color(url: url), !Task.isCancelled { tint = Color(uiColor: c) }
         }
-        .refreshable { await load(force: true) }
     }
 
     // Sortis du `body`, comme `removeDownload` : sa longue chaîne approchait de ce que le compilateur sait vérifier à temps.
@@ -581,43 +516,11 @@ struct DetailView: View {
         }
     }
 
-    /// `tracks` : titres affichés ; `full` : liste lue (la même sans recherche, toute la playlist avec). `numbered` : ordre
-    /// de l'album, numéro devant chaque titre (de 1 à chaque CD) et CD séparés s'il y en a plusieurs, comme dans l'app
-    /// Deezer. `likeButton` : cœur sur chaque ligne.
-    private func trackList(_ tracks: [Track], in full: [Track], numbered: Bool, likeButton: Bool = false, hideLiked: Bool = false,
-                           removable: Bool = false) -> some View {
-        // Position de chaque titre affiché dans la liste complète (calculée seulement pendant une recherche).
-        let position: [Int64: Int] = tracks.count == full.count ? [:]
-            : Dictionary(full.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
-        // CD inconnu pour certains titres (copie hors ligne en partie téléchargée avant que l'app note les CD) : ni « CD 0 »
-        // ni numéros mélangés, une seule numérotation.
-        let disks = Set(tracks.map(\.disk))
-        let discs = numbered && disks.count > 1 && !disks.contains(0)
-        var counts: [UInt32: Int] = [:]
-        let numbers: [Int] = numbered ? tracks.map { (t: Track) -> Int in
-            let disk = discs ? t.disk : 0
-            counts[disk, default: 0] += 1
-            return counts[disk, default: 0]
-        } : []
-        return LazyVStack(spacing: 14) {
-            ForEach(tracks.indices, id: \.self) { i in
-                let track = tracks[i]
-                let row = TrackRow(track: track, list: full, index: position[track.id] ?? i, number: numbered ? numbers[i] : nil,
-                                   likeButton: likeButton, hideLiked: hideLiked, onRemove: removable ? { remove(track) } : nil)
-                // Premier titre d'un CD : « CD 2 » au-dessus, dans la même ligne de la liste (une seule par titre, pour
-                // garder la position de la liste quand la loupe s'ouvre).
-                if discs, i == 0 || tracks[i - 1].disk != track.disk {
-                    VStack(alignment: .leading, spacing: 14) {
-                        Text(tr("CD %@", "\(track.disk)")).font(.headline).padding(.top, i == 0 ? 0 : 14)
-                        row
-                    }
-                } else {
-                    row
-                }
-            }
+    /// Titres populaires d'un artiste (10 au plus : pas besoin de la liste d'iOS des autres pages).
+    private func topTracks(_ top: [Track]) -> some View {
+        LazyVStack(spacing: 14) {
+            ForEach(top.indices, id: \.self) { i in TrackRow(track: top[i], list: top, index: i) }
         }
-        // Lignes repérées par la vue défilante (position gardée quand la loupe s'ouvre ou se ferme, voir `body`).
-        .scrollTargetLayout()
         .padding(.horizontal, 16)
     }
 
@@ -637,8 +540,7 @@ struct DetailView: View {
         count == 1 ? tr("1 titre") : tr("%@ titres", "\(count)")
     }
 
-    /// Retiré de l'écran tout de suite ; remis à sa place si Deezer refuse. Sans animation : les lignes sont repérées par
-    /// leur position (pour garder la position de la liste), et l'animation effaçait la dernière ligne au lieu de celle-ci.
+    /// Retiré de l'écran tout de suite (la ligne s'efface, voir `TrackList`) ; remis à sa place si Deezer refuse.
     private func remove(_ track: Track) {
         guard let d = detail, let at = d.tracks.firstIndex(where: { $0.id == track.id }) else { return }
         detail?.tracks.remove(at: at)
@@ -655,8 +557,7 @@ struct DetailView: View {
         if !d.tracks.isEmpty {
             VStack(alignment: .leading, spacing: 12) {
                 Text(tr("Populaires")).font(.title3.bold()).padding(.horizontal, 16)
-                let top = Array(d.tracks.prefix(10))
-                trackList(top, in: top, numbered: false)
+                topTracks(Array(d.tracks.prefix(10)))
             }
         }
         if let latest = d.latest { ShelfRow(title: tr("Dernière sortie"), cards: [latest]) }
