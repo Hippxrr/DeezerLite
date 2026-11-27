@@ -283,6 +283,13 @@ pub struct Shelf {
     pub items: Vec<Card>,
 }
 
+/// Page d'un genre : son titre et ses rangées.
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct GenreContent {
+    pub title: String,
+    pub shelves: Vec<Shelf>,
+}
+
 #[derive(Debug, Clone, uniffi::Record)]
 /// Page d'une playlist, d'un album, d'un artiste ou d'un mix (« Collection » est déjà un type Swift).
 pub struct Detail {
@@ -881,15 +888,26 @@ impl Core {
         let out: Vec<Shelf> = sections?
             .into_iter()
             .map(|s| Shelf { kind: s.kind.to_owned(), title: s.title, items: mark_loved(cards(s.items), loved) })
-            // Genres (« Tes genres favoris ») : leur page n'est pas dans l'app, la carte ne s'ouvrait pas.
-            .map(|mut s| {
-                s.items.retain(|c| c.kind != "channel");
-                s
-            })
             .filter(|s| !s.items.is_empty())
             .collect();
         self.persist(copies, "home.json", &out);
         Ok(out)
+    }
+
+    /// Page d'un genre (« channels/french-rap ») : ses rangées. Avant, les genres étaient retirés de l'accueil (leur page
+    /// n'existait pas dans l'app).
+    pub async fn genre_page(&self, path: String) -> Result<GenreContent, CoreError> {
+        let api = self.api.clone();
+        let page = self.run(async move { api.page_view(&path).await }).await??;
+        Ok(GenreContent {
+            title: page.title,
+            shelves: page
+                .sections
+                .into_iter()
+                .map(|s| Shelf { kind: s.kind.to_owned(), title: s.title, items: cards(s.items) })
+                .filter(|s| !s.items.is_empty())
+                .collect(),
+        })
     }
 
     pub async fn search(&self, query: String) -> Result<SearchResults, CoreError> {
@@ -1370,6 +1388,13 @@ impl Core {
                 None => Err(e.into()),
             },
         }
+    }
+
+    /// Album ou artiste ajouté aux favoris (`on`) ou retiré (cœur de leur page).
+    pub async fn set_favorite(&self, kind: String, id: u64, on: bool) -> Result<(), CoreError> {
+        let api = self.api.clone();
+        self.run(async move { api.set_favorite(&kind, id, on).await }).await??;
+        Ok(())
     }
 
     pub async fn set_liked(&self, id: i64, liked: bool) -> Result<(), CoreError> {

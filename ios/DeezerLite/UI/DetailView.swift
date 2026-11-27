@@ -107,12 +107,13 @@ struct DetailView: View {
     /// le défilement reconstruisait toute la page (en-tête, barre du haut, liste de centaines de titres), d'où des
     /// saccades dans les longues playlists.
     @State private var scrollMemory = ScrollMemory()
-    /// Confirmation avant de supprimer le téléchargement de la collection (corbeille de la barre du haut).
+    /// Confirmation avant de supprimer le téléchargement de la collection (bouton de téléchargement de l'en-tête).
     @State private var confirmRemoveDownload = false
-    /// Boutons du haut (télécharger, partager, épingler, rechercher, trier) dépliés par « … » : repliés à chaque ouverture
-    /// de la page, ils ne servent pas à chaque visite. Repliés aussi en faisant défiler la liste, en ouvrant la recherche
-    /// ou en changeant le tri : pas de bouton pour les replier, la barre n'a la place que pour 5 boutons. Avant, avec une
-    /// croix en plus, iOS rangeait le tri et la croix dans son propre menu « … », qu'on prenait pour celui de l'app.
+    /// Confirmation avant de la télécharger, avec la place que ça prendra.
+    @State private var confirmDownload = false
+    /// Boutons du haut (épingler, rechercher, trier ; épingler seul sur un artiste) dépliés par « … » : repliés à chaque
+    /// ouverture de la page, ils ne servent pas à chaque visite. Repliés aussi en faisant défiler la liste, en ouvrant la
+    /// recherche ou en changeant le tri. Télécharger et partager sont sous l'en-tête (voir `actions`).
     @State private var toolsOpen = false
     @AppStorage private var sortRaw: String
     @AppStorage private var sortReversed: Bool
@@ -204,7 +205,7 @@ struct DetailView: View {
             VStack(alignment: .leading, spacing: 24) {
                 if let d = detail {
                     if d.kind == "artist" {
-                        header(d, tracks: d.tracks)
+                        artistHeader(d)
                         artistBody(d)
                     } else {
                         // Toute la playlist dans l'ordre choisi : c'est elle qui part en lecture, même pendant une recherche
@@ -234,11 +235,9 @@ struct DetailView: View {
             .animation(.easeOut(duration: 0.25), value: detail == nil)
         }
         .modifier(NativeSwipeContainer())
+        // Artiste : sa photo commence tout en haut de l'écran, sous la barre (comme l'app Deezer).
+        .ignoresSafeArea(.container, edges: detail?.kind == "artist" ? .top : [])
     }
-
-    /// Petit écran (iPhone SE, mini) : partager, épingler et télécharger regroupés dans un menu « … » (six boutons à
-    /// droite cachaient le titre de la page).
-    private var compactBar: Bool { UIScreen.main.bounds.width < 390 }
 
     @ToolbarContentBuilder
     private var pageToolbar: some ToolbarContent {
@@ -256,29 +255,17 @@ struct DetailView: View {
         }
         if detail != nil, !toolsOpen {
             ToolbarItem(placement: .topBarTrailing) {
-                Button { withAnimation(.snappy) { toolsOpen = true } } label: { Image(systemName: "ellipsis") }
+                Button { withAnimation(.snappy) { toolsOpen = true } } label: { Image(systemName: "ellipsis").foregroundStyle(.primary) }
                     .accessibilityLabel(tr("Plus d'actions"))
             }
         }
         if toolsOpen { pageTools }
     }
 
-    /// Boutons dépliés par « … » (5 au plus, voir `toolsOpen`).
+    /// Boutons dépliés par « … » : épingler, rechercher et trier (voir `toolsOpen`).
     @ToolbarContentBuilder
     private var pageTools: some ToolbarContent {
-        if compactBar, let d = detail {
-            ToolbarItem(placement: .topBarTrailing) { compactMenu(d) }
-        }
-        if !compactBar, let d = detail, ["album", "playlist", "loved"].contains(d.kind), !d.tracks.isEmpty {
-            ToolbarItem(placement: .topBarTrailing) { CollectionDownloadButton(detail: d, confirmRemove: $confirmRemoveDownload) }
-        }
-        if !compactBar, let d = detail, let url = deezerLink(kind: d.kind, id: d.id) {
-            ToolbarItem(placement: .topBarTrailing) {
-                ShareLink(item: url, subject: Text(d.title), message: Text(d.title)) { Image(systemName: "square.and.arrow.up") }
-                    .accessibilityLabel(tr("Partager"))
-            }
-        }
-        if !compactBar, let card = pinCard {
+        if let card = pinCard {
             ToolbarItem(placement: .topBarTrailing) {
                 let pinned = player.isPinned(card)
                 Button { withAnimation { player.togglePin(card) } } label: {
@@ -310,28 +297,6 @@ struct DetailView: View {
                 }
                 .accessibilityLabel(tr("Trier par"))
             }
-        }
-    }
-
-    /// Petit écran : télécharger (ou supprimer), partager et épingler dans un seul menu.
-    @ViewBuilder
-    private func compactMenu(_ d: Detail) -> some View {
-        let downloadable = ["album", "playlist", "loved"].contains(d.kind) && !d.tracks.isEmpty
-        let url = deezerLink(kind: d.kind, id: d.id)
-        if downloadable || url != nil || pinCard != nil {
-            Menu {
-                if downloadable { CompactDownloadItem(detail: d, confirmRemove: $confirmRemoveDownload) }
-                if let url {
-                    ShareLink(item: url, subject: Text(d.title), message: Text(d.title)) { Label(tr("Partager"), systemImage: "square.and.arrow.up") }
-                }
-                if let card = pinCard {
-                    let pinned = player.isPinned(card)
-                    Button { withAnimation { player.togglePin(card) } } label: {
-                        Label(pinned ? tr("Épinglé sur l'accueil") : tr("Épingler sur l'accueil"), systemImage: pinned ? "pin.fill" : "pin")
-                    }
-                }
-            } label: { Image(systemName: "ellipsis.circle") }
-            .accessibilityLabel(tr("Plus d'actions"))
         }
     }
 
@@ -388,7 +353,8 @@ struct DetailView: View {
         pageWithPosition
         .scrollDismissesKeyboard(.interactively)
         .background(alignment: .top) { tintGradient }
-        .navigationTitle(pageTitle)
+        // Artiste : son nom est déjà en grand sur sa photo.
+        .navigationTitle(detail?.kind == "artist" ? "" : pageTitle)
         .navigationBarTitleDisplayMode(.inline)
         .modifier(ListSearch(active: searching, text: $query, presented: $searching))
         .toolbar { pageToolbar }
@@ -396,6 +362,11 @@ struct DetailView: View {
         // Pochettes supprimées chez Deezer : vérifiées en arrière-plan, sans retarder l'affichage de la page.
         .task(id: detail?.tracks.count ?? 0) {
             if let d = detail, !d.offline { await player.checkCovers(d.tracks) }
+        }
+        .confirmationDialog(tr("Télécharger « %@ » ?", pageTitle), isPresented: $confirmDownload, titleVisibility: .visible) {
+            Button(tr("Télécharger")) { if let d = detail { player.download(d) } }
+        } message: {
+            Text(detail.map { player.downloadEstimate($0.tracks) } ?? "")
         }
         .confirmationDialog(tr("Supprimer le téléchargement ?"), isPresented: $confirmRemoveDownload, titleVisibility: .visible) {
             Button(tr("Supprimer"), role: .destructive) { removeDownload() }
@@ -506,40 +477,100 @@ struct DetailView: View {
             VStack(spacing: 4) {
                 Text(d.kind == "loved" ? player.lovedTitle : d.kind == "mp3" ? player.mp3Title : d.title)
                     .font(.title2.bold()).multilineTextAlignment(.center)
-                if !d.subtitle.isEmpty { Text(d.subtitle).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center) }
+                // Titres aimés et MP3 : leur sous-titre ne donnait que le nombre de titres, écrit aussi juste en dessous.
+                if !d.subtitle.isEmpty, d.kind != "loved", d.kind != "mp3" {
+                    Text(d.subtitle).font(.subheadline).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                }
                 // Nombre de titres et durée totale (playlists, albums, titres aimés, mixes).
                 if d.kind != "artist", !d.tracks.isEmpty {
                     Text(Self.summary(d.tracks)).font(.caption).foregroundStyle(.tertiary)
                 }
             }
-            if !tracks.isEmpty {
-                HStack(spacing: 12) {
-                    Button { player.play(tracks, at: 0) } label: {
-                        Label(tr("Lecture"), systemImage: "play.fill")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 13)
-                            .foregroundStyle(Theme.onAccent)
-                            .surface(Capsule(), tint: Theme.accent)
-                    }
-                    Button {
-                        if !player.shuffle { player.toggleShuffle() }
-                        player.play(tracks, at: Int.random(in: 0..<tracks.count))
-                    } label: {
-                        Label(tr("Aléatoire"), systemImage: "shuffle")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 13)
-                            .foregroundStyle(.primary)
-                            .surface(Capsule())
-                    }
-                }
-                .buttonStyle(.pressable)
-            }
+            if !tracks.isEmpty { actions(d, tracks: tracks) }
         }
         .frame(maxWidth: .infinity)
         .padding(.horizontal, 16)
         .padding(.top, 12)
+    }
+
+    /// Sous l'en-tête, comme dans l'app Deezer : cœur (album), recherche dans la liste, copier le lien, télécharger, et
+    /// l'aléatoire en grand à droite. Avant, deux gros boutons « Lecture » et « Aléatoire ».
+    private func actions(_ d: Detail, tracks: [Track]) -> some View {
+        HStack(spacing: 18) {
+            if d.kind == "album" { FavoriteButton(card: favoriteCard(d)) }
+            if d.tracks.count > 1 {
+                actionIcon("magnifyingglass", label: tr("Rechercher dans la liste")) { withAnimation { searching = true } }
+            }
+            if let url = deezerLink(kind: d.kind, id: d.id) {
+                actionIcon("square.and.arrow.up", label: tr("Copier le lien")) { player.copyLink(url) }
+            }
+            if ["album", "playlist", "loved"].contains(d.kind) {
+                HeaderDownloadButton(detail: d) { downloaded in
+                    if downloaded { confirmRemoveDownload = true } else { confirmDownload = true }
+                }
+            }
+            Spacer(minLength: 0)
+            Button {
+                if !player.shuffle { player.toggleShuffle() }
+                player.play(tracks, at: Int.random(in: 0..<tracks.count))
+            } label: {
+                Image(systemName: "shuffle")
+                    .font(.system(size: 22, weight: .bold))
+                    .foregroundStyle(Theme.onAccent)
+                    .frame(width: 56, height: 56)
+                    .surface(Circle(), tint: Theme.accent)
+            }
+            .buttonStyle(.pressable)
+            .accessibilityLabel(tr("Aléatoire"))
+        }
+        .padding(.top, 4)
+    }
+
+    private func actionIcon(_ symbol: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 22))
+                .foregroundStyle(.primary)
+                .frame(width: 40, height: 40)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.pressable)
+        .accessibilityLabel(label)
+    }
+
+    /// La page sous forme de carte, pour les favoris (album, artiste).
+    private func favoriteCard(_ d: Detail) -> Card {
+        Card(kind: d.kind, id: d.id, title: d.title, subtitle: d.subtitle, coverUrl: d.coverUrl, owned: false, key: "")
+    }
+
+    /// Page d'un artiste, comme dans l'app Deezer : sa photo sur toute la largeur en haut de l'écran, son nom en grand
+    /// dessus, puis le cœur (artiste suivi) et copier le lien. Avant, une photo ronde et « Lecture » / « Aléatoire ».
+    private func artistHeader(_ d: Detail) -> some View {
+        let side = UIScreen.main.bounds.width
+        return VStack(alignment: .leading, spacing: 12) {
+            ZStack(alignment: .bottomLeading) {
+                CoverView(url: coverURL(d), side: side, radius: 0)
+                LinearGradient(colors: [.clear, Theme.background.opacity(0.85)], startPoint: .center, endPoint: .bottom)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(d.title).font(.system(size: 40, weight: .heavy)).lineLimit(2).minimumScaleFactor(0.6)
+                    let fans = d.subtitle.replacingOccurrences(of: "Artiste · ", with: "")
+                    if !fans.isEmpty { Text(fans).font(.subheadline.weight(.semibold)).foregroundStyle(.secondary) }
+                }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 10)
+            }
+            .frame(width: side, height: side)
+            .clipped()
+            .accessibilityElement(children: .combine)
+            HStack(spacing: 18) {
+                FavoriteButton(card: favoriteCard(d))
+                if let url = deezerLink(kind: d.kind, id: d.id) {
+                    actionIcon("square.and.arrow.up", label: tr("Copier le lien")) { player.copyLink(url) }
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 16)
+        }
     }
 
     /// `tracks` : titres affichés ; `full` : liste lue (la même sans recherche, toute la playlist avec). `numbered` : ordre
@@ -639,22 +670,25 @@ private struct ListSearch: ViewModifier {
 /// « Télécharger le reste » : collection téléchargée dont des titres manquent sans être en cours (« Tout arrêter »,
 /// annulés). Vue à part : elle seule suit la progression des téléchargements (avant, toute la page de la playlist était
 /// redessinée à chaque progression).
-/// Télécharger la collection, ou la supprimer des téléchargements. Vue à part : seule elle suit les listes de
+/// Télécharger la collection, ou la supprimer des téléchargements (toujours après confirmation). Téléchargée : la même
+/// icône, pleine et à la couleur du thème (avant, une corbeille rouge). Vue à part : seule elle suit les listes de
 /// téléchargements, pas toute la page.
-private struct CollectionDownloadButton: View {
+private struct HeaderDownloadButton: View {
     @Environment(Player.self) private var player
     let detail: Detail
-    @Binding var confirmRemove: Bool
+    let onTap: (Bool) -> Void
 
     var body: some View {
         let downloaded = player.downloadedCollection(kind: detail.kind, id: detail.id) != nil
-        // Télécharger : tout de suite. Supprimer : après confirmation (un appui accidentel effaçait tout).
-        Button {
-            if downloaded { confirmRemove = true } else { player.toggleDownload(detail) }
-        } label: {
-            Image(systemName: downloaded ? "trash" : "arrow.down.circle")
-                .foregroundStyle(downloaded ? .red : .primary)
+        Button { onTap(downloaded) } label: {
+            Image(systemName: downloaded ? "arrow.down.circle.fill" : "arrow.down.circle")
+                .font(.system(size: 22))
+                .foregroundStyle(downloaded ? Theme.accent : Color.primary)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 40, height: 40)
+                .contentShape(Rectangle())
         }
+        .buttonStyle(.pressable)
         .accessibilityLabel(downloaded ? tr("Supprimer des téléchargements") : tr("Télécharger la collection"))
     }
 }
@@ -667,25 +701,6 @@ private struct DownloadRestButton: View {
         if player.downloadedCollection(kind: detail.kind, id: detail.id) != nil, detail.tracks.contains(where: { !$0.unavailable && !player.downloadedIds.contains($0.id) && player.downloadStates[$0.id] == nil }) {
             Button { player.download(detail) } label: { Image(systemName: "arrow.down.circle") }
                 .accessibilityLabel(tr("Télécharger le reste"))
-        }
-    }
-}
-
-/// Télécharger ou supprimer, dans le menu compact (petits iPhone) : vue à part, seule à lire les téléchargements. Lus dans
-/// le menu lui-même, ils faisaient recalculer toute la page à chaque relecture des listes de téléchargements (environ une
-/// fois par seconde pendant le téléchargement d'une collection), même en plein défilement (voir `DownloadRestButton`).
-private struct CompactDownloadItem: View {
-    @Environment(Player.self) private var player
-    let detail: Detail
-    @Binding var confirmRemove: Bool
-
-    var body: some View {
-        let downloaded = player.downloadedCollection(kind: detail.kind, id: detail.id) != nil
-        Button(role: downloaded ? .destructive : nil) {
-            if downloaded { confirmRemove = true } else { player.toggleDownload(detail) }
-        } label: {
-            Label(downloaded ? tr("Supprimer des téléchargements") : tr("Télécharger la collection"),
-                  systemImage: downloaded ? "trash" : "arrow.down.circle")
         }
     }
 }

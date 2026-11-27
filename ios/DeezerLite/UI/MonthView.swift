@@ -121,6 +121,7 @@ struct MonthView: View {
         HStack {
             Button { which = older } label: { Image(systemName: "chevron.left").frame(width: 44, height: 44) }
                 .disabled(older == nil)
+                .opacity(older == nil ? 0 : 1)
                 .accessibilityLabel(tr("Mois précédent"))
             Spacer()
             Text("\(Self.monthName(s.month)) \(String(s.year))")
@@ -129,6 +130,7 @@ struct MonthView: View {
             Spacer()
             Button { which = newer } label: { Image(systemName: "chevron.right").frame(width: 44, height: 44) }
                 .disabled(newer == nil)
+                .opacity(newer == nil ? 0 : 1)
                 .accessibilityLabel(tr("Mois suivant"))
         }
         .buttonStyle(.pressable)

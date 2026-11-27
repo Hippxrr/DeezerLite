@@ -384,7 +384,7 @@ private struct HistoryList: View {
                 HStack {
                     Text(tr("Récents")).font(.title3.bold())
                     Spacer()
-                    Button(tr("Tout effacer")) { withAnimation { player.clearHistory() } }
+                    Button(tr("Tout effacer")) { clearAll() }
                         .font(.subheadline)
                         .foregroundStyle(Theme.accent)
                 }
@@ -414,6 +414,20 @@ private struct HistoryList: View {
                 }
             }
             .padding(.horizontal, 16)
+        }
+    }
+
+    /// « Tout effacer » : les lignes partent l'une après l'autre, très vite, avec la même animation que la croix d'une ligne.
+    /// Avant, tout le bloc disparaissait d'un coup.
+    private func clearAll() {
+        let entries = player.history
+        Task { @MainActor in
+            for (i, entry) in entries.enumerated() {
+                if i > 0 { try? await Task.sleep(for: .milliseconds(40)) }
+                withAnimation { player.forget(entry) }
+            }
+            // Ce qui resterait (ajouté entre-temps) : effacé aussi.
+            withAnimation { player.clearHistory() }
         }
     }
 

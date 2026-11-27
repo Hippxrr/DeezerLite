@@ -572,6 +572,16 @@ struct MainTabs: View {
         .sheet(item: Binding(get: { player.mp3Editor }, set: { player.mp3Editor = $0 })) { edit in
             Mp3EditView(edit: edit).environment(player)
         }
+        // Télécharger ou supprimer une collection depuis le menu d'une carte (voir `Player.downloadAsk`).
+        .confirmationDialog(player.downloadAsk?.remove == true ? tr("Supprimer le téléchargement ?") : tr("Télécharger « %@ » ?", player.downloadAsk?.title ?? ""),
+                            isPresented: Binding(get: { player.downloadAsk != nil }, set: { if !$0 { player.downloadAsk = nil } }),
+                            titleVisibility: .visible, presenting: player.downloadAsk) { ask in
+            Button(ask.remove ? tr("Supprimer") : tr("Télécharger"), role: ask.remove ? .destructive : nil) { ask.run() }
+        } message: { ask in
+            Text(ask.remove
+                 ? tr("Les titres de « %@ » seront supprimés de ce téléphone, sauf ceux qui font aussi partie d'une autre playlist ou d'un autre album téléchargé.", ask.title)
+                 : ask.estimate)
+        }
         .confirmationDialog(tr("Supprimer ce MP3 ?"),
                             isPresented: Binding(get: { player.deletingMp3 != nil }, set: { if !$0 { player.deletingMp3 = nil } }),
                             titleVisibility: .visible, presenting: player.deletingMp3) { track in
@@ -622,6 +632,7 @@ struct TabStack<Content: View>: View {
                 .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).width } action: { rootWidth = $0 }
                 .navigationDestination(for: Route.self) { DetailView(route: $0).miniPlayerSpace().pageBackground() }
                 .navigationDestination(for: LibrarySection.self) { LibrarySectionView(section: $0).miniPlayerSpace().pageBackground() }
+                .navigationDestination(for: GenrePage.self) { GenreView(page: $0).miniPlayerSpace().pageBackground() }
         }
         .id(rebuilds)
         .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).width } action: { stackWidth = $0 }
@@ -637,6 +648,7 @@ struct TabStack<Content: View>: View {
             rebuilds += 1
         }
         .environment(\.openRoute) { path.append($0) }
+        .environment(\.openGenre) { path.append($0) }
         // Page demandée depuis le lecteur plein écran : ouverte dans l'onglet affiché.
         .onChange(of: player.requestedRoute) { _, route in
             guard active, let route else { return }

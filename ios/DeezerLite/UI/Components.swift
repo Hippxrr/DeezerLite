@@ -11,29 +11,50 @@ func deezerLink(kind: String, id: UInt64) -> URL? {
     return URL(string: "https://www.deezer.com/\(kind)/\(id)")
 }
 
-/// « Partager » dans le menu d'une carte (album, playlist, artiste).
+/// « Copier le lien » dans le menu d'une carte (album, playlist, artiste) : copié directement (avant, la feuille de partage).
 struct ShareCardButton: View {
+    @Environment(Player.self) private var player
     let card: Card
 
     var body: some View {
         if let url = deezerLink(kind: card.kind, id: card.id) {
-            ShareLink(item: url, subject: Text(card.title), message: Text(card.title)) {
-                Label(tr("Partager"), systemImage: "square.and.arrow.up")
-            }
+            Button { player.copyLink(url) } label: { Label(tr("Copier le lien"), systemImage: "link") }
         }
     }
 }
 
-/// « Partager » : la feuille de partage d'iOS (Messages, WhatsApp, copier le lien…) avec le lien du titre.
+/// « Copier le lien » d'un titre : copié directement (avant, la feuille de partage d'iOS).
 struct ShareTrackButton: View {
+    @Environment(Player.self) private var player
     let track: Track
 
     var body: some View {
         if let url = track.shareURL {
-            ShareLink(item: url, subject: Text(track.title), message: Text("\(track.title) – \(track.artist)")) {
-                Label(tr("Partager"), systemImage: "square.and.arrow.up")
-            }
+            Button { player.copyLink(url) } label: { Label(tr("Copier le lien"), systemImage: "link") }
         }
+    }
+}
+
+/// Cœur d'un album ou d'un artiste : dans les favoris (Bibliothèque › Albums, Artistes) ou non.
+struct FavoriteButton: View {
+    @Environment(Player.self) private var player
+    let card: Card
+
+    var body: some View {
+        let on = player.isFavorite(card)
+        Button { player.setFavorite(card, !on) } label: {
+            Image(systemName: on ? "heart.fill" : "heart")
+                .font(.system(size: 24))
+                .foregroundStyle(on ? Theme.accent : Color.primary)
+                .contentTransition(.symbolEffect(.replace))
+                .frame(width: 40, height: 40)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.pressable)
+        .sensoryFeedback(.selection, trigger: on)
+        .accessibilityLabel(on ? tr("Retirer de ta bibliothèque") : tr("Ajouter à ta bibliothèque"))
+        // Favoris de ce type lus si besoin, pour un cœur juste dès l'ouverture de la page.
+        .task(id: card.kind) { await player.loadFavorites(card.kind) }
     }
 }
 
@@ -50,6 +71,8 @@ enum Route: Hashable {
         switch card.kind {
         case "loved": self = .loved
         case "playlist", "album", "artist", "mp3": self = .detail(kind: card.kind, id: card.id, title: card.title)
+        // Genre : sa page n'est pas une `Route` (voir `GenrePage`).
+        case "channel": return nil
         default:
             guard !card.key.isEmpty else { return nil }
             self = .mix(key: card.key, title: card.title)
@@ -59,6 +82,64 @@ enum Route: Hashable {
 
 private struct OpenRouteKey: EnvironmentKey {
     static let defaultValue: (Route) -> Void = { _ in }
+}
+
+/// Page d'un genre (carte « Genre » de l'accueil ou d'une autre page de genre).
+struct GenrePage: Hashable {
+    let path: String
+    let title: String
+}
+
+extension EnvironmentValues {
+    /// Ouvre la page d'un genre dans l'onglet courant.
+    @Entry var openGenre: (GenrePage) -> Void = { _ in }
+}
+
+/// Ouvre une carte : sa page, ou celle de son genre.
+@MainActor
+func openCard(_ card: Card, route: (Route) -> Void, genre: (GenrePage) -> Void) {
+    if card.kind == "channel" {
+        genre(GenrePage(path: card.key, title: card.title))
+    } else if let r = Route(card) {
+        route(r)
+    }
+}
+
+/// Page d'un genre : ses rangées (playlists, albums, artistes, sous-genres), comme sur le bureau.
+struct GenreView: View {
+    @Environment(Player.self) private var player
+    let page: GenrePage
+    @State private var shelves: [Shelf]?
+    @State private var failed = false
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                if let shelves {
+                    ForEach(shelves.indices, id: \.self) { i in ShelfRow(title: shelves[i].title, cards: shelves[i].items) }
+                } else if failed {
+                    RetryNote { await load() }
+                } else {
+                    SkeletonShelf()
+                    SkeletonShelf()
+                }
+            }
+            .padding(.vertical, 12)
+        }
+        .navigationTitle(page.title)
+        .navigationBarTitleDisplayMode(.large)
+        .task { if shelves == nil { await load() } }
+        .refreshable { await load() }
+    }
+
+    private func load() async {
+        if let content = await player.genrePage(page.path) {
+            shelves = content.shelves
+            failed = false
+        } else {
+            failed = shelves == nil
+        }
+    }
 }
 
 extension EnvironmentValues {
@@ -265,6 +346,8 @@ struct TrackRow: View {
     @Environment(Player.self) private var player
     /// iOS 27 : « Lire ensuite » par le glissement d'iOS au lieu de celui de l'app (voir `NativeSwipeContainer`).
     @Environment(\.nativeSwipe) private var nativeSwipe
+    /// Réglages › Apparence : coche des titres téléchargés toujours verte (sinon, à la couleur du thème).
+    @AppStorage("downloadCheckGreen") private var greenCheck = false
     @Environment(\.openRoute) private var openRoute
     @State private var downloadStatus = TrackDownloadStatus()
     let track: Track
@@ -290,6 +373,8 @@ struct TrackRow: View {
     @State private var queued = 0
     /// Un glissement vient d'avoir lieu : l'appui qui le termine ne lance pas le titre.
     @State private var swiped = false
+    /// Glissement d'iOS ouvert (bouton « Lire ensuite » visible) : un appui sur la ligne le referme sans lancer le titre.
+    @State private var nativeSwipeOpen = false
     private static let swipeThreshold: CGFloat = 80
 
     /// État de téléchargement de CE titre. Juste après un changement de titre de la ligne, l'état suivi est encore
@@ -381,6 +466,18 @@ struct TrackRow: View {
         }
     }
 
+    /// Glissement d'iOS ouvert ou refermé. Refermé à la main (geste inverse), le doigt levé ensuite était pris pour un appui
+    /// et lançait le titre : l'appui est encore ignoré un court instant après la fermeture, comme pour le glissement de l'app.
+    private func nativeSwipePresented(_ open: Bool) {
+        nativeSwipeOpen = open
+        guard !open else { return }
+        swiped = true
+        Task {
+            try? await Task.sleep(for: .milliseconds(500))
+            if !nativeSwipeOpen { swiped = false }
+        }
+    }
+
     private func openArtist(_ a: ArtistRef) {
         // Pas encore d'image : elle sera reprise de la page de l'artiste à son ouverture.
         onOpen?(Card(kind: "artist", id: a.id, title: a.name, subtitle: "", coverUrl: nil, owned: false, key: ""))
@@ -392,7 +489,7 @@ struct TrackRow: View {
         // mémoire se recalculait à chaque fois, parfois en plein glissement.
         let isCurrent = player.currentId == track.id
         Button {
-            guard !swiped else { return }
+            guard !swiped, !nativeSwipeOpen else { return }
             activate()
         } label: {
             HStack(spacing: 12) {
@@ -409,7 +506,8 @@ struct TrackRow: View {
                         // à droite de la ligne).
                         if isDownloaded, downloadUpdate == nil {
                             Image(systemName: "checkmark.circle.fill").font(.footnote)
-                                .symbolRenderingMode(.palette).foregroundStyle(Theme.onAccent, Theme.accent)
+                                .symbolRenderingMode(.palette)
+                                .foregroundStyle(greenCheck ? Color.white : Theme.onAccent, greenCheck ? Color.green : Theme.accent)
                                 .accessibilityLabel(tr("Téléchargé"))
                         }
                         Text(number.map { "\($0). \(track.title)" } ?? track.title)
@@ -463,10 +561,10 @@ struct TrackRow: View {
             }
         }
         .modifier(SwipeRight(enabled: swipeToQueue && !track.unavailable && !nativeSwipe, onChanged: drag, onEnded: { release(completed: $0) }))
-        .modifier(NativeQueueSwipe(enabled: swipeToQueue && !track.unavailable && nativeSwipe) {
+        .modifier(NativeQueueSwipe(enabled: swipeToQueue && !track.unavailable && nativeSwipe, action: {
             player.queueAdd([track], next: true)
             queued += 1
-        })
+        }, onPresented: nativeSwipePresented))
         .sensoryFeedback(.impact(weight: .medium), trigger: queued)
         .sensoryFeedback(.selection, trigger: swipe >= Self.swipeThreshold) { _, ready in ready }
         .contextMenu {
@@ -593,6 +691,7 @@ private struct TrackMenu: View, Equatable {
 struct CardView: View {
     @Environment(Player.self) private var player
     @Environment(\.openRoute) private var openRoute
+    @Environment(\.openGenre) private var openGenre
     let card: Card
     var side: CGFloat = 148
     /// Appelé à l'ouverture (recherche : ajoute la carte à l'historique).
@@ -601,7 +700,7 @@ struct CardView: View {
     var body: some View {
         Button {
             onOpen?(card)
-            if let route = Route(card) { openRoute(route) }
+            openCard(card, route: openRoute, genre: openGenre)
         } label: {
             VStack(alignment: card.kind == "artist" ? .center : .leading, spacing: 8) {
                 // Pas d'ombre : dans une rangée qui défile, chaque ombre coûte un rendu à part.
@@ -859,6 +958,7 @@ struct CardArt: View {
 struct CardRow: View {
     @Environment(Player.self) private var player
     @Environment(\.openRoute) private var openRoute
+    @Environment(\.openGenre) private var openGenre
     let card: Card
     /// « Réorganiser l'accueil » (ou `reorderLabel`) dans le menu.
     var onReorder: (() -> Void)?
@@ -866,7 +966,7 @@ struct CardRow: View {
 
     var body: some View {
         Button {
-            if let route = Route(card) { openRoute(route) }
+            openCard(card, route: openRoute, genre: openGenre)
         } label: {
             ItemRow(title: card.kind == "loved" ? player.lovedTitle : card.kind == "mp3" ? player.mp3Title : card.title, subtitle: card.subtitle) {
                 CardArt(card: card)
@@ -988,12 +1088,18 @@ struct NativeSwipeContainer: ViewModifier {
 private struct NativeQueueSwipe: ViewModifier {
     let enabled: Bool
     let action: () -> Void
+    /// Bouton « Lire ensuite » affiché (`true`) ou refermé (`false`).
+    let onPresented: (Bool) -> Void
 
     func body(content: Content) -> some View {
         if enabled {
-            content.swipeActions(edge: .leading, allowsFullSwipe: true) {
-                Button(action: action) { Label(tr("Lire ensuite"), systemImage: "text.line.first.and.arrowtriangle.forward") }
-                    .tint(Theme.accent)
+            if #available(iOS 27.0, *) {
+                content.swipeActions(edge: .leading, allowsFullSwipe: true) {
+                    Button(action: action) { Label(tr("Lire ensuite"), systemImage: "text.line.first.and.arrowtriangle.forward") }
+                        .tint(Theme.accent)
+                } onPresentationChanged: { onPresented($0) }
+            } else {
+                content
             }
         } else {
             content

@@ -324,6 +324,12 @@ fn tracks(items: &[Value]) -> Vec<TrackInfo> {
         .collect()
 }
 
+/// « 47 min » ou « 14 h 05 min » (au moins 1 min).
+fn length(seconds: u64) -> String {
+    let (h, m) = (seconds / 3600, (seconds % 3600) / 60);
+    if h > 0 { format!("{h} h {m:02} min") } else { format!("{} min", m.max(1)) }
+}
+
 fn playlist_cards(items: &[Value], uid: u64) -> Vec<Card> {
     items
         .iter()
@@ -336,9 +342,11 @@ fn playlist_cards(items: &[Value], uid: u64) -> Vec<Card> {
                 kind: "playlist",
                 id: vn(p, "PLAYLIST_ID"),
                 title: vs(p, "TITLE"),
-                subtitle: match vn(p, "NB_SONG") {
-                    0 => "Playlist".into(),
-                    n => format!("{n} titres"),
+                subtitle: match (vn(p, "NB_SONG"), vn(p, "DURATION")) {
+                    (0, _) => "Playlist".into(),
+                    (n, 0) => format!("{n} titres"),
+                    // Durée de la playlist en plus, quand Deezer la donne : « 29 titres · 1 h 20 min ».
+                    (n, s) => format!("{n} titres · {}", length(s)),
                 },
                 cover_url: image(&kind, &vs(p, "PLAYLIST_PICTURE"), 500),
                 owned: uid != 0 && vn(p, "PARENT_USER_ID") == uid,
@@ -626,10 +634,15 @@ impl DeezerClient {
     /// Appel générique `page.get` (pages « home », genres…).
     async fn page(&self, name: &str) -> Result<Value> {
         let uid = self.user_id().await?;
+        // Mises en page acceptées : Deezer n'envoie que les rangées qui en utilisent une. Avec « long-card-horizontal-grid »
+        // et plus de types par grille (comme son site), les rangées qui s'en servent ne sont plus écartées d'office. Les
+        // éléments d'un type que l'app ne sait pas ouvrir sont simplement ignorés (voir `page_item_card`).
+        let cards = ["album", "artist", "channel", "playlist", "smarttracklist"];
         let support = json!({
-            "grid": ["channel", "album"],
-            "horizontal-grid": ["album", "artist", "channel", "playlist", "smarttracklist"],
-            "slideshow": ["album", "artist", "channel", "playlist", "smarttracklist"],
+            "grid": cards,
+            "horizontal-grid": cards,
+            "long-card-horizontal-grid": cards,
+            "slideshow": cards,
             "large-card": ["album", "playlist"],
             "horizontal-list": ["track", "song"],
             "item-highlight": [], "ads": [], "message": [], "list": []
@@ -1236,6 +1249,21 @@ impl DeezerClient {
     pub async fn unlike_track(&self, id: i64) -> Result<()> {
         let _: Value = self.gw("favorite_song.remove", &json!({ "SNG_ID": id.to_string() })).await?;
         self.invalidate_loved();
+        Ok(())
+    }
+
+    /// Ajoute (`on`) ou retire un album ou un artiste des favoris (albums et artistes de la Bibliothèque).
+    pub async fn set_favorite(&self, kind: &str, id: u64, on: bool) -> Result<()> {
+        let (method, key) = match (kind, on) {
+            ("album", true) => ("album.addFavorite", "ALB_ID"),
+            ("album", false) => ("album.deleteFavorite", "ALB_ID"),
+            ("artist", true) => ("artist.addFavorite", "ART_ID"),
+            ("artist", false) => ("artist.deleteFavorite", "ART_ID"),
+            _ => return Err(DeezerError::Gateway(format!("favori impossible pour « {kind} »"))),
+        };
+        let mut body = serde_json::Map::new();
+        body.insert(key.into(), Value::String(id.to_string()));
+        let _: Value = self.gw(method, &Value::Object(body)).await?;
         Ok(())
     }
 }

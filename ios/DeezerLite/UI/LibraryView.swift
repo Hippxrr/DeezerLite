@@ -25,11 +25,17 @@ enum LibrarySection: Hashable, CaseIterable {
 
 /// Bibliothèque : quatre rubriques en tuiles, puis les playlists, directement visibles.
 struct LibraryView: View {
+    /// Page des MP3 importés (même route à l'ouverture et pour leur nombre gardé en mémoire).
+    static let mp3Route = Route.detail(kind: "mp3", id: 0, title: "MP3")
     @Environment(Player.self) private var player
     @Environment(\.openRoute) private var openRoute
     @State private var creating = false
     @State private var newName = ""
     @State private var reordering = false
+    /// « 12 titres · 47 min » des MP3, et le numéro des changements de MP3 pour lequel il a été lu. Gardé ici : la copie
+    /// des pages du lecteur n'est pas suivie par l'écran, la ligne restait vide après la lecture.
+    @State private var mp3Summary: String?
+    @State private var mp3SummaryRevision = -1
 
     /// Ce qui est déjà sur l'accueil (titres aimés, éléments épinglés) n'est pas répété ici.
     private var playlists: [Card]? {
@@ -165,8 +171,21 @@ struct LibraryView: View {
         case .mp3:
             // MP3 importés sur le compte : la page permet d'en importer, de les modifier et de les supprimer. Nom et pochette
             // changeables sur ce téléphone, comme les titres aimés.
-            Button { openRoute(.detail(kind: "mp3", id: 0, title: "MP3")) } label: {
-                ItemRow(title: player.mp3Title, subtitle: tr("Tes MP3 importés")) { CardArt(card: player.mp3MenuCard) }
+            Button { openRoute(Self.mp3Route) } label: {
+                ItemRow(title: player.mp3Title, subtitle: mp3Summary ?? "") {
+                    CardArt(card: player.mp3MenuCard)
+                }
+            }
+            // Nombre de MP3 : la copie en mémoire si elle existe, sinon lue une fois, puis relue seulement après un import,
+            // une modification ou une suppression.
+            .task(id: player.mp3Revision) {
+                if mp3Summary == nil, let d = player.cachedDetail(Self.mp3Route) { mp3Summary = DetailView.summary(d.tracks) }
+                guard mp3Summary == nil || mp3SummaryRevision != player.mp3Revision else { return }
+                let revision = player.mp3Revision
+                if let d = await player.detail(Self.mp3Route, force: false) {
+                    mp3Summary = DetailView.summary(d.tracks)
+                    mp3SummaryRevision = revision
+                }
             }
             .buttonStyle(.pressable)
             .contextMenu {
@@ -355,6 +374,7 @@ struct SettingsView: View {
     @AppStorage("miniProgress") private var miniProgress = true
     @AppStorage("fullBleedCover") private var fullBleedCover = false
     @AppStorage("saveCoverOnLongPress") private var saveCoverOnLongPress = false
+    @AppStorage("downloadCheckGreen") private var downloadCheckGreen = false
     @AppStorage(BackgroundDownloadManager.wifiOnlyKey) private var downloadsWifiOnly = false
     /// Titres téléchargés dans une autre qualité que celle des téléchargements (« Mettre à jour »).
     @State private var qualityChanges: [QualityChange] = []
@@ -563,6 +583,18 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(tr("Appui long : enregistrer la pochette"))
                         Text(tr("Grand lecteur : un appui long sur la pochette l'enregistre dans Photos (au lieu du mode épuré)")).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .tint(Theme.accent)
+            .padding(14)
+            divider
+            Toggle(isOn: $downloadCheckGreen) {
+                HStack(spacing: 12) {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(downloadCheckGreen ? Color.green : Theme.accent).frame(width: 26)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(tr("Coche verte"))
+                        Text(tr("Titres téléchargés : coche verte devant le titre, au lieu de la couleur du thème")).font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }

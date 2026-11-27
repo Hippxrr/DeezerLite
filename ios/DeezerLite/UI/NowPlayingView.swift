@@ -780,6 +780,9 @@ struct NowPlayingView: View {
                     // partage. Avant, seul l'artiste réagissait. La zone va jusqu'à la moitié de la place libre à droite du
                     // texte : une marge reste avant le « + » et le cœur.
                     HalfGapLayout {
+                        // Verre « neutre » sur le titre, dans un conteneur de verre, et animation de fermeture coupée au bord
+                        // de la zone (méthode de FixedMenu) : avant, iOS 26 laissait un rectangle gris sur la zone d'appui
+                        // une fois le menu refermé.
                         Menu {
                             ForEach(t.artistLinks, id: \.id) { a in
                                 Button { player.navigate(.detail(kind: "artist", id: a.id, title: a.name)) } label: { Label(a.name, systemImage: "music.mic") }
@@ -794,11 +797,14 @@ struct NowPlayingView: View {
                             titleTexts(t)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .contentShape(Rectangle())
+                                .modifier(IdentityGlass())
                         }
                         // Sans fond gris à l'ouverture et à la fermeture du menu : iOS surlignait toute la zone d'appui (un
                         // rectangle visible une seconde en revenant des crédits). Zone d'aperçu nulle : rien n'est surligné.
                         .buttonStyle(.plain)
                         .contentShape(.contextMenuPreview, Rectangle().size(.zero))
+                        .clipped()
+                        .modifier(GlassContainer())
                     }
                 } else if let t = player.current {
                     // Flow en chargement (« Chargement… ») : pas de menu, il n'y a ni artiste ni crédits à ouvrir.
@@ -816,6 +822,7 @@ struct NowPlayingView: View {
     }
 
     /// Titre (réduit pour tenir sur la ligne plutôt que coupé par « … ») et artiste, sous la pochette.
+    /// (Voir `IdentityGlass` et `GlassContainer` pour le menu qui l'entoure.)
     private func titleTexts(_ t: Track) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(t.title).font(.title3.weight(.bold)).foregroundStyle(.white).lineLimit(1).minimumScaleFactor(0.5)
@@ -1568,9 +1575,17 @@ private struct LyricsPanel: View {
                     .modifier(ScrollWatch { reading in
                         readingUntil = reading ? .distantFuture : Date().addingTimeInterval(4)
                     })
-                    .onChange(of: active) { _, i in
+                    .onChange(of: active) { old, i in
                         guard i >= 0, Date() >= readingUntil else { return }
-                        withAnimation(.easeInOut(duration: 0.45)) { proxy.scrollTo(i, anchor: .center) }
+                        // Ouverture des paroles (aucune ligne avant) : directement à la bonne ligne. Avant, le texte défilait
+                        // depuis le début jusqu'à elle.
+                        if old < 0 {
+                            var instant = Transaction()
+                            instant.disablesAnimations = true
+                            withTransaction(instant) { proxy.scrollTo(i, anchor: .center) }
+                        } else {
+                            withAnimation(.easeInOut(duration: 0.45)) { proxy.scrollTo(i, anchor: .center) }
+                        }
                     }
                 }
                 .animation(.easeOut(duration: 0.3), value: active)

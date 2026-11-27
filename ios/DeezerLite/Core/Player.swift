@@ -400,17 +400,85 @@ final class Player {
         return task
     }
 
+    /// Page d'un genre (voir `GenreView`) ; `nil` si Deezer ne répond pas.
+    func genrePage(_ path: String) async -> GenreContent? {
+        guard let core else { return nil }
+        return try? await core.genrePage(path: path)
+    }
+
+    /// Confirmation en attente : télécharger ou supprimer une collection (voir `toggleDownload(_ card:)`).
+    var downloadAsk: DownloadAsk?
+
+    /// « 12 titres à télécharger, environ 480 Mo. 3 titres déjà sur ce téléphone. » Taille estimée d'après la durée des
+    /// titres et la qualité des téléchargements (Deezer ne donne pas la taille des fichiers avec la liste des titres).
+    func downloadEstimate(_ tracks: [Track]) -> String {
+        let wanted = tracks.filter { !$0.unavailable }
+        let missing = wanted.filter { !downloadedIds.contains($0.id) }
+        let have = wanted.count - missing.count
+        guard !missing.isEmpty else { return tr("Tout est déjà sur ce téléphone.") }
+        // Octets par seconde de musique : FLAC environ 920 kbit/s en moyenne, MP3 320 et 128 kbit/s.
+        let perSecond: Double = switch downloadQuality {
+        case .flac: 115_000
+        case .mp3High: 40_000
+        case .mp3Low: 16_000
+        }
+        let bytes = Int64(Double(missing.reduce(0) { $0 + Int($1.durationS) }) * perSecond)
+        let size = ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+        var text = missing.count == 1 ? tr("1 titre à télécharger, environ %@.", size)
+            : tr("%@ titres à télécharger, environ %@.", "\(missing.count)", size)
+        if have > 0 {
+            text += " " + (have == 1 ? tr("1 titre déjà sur ce téléphone.") : tr("%@ titres déjà sur ce téléphone.", "\(have)"))
+        }
+        return text
+    }
+
+    /// « Partager » : le lien deezer.com copié directement (avant, la feuille de partage d'iOS).
+    func copyLink(_ url: URL) {
+        UIPasteboard.general.string = url.absoluteString
+        showToast(tr("Lien copié"))
+    }
+
+    // MARK: Albums et artistes favoris (cœur de leur page)
+
+    /// Liste de la Bibliothèque qui contient les favoris de ce type : 1 = albums, 2 = artistes.
+    private func favoriteTab(_ kind: String) -> Int? {
+        kind == "album" ? 1 : kind == "artist" ? 2 : nil
+    }
+
+    func isFavorite(_ card: Card) -> Bool {
+        guard let tab = favoriteTab(card.kind) else { return false }
+        return library[tab]?.contains { $0.id == card.id } ?? false
+    }
+
+    /// Liste des favoris de ce type lue si besoin (pour savoir si le cœur est plein).
+    func loadFavorites(_ kind: String) async {
+        if let tab = favoriteTab(kind) { await loadLibrary(tab, force: false) }
+    }
+
+    /// Ajoute ou retire des favoris, tout de suite à l'écran ; remis comme avant si Deezer refuse.
+    func setFavorite(_ card: Card, _ on: Bool) {
+        guard let core, let tab = favoriteTab(card.kind) else { return }
+        let before = library[tab]
+        // Liste pas encore lue (réseau, chargement en cours) : pas touchée ici, elle est relue après l'envoi. Avant, elle
+        // devenait une liste d'un seul élément, et la page Albums ou Artistes n'affichait plus que lui.
+        if let before {
+            library[tab] = on ? [card] + before.filter { $0.id != card.id } : before.filter { $0.id != card.id }
+        }
+        Task {
+            do {
+                try await core.setFavorite(kind: card.kind, id: card.id, on: on)
+                if before == nil { await loadLibrary(tab, force: true) }
+                showToast(on ? tr("Ajouté à ta bibliothèque") : tr("Retiré de ta bibliothèque"))
+            } catch {
+                library[tab] = before
+                showToast(describe(error), seconds: 4)
+            }
+        }
+    }
+
     func downloadedCollection(kind: String, id: UInt64) -> DownloadCollection? {
         let id = Self.downloadId(kind: kind, id: id)
         return downloadCollections.first { $0.kind == kind && $0.id == id }
-    }
-
-    func toggleDownload(_ detail: Detail) {
-        if let collection = downloadedCollection(kind: detail.kind, id: detail.id) {
-            removeDownloadCollection(collection)
-        } else {
-            download(detail)
-        }
     }
 
     /// Collections dont la liste des titres est en train d'arriver de Deezer (« Télécharger la playlist » depuis une carte).
@@ -424,9 +492,11 @@ final class Player {
         preparingDownloads.contains(Self.preparingKey(kind: card.kind, id: card.id))
     }
 
+    /// Télécharger ou supprimer une collection depuis le menu d'une carte : toujours après confirmation (`downloadAsk`, avec
+    /// la place que ça prendra). Avant, l'appui lançait ou supprimait tout de suite.
     func toggleDownload(_ card: Card) {
         if let collection = downloadedCollection(kind: card.kind, id: card.id) {
-            removeDownloadCollection(collection)
+            downloadAsk = DownloadAsk(remove: true, title: card.title) { [weak self] in self?.removeDownloadCollection(collection) }
             return
         }
         let key = Self.preparingKey(kind: card.kind, id: card.id)
@@ -438,7 +508,9 @@ final class Player {
         Task {
             defer { preparingDownloads.remove(key) }
             if let detail = await detail(route, force: false), !detail.offline {
-                download(detail)
+                downloadAsk = DownloadAsk(remove: false, title: detail.title, estimate: downloadEstimate(detail.tracks)) { [weak self] in
+                    self?.download(detail)
+                }
             } else {
                 showToast(tr("Impossible de charger cette collection"), seconds: 4)
             }
@@ -1442,6 +1514,15 @@ final class Player {
     @ObservationIgnored private var sessionReady = false
     /// Ce qui a déjà été actualisé depuis le lancement (le reste l'est à la première visite, copie affichée en attendant).
     @ObservationIgnored private var refreshed: Set<String> = []
+    /// Listes de la Bibliothèque demandées avant l'ouverture de la session (voir `loadLibrary`).
+    @ObservationIgnored private var libraryWaiting: Set<Int> = []
+
+    /// Session ouverte : les listes de la Bibliothèque demandées avant sont chargées maintenant.
+    private func loadWaitingLibrary() {
+        let tabs = libraryWaiting
+        libraryWaiting = []
+        for tab in tabs { Task { await loadLibrary(tab, force: false) } }
+    }
 
     /// Une seule ouverture de session à la fois : avant, un retour du réseau pendant celle du lancement en lançait une
     /// seconde (accueil, bibliothèque et synchro des téléchargements chargés deux fois).
@@ -1466,6 +1547,7 @@ final class Player {
                 sessionRetryTask?.cancel()
                 sessionRetryTask = nil
                 sessionReady = true
+                loadWaitingLibrary()
                 forgetOfflineDetails()
                 // Profil ouvert maintenant connu : la liste des téléchargements montre ses Titres aimés à lui. Relue hors du
                 // fil principal (avant : l'app se figeait juste après l'animation de lancement avec une grosse bibliothèque).
@@ -1547,6 +1629,7 @@ final class Player {
             UserDefaults.standard.set(true, forKey: Self.sessionSavedKey)
             loggedIn = true
             sessionReady = true
+            loadWaitingLibrary()
             // Comme à l'ouverture de session : listes des téléchargements relues pour ce compte. Avant, après une session
             // expirée puis la connexion d'un autre compte, les Titres aimés téléchargés de l'ancien restaient affichés.
             forgetOfflineDetails()
@@ -1784,7 +1867,14 @@ final class Player {
     /// 0 = playlists, 1 = albums, 2 = artistes.
     func loadLibrary(_ tab: Int, force: Bool) async {
         let key = "library\(tab)"
-        guard sessionReady, force || !refreshed.contains(key) else { return }
+        // Session pas encore ouverte (lancement, retour du réseau) : chargée dès qu'elle l'est. Avant, la demande était
+        // simplement oubliée, et les pages Albums et Artistes restaient en chargement sans fin (seules les playlists étaient
+        // relancées à l'ouverture de la session).
+        guard sessionReady else {
+            libraryWaiting.insert(tab)
+            return
+        }
+        guard force || !refreshed.contains(key) else { return }
         guard force || networkSignature != "none" else { if library[tab] == nil { setLoadFailed(key, true) }; return }
         let gen = profileGeneration
         setLoadFailed(key, false)
@@ -3126,6 +3216,15 @@ final class Player {
         }
     }
 
+}
+
+/// Confirmation avant de télécharger une collection (avec la place estimée) ou de la supprimer des téléchargements.
+struct DownloadAsk: Identifiable {
+    let id = UUID()
+    let remove: Bool
+    let title: String
+    var estimate = ""
+    let run: () -> Void
 }
 
 /// Élément du haut de l'accueil, déplaçable par appui long.
