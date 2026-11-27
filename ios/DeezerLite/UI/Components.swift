@@ -344,8 +344,6 @@ struct PlayingBars: View {
 /// Ligne de titre : appui = lecture de la liste à partir de ce titre ; appui long = actions.
 struct TrackRow: View {
     @Environment(Player.self) private var player
-    /// iOS 27 : « Lire ensuite » par le glissement d'iOS au lieu de celui de l'app (voir `NativeSwipeContainer`).
-    @Environment(\.nativeSwipe) private var nativeSwipe
     /// Réglages › Apparence : coche des titres téléchargés toujours verte (sinon, à la couleur du thème).
     @AppStorage("downloadCheckGreen") private var greenCheck = false
     @Environment(\.openRoute) private var openRoute
@@ -373,8 +371,6 @@ struct TrackRow: View {
     @State private var queued = 0
     /// Un glissement vient d'avoir lieu : l'appui qui le termine ne lance pas le titre.
     @State private var swiped = false
-    /// Glissement d'iOS ouvert (bouton « Lire ensuite » visible) : un appui sur la ligne le referme sans lancer le titre.
-    @State private var nativeSwipeOpen = false
     private static let swipeThreshold: CGFloat = 80
 
     /// État de téléchargement de CE titre. Juste après un changement de titre de la ligne, l'état suivi est encore
@@ -466,17 +462,6 @@ struct TrackRow: View {
         }
     }
 
-    /// Glissement d'iOS ouvert ou refermé. Refermé à la main (geste inverse), le doigt levé ensuite était pris pour un appui
-    /// et lançait le titre : l'appui est encore ignoré un court instant après la fermeture, comme pour le glissement de l'app.
-    private func nativeSwipePresented(_ open: Bool) {
-        nativeSwipeOpen = open
-        guard !open else { return }
-        swiped = true
-        Task {
-            try? await Task.sleep(for: .milliseconds(500))
-            if !nativeSwipeOpen { swiped = false }
-        }
-    }
 
     private func openArtist(_ a: ArtistRef) {
         // Pas encore d'image : elle sera reprise de la page de l'artiste à son ouverture.
@@ -489,7 +474,7 @@ struct TrackRow: View {
         // mémoire se recalculait à chaque fois, parfois en plein glissement.
         let isCurrent = player.currentId == track.id
         Button {
-            guard !swiped, !nativeSwipeOpen else { return }
+            guard !swiped else { return }
             activate()
         } label: {
             HStack(spacing: 12) {
@@ -560,11 +545,9 @@ struct TrackRow: View {
                     .animation(.easeOut(duration: 0.15), value: ready)
             }
         }
-        .modifier(SwipeRight(enabled: swipeToQueue && !track.unavailable && !nativeSwipe, onChanged: drag, onEnded: { release(completed: $0) }))
-        .modifier(NativeQueueSwipe(enabled: swipeToQueue && !track.unavailable && nativeSwipe, action: {
-            player.queueAdd([track], next: true)
-            queued += 1
-        }, onPresented: nativeSwipePresented))
+        // Glissement de l'app (seuil court), aussi sur iOS 27 : celui d'iOS demandait de glisser presque jusqu'au bout, et il
+        // fallait plusieurs essais. Un glissement annulé ne lance pas le titre (voir `swiped`).
+        .modifier(SwipeRight(enabled: swipeToQueue && !track.unavailable, onChanged: drag, onEnded: { release(completed: $0) }))
         .sensoryFeedback(.impact(weight: .medium), trigger: queued)
         .sensoryFeedback(.selection, trigger: swipe >= Self.swipeThreshold) { _, ready in ready }
         .contextMenu {
@@ -968,10 +951,13 @@ struct CardRow: View {
         Button {
             openCard(card, route: openRoute, genre: openGenre)
         } label: {
-            ItemRow(title: card.kind == "loved" ? player.lovedTitle : card.kind == "mp3" ? player.mp3Title : card.title, subtitle: card.subtitle) {
+            ItemRow(title: card.kind == "loved" ? player.lovedTitle : card.kind == "mp3" ? player.mp3Title : card.title,
+                    subtitle: player.playlistSummary(card) ?? card.subtitle) {
                 CardArt(card: card)
             }
         }
+        // Playlist : sa durée, si elle n'est pas encore connue (voir `Player.ensurePlaylistLength`).
+        .task(id: card.id) { player.ensurePlaylistLength(card) }
         .buttonStyle(.pressable)
         .contextMenu {
             DownloadCollectionMenu(card: card)
@@ -1060,47 +1046,6 @@ private struct ScrollVisibility: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 18.0, *) {
             content.onScrollVisibilityChange(threshold: 0.01) { visible = $0 }
-        } else {
-            content
-        }
-    }
-}
-
-extension EnvironmentValues {
-    /// Glissement d'iOS pour « Lire ensuite » (iOS 27), posé par `NativeSwipeContainer`.
-    @Entry var nativeSwipe = false
-}
-
-/// Liste de titres (playlist, album, Téléchargements, titres de la recherche) : sur iOS 27, elle gère le glissement natif
-/// de ses lignes (une seule ouverte à la fois, refermée au défilement), et ses lignes passent au glissement d'iOS. Avant
-/// iOS 27, ou hors d'une telle liste, le glissement de l'app reste.
-struct NativeSwipeContainer: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(iOS 27.0, *) {
-            content.swipeActionsContainer().environment(\.nativeSwipe, true)
-        } else {
-            content
-        }
-    }
-}
-
-/// « Lire ensuite » par le glissement d'iOS (vers la droite ; glissé jusqu'au bout, il agit tout de suite).
-private struct NativeQueueSwipe: ViewModifier {
-    let enabled: Bool
-    let action: () -> Void
-    /// Bouton « Lire ensuite » affiché (`true`) ou refermé (`false`).
-    let onPresented: (Bool) -> Void
-
-    func body(content: Content) -> some View {
-        if enabled {
-            if #available(iOS 27.0, *) {
-                content.swipeActions(edge: .leading, allowsFullSwipe: true) {
-                    Button(action: action) { Label(tr("Lire ensuite"), systemImage: "text.line.first.and.arrowtriangle.forward") }
-                        .tint(Theme.accent)
-                } onPresentationChanged: { onPresented($0) }
-            } else {
-                content
-            }
         } else {
             content
         }

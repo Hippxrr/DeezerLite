@@ -317,7 +317,6 @@ struct LibrarySectionView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
         }
-        .modifier(NativeSwipeContainer()) // titres téléchargés
         .navigationTitle(section.title)
         .navigationBarTitleDisplayMode(.large)
         .refreshable {

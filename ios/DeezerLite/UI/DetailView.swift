@@ -111,6 +111,8 @@ struct DetailView: View {
     @State private var confirmRemoveDownload = false
     /// Confirmation avant de la télécharger, avec la place que ça prendra.
     @State private var confirmDownload = false
+    /// Change à chaque appui sur « Aléatoire » : l'icône joue son animation.
+    @State private var shuffleTaps = false
     /// Boutons du haut (épingler, rechercher, trier ; épingler seul sur un artiste) dépliés par « … » : repliés à chaque
     /// ouverture de la page, ils ne servent pas à chaque visite. Repliés aussi en faisant défiler la liste, en ouvrant la
     /// recherche ou en changeant le tri. Télécharger et partager sont sous l'en-tête (voir `actions`).
@@ -234,7 +236,6 @@ struct DetailView: View {
             .padding(.bottom, 12)
             .animation(.easeOut(duration: 0.25), value: detail == nil)
         }
-        .modifier(NativeSwipeContainer())
         // Artiste : sa photo commence tout en haut de l'écran, sous la barre (comme l'app Deezer).
         .ignoresSafeArea(.container, edges: detail?.kind == "artist" ? .top : [])
     }
@@ -255,7 +256,9 @@ struct DetailView: View {
         }
         if detail != nil, !toolsOpen {
             ToolbarItem(placement: .topBarTrailing) {
-                Button { withAnimation(.snappy) { toolsOpen = true } } label: { Image(systemName: "ellipsis").foregroundStyle(.primary) }
+                // Teinte de la barre remplacée : avant, iOS la gardait à la couleur du thème malgré la couleur de l'icône.
+                Button { withAnimation(.snappy) { toolsOpen = true } } label: { Image(systemName: "ellipsis").foregroundStyle(Color.primary) }
+                    .tint(Color.primary)
                     .accessibilityLabel(tr("Plus d'actions"))
             }
         }
@@ -510,15 +513,17 @@ struct DetailView: View {
                 }
             }
             Spacer(minLength: 0)
+            // L'icône Aléatoire de l'app, petite et blanche, sans rond : elle joue son animation à l'appui (sans changer de
+            // couleur). Avant, un grand rond à la couleur du thème.
             Button {
+                shuffleTaps.toggle()
                 if !player.shuffle { player.toggleShuffle() }
                 player.play(tracks, at: Int.random(in: 0..<tracks.count))
             } label: {
-                Image(systemName: "shuffle")
-                    .font(.system(size: 22, weight: .bold))
-                    .foregroundStyle(Theme.onAccent)
-                    .frame(width: 56, height: 56)
-                    .surface(Circle(), tint: Theme.accent)
+                ShuffleIcon(on: shuffleTaps)
+                    .foregroundStyle(Color.primary)
+                    .frame(width: 40, height: 40)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.pressable)
             .accessibilityLabel(tr("Aléatoire"))
@@ -615,10 +620,13 @@ struct DetailView: View {
 
     /// « 12 titres · 47 min » ou « 230 titres · 14 h 05 min ».
     static func summary(_ tracks: [Track]) -> String {
-        let seconds = tracks.reduce(0) { $0 + Int($1.durationS) }
+        summary(count: tracks.count, seconds: tracks.reduce(0) { $0 + Int($1.durationS) })
+    }
+
+    static func summary(count: Int, seconds: Int) -> String {
         let hours = seconds / 3600, minutes = (seconds % 3600) / 60
         let length = hours > 0 ? "\(hours) h \(String(format: "%02d", minutes)) min" : "\(max(minutes, seconds > 0 ? 1 : 0)) min"
-        return "\(tracks.count > 1 ? tr("%@ titres", "\(tracks.count)") : tr("1 titre")) · \(length)"
+        return "\(count > 1 ? tr("%@ titres", "\(count)") : tr("1 titre")) · \(length)"
     }
 
     /// Retiré de l'écran tout de suite ; remis à sa place si Deezer refuse. Sans animation : les lignes sont repérées par

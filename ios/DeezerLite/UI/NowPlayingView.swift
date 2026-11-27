@@ -1787,7 +1787,7 @@ private struct CreditCard<Content: View>: View {
 /// chaque appui, les flèches se démêlent (leurs départs se rejoignent, elles s'écartent en fourche) puis se
 /// recroisent avec un petit ressort, comme l'icône de « Répéter » qui se transforme. Dessin dans un carré de 24 x 24,
 /// mis à l'échelle.
-private struct ShuffleIcon: View {
+struct ShuffleIcon: View {
     let on: Bool
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 

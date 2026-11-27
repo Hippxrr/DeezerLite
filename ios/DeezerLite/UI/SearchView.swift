@@ -364,7 +364,6 @@ private struct AllTracks: View {
             }
             .padding(16)
         }
-        .modifier(NativeSwipeContainer())
         .navigationTitle(tr("Titres"))
         .navigationBarTitleDisplayMode(.inline)
         .pageBackground() // comme les autres pages ouvertes (avant : fond noir du système)
