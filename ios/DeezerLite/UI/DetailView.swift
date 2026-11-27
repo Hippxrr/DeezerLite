@@ -109,6 +109,9 @@ struct DetailView: View {
     @State private var scrollMemory = ScrollMemory()
     /// Confirmation avant de supprimer le téléchargement de la collection (corbeille de la barre du haut).
     @State private var confirmRemoveDownload = false
+    /// Boutons du haut (télécharger, partager, épingler, rechercher, trier) dépliés par « … » : repliés à chaque ouverture
+    /// de la page, ils ne servent pas à chaque visite.
+    @State private var toolsOpen = false
     @AppStorage private var sortRaw: String
     @AppStorage private var sortReversed: Bool
 
@@ -213,9 +216,10 @@ struct DetailView: View {
                             Text(tr("Aucun MP3 pour l'instant : appuie sur + pour en importer un.")).foregroundStyle(.secondary)
                                 .multilineTextAlignment(.center).frame(maxWidth: .infinity).padding(.top, 20)
                         }
-                        // Numéros de piste seulement dans l'ordre de l'album.
+                        // Numéros de piste seulement dans l'ordre de l'album. Cœur sur chaque titre, sauf dans les titres aimés
+                        // (tous aimés : aucun cœur).
                         trackList(tracks, in: ordered, numbered: d.kind == "album" && sort == .standard && !sortReversed && query.isEmpty,
-                                  removable: d.kind == "playlist" && d.owned)
+                                  likeButton: ["album", "playlist", "mix"].contains(d.kind), hideLiked: d.kind == "loved", removable: d.kind == "playlist" && d.owned)
                     }
                 } else if failed {
                     Text(tr("Impossible de charger la page.")).foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(.top, 60)
@@ -246,6 +250,18 @@ struct DetailView: View {
         if let d = detail, !d.offline {
             ToolbarItem(placement: .topBarTrailing) { DownloadRestButton(detail: d) }
         }
+        if detail != nil, !toolsOpen {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button { withAnimation(.snappy) { toolsOpen = true } } label: { Image(systemName: "ellipsis") }
+                    .accessibilityLabel(tr("Plus d'actions"))
+            }
+        }
+        if toolsOpen { pageTools }
+    }
+
+    /// Boutons dépliés par « … », puis de quoi les replier.
+    @ToolbarContentBuilder
+    private var pageTools: some ToolbarContent {
         if compactBar, let d = detail {
             ToolbarItem(placement: .topBarTrailing) { compactMenu(d) }
         }
@@ -290,6 +306,9 @@ struct DetailView: View {
                 }
                 .accessibilityLabel(tr("Trier par"))
             }
+        }
+        ToolbarItem(placement: .topBarTrailing) {
+            Button { withAnimation(.snappy) { toolsOpen = false } } label: { Image(systemName: "xmark") }
         }
     }
 
@@ -519,16 +538,39 @@ struct DetailView: View {
         .padding(.top, 12)
     }
 
-    /// `tracks` : titres affichés ; `full` : liste lue (la même sans recherche, toute la playlist avec).
-    private func trackList(_ tracks: [Track], in full: [Track], numbered: Bool, removable: Bool = false) -> some View {
+    /// `tracks` : titres affichés ; `full` : liste lue (la même sans recherche, toute la playlist avec). `numbered` : ordre
+    /// de l'album, numéro devant chaque titre (de 1 à chaque CD) et CD séparés s'il y en a plusieurs, comme dans l'app
+    /// Deezer. `likeButton` : cœur sur chaque ligne.
+    private func trackList(_ tracks: [Track], in full: [Track], numbered: Bool, likeButton: Bool = false, hideLiked: Bool = false,
+                           removable: Bool = false) -> some View {
         // Position de chaque titre affiché dans la liste complète (calculée seulement pendant une recherche).
         let position: [Int64: Int] = tracks.count == full.count ? [:]
             : Dictionary(full.enumerated().map { ($1.id, $0) }, uniquingKeysWith: { first, _ in first })
+        // CD inconnu pour certains titres (copie hors ligne en partie téléchargée avant que l'app note les CD) : ni « CD 0 »
+        // ni numéros mélangés, une seule numérotation.
+        let disks = Set(tracks.map(\.disk))
+        let discs = numbered && disks.count > 1 && !disks.contains(0)
+        var counts: [UInt32: Int] = [:]
+        let numbers: [Int] = numbered ? tracks.map { (t: Track) -> Int in
+            let disk = discs ? t.disk : 0
+            counts[disk, default: 0] += 1
+            return counts[disk, default: 0]
+        } : []
         return LazyVStack(spacing: 14) {
             ForEach(tracks.indices, id: \.self) { i in
                 let track = tracks[i]
-                TrackRow(track: track, list: full, index: position[track.id] ?? i, showCover: !numbered,
-                         onRemove: removable ? { remove(track) } : nil)
+                let row = TrackRow(track: track, list: full, index: position[track.id] ?? i, number: numbered ? numbers[i] : nil,
+                                   likeButton: likeButton, hideLiked: hideLiked, onRemove: removable ? { remove(track) } : nil)
+                // Premier titre d'un CD : « CD 2 » au-dessus, dans la même ligne de la liste (une seule par titre, pour
+                // garder la position de la liste quand la loupe s'ouvre).
+                if discs, i == 0 || tracks[i - 1].disk != track.disk {
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text(tr("CD %@", "\(track.disk)")).font(.headline).padding(.top, i == 0 ? 0 : 14)
+                        row
+                    }
+                } else {
+                    row
+                }
             }
         }
         // Lignes repérées par la vue défilante (position gardée quand la loupe s'ouvre ou se ferme, voir `body`).

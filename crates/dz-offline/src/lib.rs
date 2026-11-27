@@ -1888,6 +1888,7 @@ mod tests {
             album_id: 2,
             artists: vec![],
             gain: None,
+            disk: 0,
         }
     }
 

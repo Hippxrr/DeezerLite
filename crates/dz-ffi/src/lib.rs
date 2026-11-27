@@ -219,6 +219,9 @@ pub struct Track {
     /// sans titre de remplacement. L'app le grise et ne le lance pas.
     #[uniffi(default = false)]
     pub unavailable: bool,
+    /// Numéro du CD dans son album (0 : inconnu), pour séparer les CD sur la page d'un album.
+    #[uniffi(default = 0)]
+    pub disk: u32,
 }
 
 impl From<&TrackInfo> for Track {
@@ -238,6 +241,7 @@ impl From<&TrackInfo> for Track {
             release_date: t.release_date.clone(),
             artists: t.artists.iter().filter(|a| a.id != 0).map(|a| ArtistRef { id: a.id, name: a.name.clone() }).collect(),
             unavailable: t.restricted && t.fallback_id.is_none(),
+            disk: t.disk,
         }
     }
 }
@@ -1942,6 +1946,7 @@ mod tests {
             album_id: 2,
             artists: vec![],
             gain: None,
+            disk: 0,
         }
     }
 

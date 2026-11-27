@@ -268,7 +268,12 @@ struct TrackRow: View {
     let track: Track
     let list: [Track]
     let index: Int
-    var showCover = true
+    /// Numéro devant le titre (page d'un album, dans son ordre) : « 3. Titre ».
+    var number: Int?
+    /// Cœur à droite de la ligne pour aimer le titre (playlists, albums) ; ailleurs, un petit cœur s'il est déjà aimé.
+    var likeButton = false
+    /// Page des titres aimés : aucun cœur (tous le sont, il se répétait sur chaque ligne).
+    var hideLiked = false
     /// Appelé à la lecture (recherche : ajoute le titre à l'historique).
     var onPlay: (() -> Void)?
     /// Appelé quand on ouvre l'album ou un artiste depuis le menu (recherche : ils rejoignent l'historique,
@@ -389,26 +394,25 @@ struct TrackRow: View {
             activate()
         } label: {
             HStack(spacing: 12) {
-                if showCover {
-                    CoverView(url: rowCover(isCurrent: isCurrent), side: 48, radius: 8)
-                        .overlay {
-                            if isCurrent {
-                                RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.black.opacity(0.5))
-                                PlayingBars(playing: player.status.playing && !player.showFullPlayer)
-                            }
-                        }
-                } else {
-                    ZStack {
+                CoverView(url: rowCover(isCurrent: isCurrent), side: 48, radius: 8)
+                    .overlay {
                         if isCurrent {
+                            RoundedRectangle(cornerRadius: 8, style: .continuous).fill(.black.opacity(0.5))
                             PlayingBars(playing: player.status.playing && !player.showFullPlayer)
-                        } else {
-                            Text("\(index + 1)").font(.subheadline.monospacedDigit()).foregroundStyle(.secondary)
                         }
                     }
-                    .frame(width: 28)
-                }
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(track.title).font(.body.weight(.medium)).lineLimit(1).foregroundStyle(isCurrent ? Theme.accent : .primary)
+                    HStack(spacing: 5) {
+                        // Téléchargé : coche à la couleur du thème devant le titre, comme dans l'app Deezer (avant, une flèche
+                        // à droite de la ligne).
+                        if isDownloaded, downloadUpdate == nil {
+                            Image(systemName: "checkmark.circle.fill").font(.footnote)
+                                .symbolRenderingMode(.palette).foregroundStyle(Theme.onAccent, Theme.accent)
+                                .accessibilityLabel(tr("Téléchargé"))
+                        }
+                        Text(number.map { "\($0). \(track.title)" } ?? track.title)
+                            .font(.body.weight(.medium)).lineLimit(1).foregroundStyle(isCurrent ? Theme.accent : .primary)
+                    }
                     Text(track.unavailable ? unavailableLabel : track.artist).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer(minLength: 8)
@@ -421,11 +425,12 @@ struct TrackRow: View {
                         Image(systemName: "exclamationmark.circle").font(.caption).foregroundStyle(.red)
                             .accessibilityLabel(tr("Échec du téléchargement"))
                     }
-                } else if isDownloaded {
-                    Image(systemName: "arrow.down.circle.fill").font(.caption).foregroundStyle(Theme.accent)
-                        .accessibilityLabel(tr("Téléchargé"))
                 }
-                if player.lovedIds.contains(track.id) {
+                if likeButton {
+                    // Bouton à part dans la ligne : l'appui aime le titre sans le lancer. Le même que celui du mini lecteur :
+                    // retirer des titres aimés se confirme.
+                    LikeButton(track: track, size: 19).frame(width: 34, height: 34)
+                } else if !hideLiked, player.lovedIds.contains(track.id) {
                     Image(systemName: "heart.fill").font(.caption).foregroundStyle(Theme.accent).transition(.scale.combined(with: .opacity))
                         .accessibilityLabel(tr("Aimé"))
                 }

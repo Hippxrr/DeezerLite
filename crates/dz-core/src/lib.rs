@@ -1387,7 +1387,7 @@ impl Actor {
         self.prefetched = None;
         let info = TrackInfo {
             id: LOCAL_ID, title, artist: "Source locale".into(), album: String::new(),
-            duration_s: 0, cover_url: None, track_token: None, quality: None, added_at: None, release_date: None, fallback_id: None, restricted: false, artist_id: 0, album_id: 0, artists: Vec::new(), gain: None,
+            duration_s: 0, cover_url: None, track_token: None, quality: None, added_at: None, release_date: None, fallback_id: None, restricted: false, artist_id: 0, album_id: 0, artists: Vec::new(), gain: None, disk: 0,
         };
         self.infos.insert(LOCAL_ID, info);
         self.cancel_streams();
@@ -1869,7 +1869,7 @@ mod tests {
     fn track(id: i64) -> TrackInfo {
         TrackInfo {
             id, title: format!("t{id}"), artist: String::new(), album: String::new(), duration_s: 1, cover_url: None, track_token: None,
-            quality: None, added_at: None, release_date: None, fallback_id: None, restricted: false, artist_id: 0, album_id: 0, artists: Vec::new(), gain: None,
+            quality: None, added_at: None, release_date: None, fallback_id: None, restricted: false, artist_id: 0, album_id: 0, artists: Vec::new(), gain: None, disk: 0,
         }
     }
 

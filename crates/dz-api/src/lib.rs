@@ -992,6 +992,9 @@ pub struct TrackInfo {
     /// pour la normalisation du volume. `None` : inconnu (anciens téléchargements, certaines listes).
     #[serde(default)]
     pub gain: Option<f32>,
+    /// Numéro du CD dans son album (« DISK_NUMBER », 1 pour le premier) : la page d'un album sépare ses CD. 0 : inconnu.
+    #[serde(default)]
+    pub disk: u32,
 }
 
 /// Un artiste crédité sur un titre.
@@ -1021,6 +1024,8 @@ pub(crate) struct RawTrack {
     token: Option<String>,
     #[serde(rename = "GAIN", default, deserialize_with = "flex_gain")]
     gain: Option<f32>,
+    #[serde(rename = "DISK_NUMBER", default, deserialize_with = "flex_u64")]
+    disk: u64,
     #[serde(rename = "ART_ID", default, deserialize_with = "flex_u64")]
     artist_id: u64,
     #[serde(rename = "ALB_ID", default, deserialize_with = "flex_u64")]
@@ -1099,7 +1104,7 @@ impl From<RawTrack> for TrackInfo {
         TrackInfo {
             id: r.id, title, artist, album: r.album,
             duration_s: r.duration, cover_url, track_token: r.token, quality: None, added_at, release_date, fallback_id, restricted,
-            artist_id, album_id: r.album_id, artists, gain: r.gain,
+            artist_id, album_id: r.album_id, artists, gain: r.gain, disk: u32::try_from(r.disk).unwrap_or(0),
         }
     }
 }
@@ -1352,7 +1357,9 @@ mod tests {
     #[test]
     fn odd_numbers_from_deezer_keep_the_track() {
         let t: RawTrack = serde_json::from_value(serde_json::json!({ "SNG_ID": "42", "SNG_TITLE": "T", "DURATION": "", "ART_ID": null, "ALB_ID": -3 })).unwrap();
-        assert_eq!((t.id, t.duration, t.artist_id, t.album_id), (42, 0, 0, 0));
+        assert_eq!((t.id, t.duration, t.artist_id, t.album_id, t.disk), (42, 0, 0, 0, 0));
+        let t: RawTrack = serde_json::from_value(serde_json::json!({ "SNG_ID": 1, "DISK_NUMBER": "2" })).unwrap();
+        assert_eq!(TrackInfo::from(t).disk, 2, "numéro du CD");
         let t: RawTrack = serde_json::from_value(serde_json::json!({ "SNG_ID": 7, "SNG_TITLE": null, "VERSION": null, "ART_NAME": null,
             "ALB_TITLE": null, "ALB_PICTURE": null, "ARTISTS": null })).unwrap();
         assert!(t.id == 7 && t.title.is_empty() && t.artist.is_empty() && t.picture.is_empty() && t.artists.is_empty());

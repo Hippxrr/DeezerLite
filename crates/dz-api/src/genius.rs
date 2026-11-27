@@ -82,13 +82,23 @@ fn hits(search: &Value) -> Vec<Hit> {
 
 /// Premier résultat qui est vraiment le bon morceau : même titre (sans les mentions entre parenthèses) et artiste crédité.
 /// Genius ne donne pas la durée : rien plutôt qu'un autre morceau (traduction, reprise, autre titre du même artiste).
+/// L'artiste doit être l'un des crédités, nom entier : avant, il suffisait que son nom soit contenu dans les crédits, et
+/// « Baby » de Zed recevait les paroles de « Baby » de Zedidiah Word.
 fn pick(hits: Vec<Hit>, q: &LyricsQuery) -> Option<Hit> {
     let want_title = norm(&clean_title(&q.title));
     let want_artist = norm(&main_artist(&q.artist));
     if want_title.is_empty() {
         return None;
     }
-    hits.into_iter().find(|h| norm(&clean_title(&h.title)) == want_title && (want_artist.is_empty() || norm(&h.artists).contains(&want_artist)))
+    hits.into_iter().find(|h| norm(&clean_title(&h.title)) == want_title && (want_artist.is_empty() || credited(&h.artists, &want_artist)))
+}
+
+/// `artist` est l'un des artistes crédités par Genius (« A, B & C », « A x B »), sans les précisions entre parenthèses qui
+/// y distinguent les homonymes (« Zed (NZL) » → « zed ») ni les feats ajoutés ainsi (« A (Ft. B) »). Un nom qui contient
+/// lui-même « & » ou « , » (Bigflo & Oli) est retrouvé en recollant les morceaux qui se suivent.
+fn credited(artists: &str, artist: &str) -> bool {
+    let parts: Vec<String> = clean_title(artists).split([',', '&']).flat_map(|a| a.split(" x ")).map(norm).filter(|a| !a.is_empty()).collect();
+    (0..parts.len()).any(|i| (i + 1..=parts.len()).any(|j| parts[i..j].concat() == artist))
 }
 
 /// Paroles de la page d'un morceau, ligne par ligne (une ligne vide entre les couplets). Blocs de paroles de la page ;
@@ -334,6 +344,21 @@ mod tests {
         // Autre artiste, ou titre seulement proche : rien.
         assert!(pick(found.clone(), &q("Bracelet", "Ninho")).is_none());
         assert!(pick(found, &q("Brace", "Heuss L'enfoiré")).is_none());
+        // Ce que Genius renvoie pour « Baby Zed » (titre trop récent, pas encore sur Genius) : un nom qui contient
+        // seulement celui de l'artiste ne compte pas.
+        let search = json!({ "response": { "sections": [{ "hits": [
+            hit("Boujee Baby", "JayDon & Zeddy Will", "https://genius.com/d"),
+            hit("Don’t Worry Baby", "Zed (NZL)", "https://genius.com/e"),
+            hit("Baby", "Zedidiah Word", "https://genius.com/f"),
+        ] }] } });
+        assert!(pick(hits(&search), &q("Baby", "Zed, Genezio")).is_none());
+        let homonym = json!({ "response": { "sections": [{ "hits": [hit("Baby", "Zed (NZL) x Tiakola", "https://genius.com/g")] }] } });
+        assert_eq!(pick(hits(&homonym), &q("Baby", "Tiakola")).unwrap().url, "https://genius.com/g");
+        assert_eq!(pick(hits(&homonym), &q("Baby", "Zed")).unwrap().url, "https://genius.com/g");
+        // Nom de groupe avec « & » : retrouvé entier, y compris avec un feat.
+        let duo = json!({ "response": { "sections": [{ "hits": [hit("Dommage", "Bigflo & Oli & Vald", "https://genius.com/h")] }] } });
+        assert_eq!(pick(hits(&duo), &q("Dommage", "Bigflo & Oli")).unwrap().url, "https://genius.com/h");
+        assert!(pick(hits(&duo), &q("Dommage", "Oli & Bigflo")).is_none());
         // Instrumental, paroles pas encore publiées, ou adresse hors de genius.com : écartés.
         let odd = json!({ "response": { "sections": [{ "hits": [
             { "result": { "title": "X", "artist_names": "A", "url": "https://genius.com/x", "lyrics_state": "complete", "instrumental": true } },

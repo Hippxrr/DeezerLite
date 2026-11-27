@@ -447,9 +447,10 @@ fn artist_cards(items: &[Value]) -> Vec<Card> {
 
 /// Artistes d'une recherche, avec le nombre de fans en sous-titre (« 9 028 132 fans »), et l'artiste cherché s'il y en a
 /// un. Nom comparé sans majuscules, accents, espaces ni ponctuation, une ou deux fautes de frappe tolérées : « booskap »
-/// trouve Booska-P. Entre plusieurs noms proches, le plus suivi l'emporte, un nom identique comptant un peu plus : avant,
-/// le nom identique gagnait toujours (un « BooskaP » de 4 500 fans devant le Booska-P de 52 000 fans, l'artiste de tous les
-/// titres trouvés). Les noms proches d'abord, puis les autres, du plus suivi au moins suivi.
+/// trouve Booska-P. Entre plusieurs noms proches, le plus suivi l'emporte, un nom identique comptant nettement plus : un
+/// homonyme exact presque inconnu ne passe pas devant l'artiste visé, mais le nom tapé en entier n'est plus battu par un nom
+/// voisin à peine plus suivi (avant, « Zed » et ses 240 000 fans passaient derrière ZEDD, 8 fois plus suivi). Les noms
+/// proches d'abord, puis les autres, du plus suivi au moins suivi.
 fn search_artists(items: &[Value], query: &str) -> (Vec<Card>, Option<Card>) {
     let q = search_key(query);
     let mut found: Vec<(bool, f64, Card)> = items
@@ -461,8 +462,8 @@ fn search_artists(items: &[Value], query: &str) -> (Vec<Card>, Option<Card>) {
                 card.subtitle = format!("{} fans", group_digits(fans));
             }
             let close = closeness(&q, &search_key(&card.title));
-            // Un nom identique compte comme ~7 fois plus de fans, un début de nom ~3 fois.
-            let score = (1.0 + fans as f64).ln() + [0.0, 0.0, 1.0, 2.0][usize::from(close)];
+            // Un nom identique compte comme ~100 fois plus de fans, un début de nom ~3 fois.
+            let score = (1.0 + fans as f64).ln() + [0.0, 0.0, 1.0, 4.6][usize::from(close)];
             Some((close > 0, score, card))
         })
         .collect();
@@ -1291,6 +1292,19 @@ mod tests {
         assert_eq!(search_artists(&items, "angle").1.map(|c| c.id), Some(7));
         assert_eq!(search_artists(&items, "a n g e l e").1.map(|c| c.id), Some(7));
         assert!(search_artists(&items, "pousse toi").1.is_none());
+        // Nom tapé en entier : l'artiste qui porte ce nom, même si un nom voisin (ici, qui commence pareil) est 8 fois plus
+        // suivi. Mais pas un homonyme exact presque inconnu devant l'artiste visé par une recherche incomplète.
+        let items = vec![
+            serde_json::json!({ "ART_ID": "8", "ART_NAME": "ZEDD", "NB_FAN": "1985106" }),
+            serde_json::json!({ "ART_ID": "9", "ART_NAME": "Zed", "NB_FAN": "238683" }),
+        ];
+        assert_eq!(search_artists(&items, "Zed").1.map(|c| c.id), Some(9));
+        assert_eq!(search_artists(&items, "zedd").1.map(|c| c.id), Some(8));
+        let items = vec![
+            serde_json::json!({ "ART_ID": "7", "ART_NAME": "Angèle", "NB_FAN": "2000000" }),
+            serde_json::json!({ "ART_ID": "10", "ART_NAME": "Angel", "NB_FAN": "300" }),
+        ];
+        assert_eq!(search_artists(&items, "angel").1.map(|c| c.id), Some(7));
     }
     use super::*;
 
