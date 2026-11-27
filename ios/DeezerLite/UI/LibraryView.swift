@@ -298,6 +298,7 @@ struct LibrarySectionView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 8)
         }
+        .modifier(NativeSwipeContainer()) // titres téléchargés
         .navigationTitle(section.title)
         .navigationBarTitleDisplayMode(.large)
         .refreshable {
@@ -346,7 +347,6 @@ struct SettingsView: View {
     @AppStorage("tabLabelsHidden") private var tabLabelsHidden = false
     @AppStorage("tabBarFull") private var tabBarFull = true
     @AppStorage("tabBarSearchApart") private var tabBarSearchApart = false
-    @AppStorage("nativeSwipeTest") private var nativeSwipeTest = false
     /// iOS 27 ou plus (« Recherche à part » n'a d'effet qu'à partir de là).
     private static var iOS27: Bool {
         if #available(iOS 27.0, *) { return true }
@@ -596,21 +596,6 @@ struct SettingsView: View {
                     .tint(Theme.accent)
                     .padding(14)
                 }
-            }
-            // Test du glissement d'iOS 27 sur les lignes (avant, seulement celui de l'app).
-            if Self.iOS27 {
-                divider
-                Toggle(isOn: $nativeSwipeTest) {
-                    HStack(spacing: 12) {
-                        Image(systemName: "hand.draw").foregroundStyle(Theme.accent).frame(width: 26)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(tr("Glissement d'iOS (test)"))
-                            Text(tr("Playlists et albums : glisser un titre vers la droite pour « Lire ensuite » avec le geste d'iOS 27")).font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .tint(Theme.accent)
-                .padding(14)
             }
         }
     }

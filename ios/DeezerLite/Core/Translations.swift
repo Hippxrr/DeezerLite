@@ -291,8 +291,6 @@ enum Translations {
         "%@ titres à mettre à jour": ("%@ tracks to update", "%@ canciones por actualizar"),
         "Déjà en cours": ("Already in progress", "Ya en curso"),
         "Mettre à jour": ("Update", "Actualizar"),
-        "Glissement d'iOS (test)": ("iOS swipe (test)", "Deslizamiento de iOS (prueba)"),
-        "Playlists et albums : glisser un titre vers la droite pour « Lire ensuite » avec le geste d'iOS 27": ("Playlists and albums: swipe a track right to “Play next” with the iOS 27 gesture", "Listas y álbumes: desliza una canción a la derecha para «Reproducir a continuación» con el gesto de iOS 27"),
         "Recherche à part": ("Search apart", "Búsqueda aparte"),
         "Accueil et Bibliothèque à gauche, la recherche dans un rond à droite. Désactivée : les trois ensemble, comme Apple Music": ("Home and Library on the left, search in a circle on the right. Off: all three together, like Apple Music", "Inicio y Biblioteca a la izquierda, la búsqueda en un círculo a la derecha. Desactivada: las tres juntas, como Apple Music"),
         "CD %@": ("Disc %@", "Disco %@"),

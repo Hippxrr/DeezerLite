@@ -263,8 +263,7 @@ struct PlayingBars: View {
 /// Ligne de titre : appui = lecture de la liste à partir de ce titre ; appui long = actions.
 struct TrackRow: View {
     @Environment(Player.self) private var player
-    /// Réglages, en test (iOS 27) : « Lire ensuite » par le glissement d'iOS au lieu de celui de l'app (voir
-    /// `NativeSwipeContainer`).
+    /// iOS 27 : « Lire ensuite » par le glissement d'iOS au lieu de celui de l'app (voir `NativeSwipeContainer`).
     @Environment(\.nativeSwipe) private var nativeSwipe
     @Environment(\.openRoute) private var openRoute
     @State private var downloadStatus = TrackDownloadStatus()
@@ -968,22 +967,17 @@ private struct ScrollVisibility: ViewModifier {
 }
 
 extension EnvironmentValues {
-    /// Glissement d'iOS pour « Lire ensuite » (test, iOS 27), posé par `NativeSwipeContainer`.
+    /// Glissement d'iOS pour « Lire ensuite » (iOS 27), posé par `NativeSwipeContainer`.
     @Entry var nativeSwipe = false
 }
 
-/// Réglages › Apparence, en test : sur iOS 27, la liste qui contient les lignes gère leur glissement natif (une seule
-/// ligne ouverte à la fois, refermée au défilement). Ses lignes passent au glissement d'iOS.
+/// Liste de titres (playlist, album, Téléchargements, titres de la recherche) : sur iOS 27, elle gère le glissement natif
+/// de ses lignes (une seule ouverte à la fois, refermée au défilement), et ses lignes passent au glissement d'iOS. Avant
+/// iOS 27, ou hors d'une telle liste, le glissement de l'app reste.
 struct NativeSwipeContainer: ViewModifier {
-    @AppStorage("nativeSwipeTest") private var on = false
-
     func body(content: Content) -> some View {
         if #available(iOS 27.0, *) {
-            if on {
-                content.swipeActionsContainer().environment(\.nativeSwipe, true)
-            } else {
-                content
-            }
+            content.swipeActionsContainer().environment(\.nativeSwipe, true)
         } else {
             content
         }
