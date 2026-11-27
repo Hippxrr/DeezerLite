@@ -3058,8 +3058,15 @@ final class Player {
             center.addObserver(forName: AVAudioSession.didBecomeInactiveNotification, object: session, queue: .main) { [weak self] n in
                 guard let context = n.userInfo?[AVAudioSession.deactivationContextKey] as? AVAudioSession.DeactivationContext,
                       context.source == .system else { return }
-                let suspended = context.interruptionContext?.reason.rawValue == 1
-                MainActor.assumeIsolated { self?.interruptionBegan(suspended: suspended) }
+                let reason = context.interruptionContext?.reason.rawValue
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    // Raison absente (iOS 27 ne la donne que pour une coupure par une autre app) et rien ne jouait : traitée
+                    // comme une suspension de l'app. Notée « en cours », elle le serait restée pour toujours (aucune fin
+                    // n'est envoyée), et la reprise après le prochain appel était perdue.
+                    let idle = !((self.core?.status().playing ?? false) || self.loading)
+                    self.interruptionBegan(suspended: reason == 1 || (reason == nil && idle))
+                }
             }
             center.addObserver(forName: AVAudioSession.resumptionRecommendationNotification, object: session, queue: .main) { [weak self] n in
                 let context = n.userInfo?[AVAudioSession.resumptionContextKey] as? AVAudioSession.ResumptionContext
