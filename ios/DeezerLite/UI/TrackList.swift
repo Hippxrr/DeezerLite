@@ -203,6 +203,7 @@ private struct TrackCollection: UIViewRepresentable {
             view.backgroundColor = .clear
             // Marges des barres posées à la main (voir `TrackList`) : celles d'iOS s'y ajouteraient.
             view.contentInsetAdjustmentBehavior = .never
+            view.insetsLayoutMarginsFromSafeArea = false
             view.keyboardDismissMode = .interactive
             view.alwaysBounceVertical = true
             view.delegate = self
@@ -210,7 +211,14 @@ private struct TrackCollection: UIViewRepresentable {
             view.onLayout = { [weak self] in self?.laidOut() }
             self.view = view
 
-            let cell = UICollectionView.CellRegistration<UICollectionViewListCell, Item> { [weak self] cell, _, item in
+            // Cases simples (pas des cases de liste d'iOS) qui ne tiennent pas compte des zones des barres : sous la barre du
+            // haut ou celle des onglets, une case de liste recevait leur marge et son contenu était poussé contre la ligne
+            // voisine (lignes qui se chevauchaient en haut et en bas de l'écran).
+            let cell = UICollectionView.CellRegistration<UICollectionViewCell, Item> { [weak self] cell, _, item in
+                cell.insetsLayoutMarginsFromSafeArea = false
+                cell.contentView.insetsLayoutMarginsFromSafeArea = false
+                cell.preservesSuperviewLayoutMargins = false
+                cell.contentView.preservesSuperviewLayoutMargins = false
                 self?.configure(cell, item)
             }
             dataSource = UICollectionViewDiffableDataSource(collectionView: view) { view, path, item in
@@ -239,7 +247,7 @@ private struct TrackCollection: UIViewRepresentable {
                 rebuild()
             } else {
                 // En-tête refait avec l'état de la page (il en dépend : page rechargée, tri, boutons).
-                if let path = dataSource.indexPath(for: .header), let cell = view?.cellForItem(at: path) as? UICollectionViewListCell {
+                if let path = dataSource.indexPath(for: .header), let cell = view?.cellForItem(at: path) {
                     configure(cell, .header)
                 }
                 if envNow != envKey {
@@ -360,7 +368,7 @@ private struct TrackCollection: UIViewRepresentable {
             dataSource.apply(snapshot, animatingDifferences: false)
         }
 
-        private func configure(_ cell: UICollectionViewListCell, _ item: Item) {
+        private func configure(_ cell: UICollectionViewCell, _ item: Item) {
             cell.backgroundConfiguration = .clear()
             let env = env!
             switch item {

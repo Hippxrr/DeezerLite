@@ -166,8 +166,9 @@ final class CoverLoader: @unchecked Sendable {
 
     /// Fond déjà fait (voir `backdrop` et `bleedBackdrop`), lu tout de suite : le lecteur s'ouvre avec son fond, sans
     /// passer par le noir le temps d'aller le chercher.
-    func cachedBackdrop(url: String, saturation: CGFloat = 1, tall: CGFloat? = nil, inset: CGFloat = 0, zoom: CGFloat = 1) -> UIImage? {
-        let key = tall.map { "\($0)|\(inset)|\(zoom)|\(url)" } ?? (saturation == 1 ? url : "\(saturation)|\(url)")
+    func cachedBackdrop(url: String, saturation: CGFloat = 1, tall: CGFloat? = nil, inset: CGFloat = 0, zoom: CGFloat = 1,
+                        classic: Bool = false) -> UIImage? {
+        let key = tall.map { "\($0)|\(inset)|\(zoom)|\(classic)|\(url)" } ?? (saturation == 1 ? url : "\(saturation)|\(url)")
         return backdrops.object(forKey: key as NSString)
     }
 
@@ -207,8 +208,9 @@ final class CoverLoader: @unchecked Sendable {
     /// sur une seule couleur. Fait une fois par
     /// titre, hors du thread principal. `tall` : hauteur de l'écran / largeur ; `inset` : hauteur de la barre d'état / largeur ;
     /// `zoom` : hauteur de la pochette / largeur (plus haute que large, elle est centrée et coupée sur les côtés).
-    func bleedBackdrop(url: String, download: Bool, tall: CGFloat, inset: CGFloat, zoom: CGFloat = 1) async -> UIImage? {
-        let key = "\(tall)|\(inset)|\(zoom)|\(url)" as NSString
+    /// `classic` : pochette entière (réglage « Pochette haute » désactivé) : le flou d'avant, net sous la pochette.
+    func bleedBackdrop(url: String, download: Bool, tall: CGFloat, inset: CGFloat, zoom: CGFloat = 1, classic: Bool = false) async -> UIImage? {
+        let key = "\(tall)|\(inset)|\(zoom)|\(classic)|\(url)" as NSString
         if let hit = backdrops.object(forKey: key) { return hit }
         let inMemory = anyCached(url: url).flatMap { ($0.cgImage?.width ?? 0) >= 400 ? $0 : nil }
         let picture: UIImage?
@@ -262,6 +264,15 @@ final class CoverLoader: @unchecked Sendable {
             func eased(_ t: CGFloat) -> CGFloat { let t = min(max(t, 0), 1); return t * t * (3 - 2 * t) }
             func amount(_ row: CGFloat) -> CGFloat { // `row` : depuis le haut de l'écran
                 if row < gap { return base }
+                // Pochette entière : le flou d'avant. Net sous le milieu de la pochette, à peine flou à son bas, puis un reflet
+                // qui part de presque rien. Le flou partout (plus bas) allait avec la pochette haute : sous la pochette entière,
+                // son reflet paraissait trop flou d'un coup.
+                if classic {
+                    if row < gap + side * 0.1 { return base * (1 - eased((row - gap) / (side * 0.1))) }
+                    if row < gap + side * 0.7 { return 0 }
+                    if row < gap + side { return 0.04 * pow((row - gap - side * 0.7) / (side * 0.3), 2) }
+                    return 0.04 + 0.96 * pow(min((row - gap - side) / (bottom * 0.75), 1), 1.8)
+                }
                 // Sous la pochette : flou partout (caché tant qu'elle est opaque). Elle se fond dans un flou d'elle-même, et une
                 // pochette pas encore chargée pendant des glissements rapides laisse voir des couleurs floues, plus l'ancienne
                 // pochette nette. En haut, aussi léger que derrière l'heure (plus fort, le fondu du haut faisait une démarcation) ;

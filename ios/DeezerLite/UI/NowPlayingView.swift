@@ -842,7 +842,7 @@ struct NowPlayingView: View {
         // donnait une image de centaines de milliers de pixels de haut (des centaines de Mo, l'app fermée par iOS).
         if fullBleed, let fit = bleedFit(geo) {
             Backdrop(url: player.cover(player.current), open: player.showFullPlayer, tall: fit.tall, inset: fit.inset, zoom: fit.zoom,
-                     blurred: !shown)
+                     classic: !fullBleedTall, blurred: !shown)
                 .animation(.easeInOut(duration: 0.3), value: shown)
         }
     }
@@ -1119,6 +1119,8 @@ private struct Backdrop: View {
     var blurred = false
     /// Hauteur de la pochette pleine largeur / largeur de l'écran (plus haute que large : coupée sur les côtés).
     var zoom: CGFloat = 1
+    /// Pochette entière (« Pochette haute » désactivée) : le flou d'avant (voir `CoverLoader.bleedBackdrop`).
+    var classic = false
     @Environment(\.scenePhase) private var phase
     /// Fond précédent (dessous) et nouveau (dessus, qui apparaît en fondu) : d'une pochette à l'autre, jamais de
     /// passage par le noir, et un fondu long pour adoucir un passage clair → sombre.
@@ -1130,15 +1132,18 @@ private struct Backdrop: View {
     /// Début du dernier fondu : une image qui arrive pendant un fondu ne fait pas sauter l'affichage.
     @State private var fadeStart = Date.distantPast
 
-    init(url: String?, open: Bool, tall: CGFloat? = nil, inset: CGFloat = 0, zoom: CGFloat = 1, blurred: Bool = false) {
+    init(url: String?, open: Bool, tall: CGFloat? = nil, inset: CGFloat = 0, zoom: CGFloat = 1, classic: Bool = false,
+         blurred: Bool = false) {
         self.url = url
         self.open = open
         self.tall = tall
         self.inset = inset
         self.zoom = zoom
+        self.classic = classic
         self.blurred = blurred
         // Fond déjà prêt : affiché dès la première image (le lecteur présenté par iOS est construit à l'ouverture).
-        _top = State(initialValue: url.flatMap { CoverLoader.shared.cachedBackdrop(url: $0, saturation: tall == nil ? 1.15 : 1, tall: tall, inset: inset, zoom: zoom) })
+        _top = State(initialValue: url.flatMap { CoverLoader.shared.cachedBackdrop(url: $0, saturation: tall == nil ? 1.15 : 1, tall: tall, inset: inset, zoom: zoom,
+                                                                                   classic: classic) })
     }
 
     var body: some View {
@@ -1166,12 +1171,14 @@ private struct Backdrop: View {
         }
         .ignoresSafeArea()
         // Avec les mesures : un fond fait avec d'autres mesures (rotation, première mise en page) est refait.
-        .task(id: "\(url ?? "")|\(phase == .background)|\(open)|\(tall ?? 0)|\(inset)|\(zoom)") {
+        .task(id: "\(url ?? "")|\(phase == .background)|\(open)|\(tall ?? 0)|\(inset)|\(zoom)|\(classic)") {
             guard phase != .background else { return }
             // Titre sans pochette (image de secours) : fondu vers le noir.
             guard let url else { fadeToBlack(); return }
             func make() async -> UIImage? {
-                if let tall { return await CoverLoader.shared.bleedBackdrop(url: url, download: open, tall: tall, inset: inset, zoom: zoom) }
+                if let tall {
+                    return await CoverLoader.shared.bleedBackdrop(url: url, download: open, tall: tall, inset: inset, zoom: zoom, classic: classic)
+                }
                 return await CoverLoader.shared.backdrop(url: url, download: open, saturation: 1.15)
             }
             var image = await make()
