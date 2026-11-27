@@ -233,6 +233,7 @@ struct DetailView: View {
             .padding(.bottom, 12)
             .animation(.easeOut(duration: 0.25), value: detail == nil)
         }
+        .modifier(NativeSwipeContainer())
     }
 
     /// Petit écran (iPhone SE, mini) : partager, épingler et télécharger regroupés dans un menu « … » (six boutons à

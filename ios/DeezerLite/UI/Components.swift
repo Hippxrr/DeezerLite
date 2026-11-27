@@ -263,6 +263,9 @@ struct PlayingBars: View {
 /// Ligne de titre : appui = lecture de la liste à partir de ce titre ; appui long = actions.
 struct TrackRow: View {
     @Environment(Player.self) private var player
+    /// Réglages, en test (iOS 27) : « Lire ensuite » par le glissement d'iOS au lieu de celui de l'app (voir
+    /// `NativeSwipeContainer`).
+    @Environment(\.nativeSwipe) private var nativeSwipe
     @Environment(\.openRoute) private var openRoute
     @State private var downloadStatus = TrackDownloadStatus()
     let track: Track
@@ -460,7 +463,11 @@ struct TrackRow: View {
                     .animation(.easeOut(duration: 0.15), value: ready)
             }
         }
-        .modifier(SwipeRight(enabled: swipeToQueue && !track.unavailable, onChanged: drag, onEnded: { release(completed: $0) }))
+        .modifier(SwipeRight(enabled: swipeToQueue && !track.unavailable && !nativeSwipe, onChanged: drag, onEnded: { release(completed: $0) }))
+        .modifier(NativeQueueSwipe(enabled: swipeToQueue && !track.unavailable && nativeSwipe) {
+            player.queueAdd([track], next: true)
+            queued += 1
+        })
         .sensoryFeedback(.impact(weight: .medium), trigger: queued)
         .sensoryFeedback(.selection, trigger: swipe >= Self.swipeThreshold) { _, ready in ready }
         .contextMenu {
@@ -954,6 +961,46 @@ private struct ScrollVisibility: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 18.0, *) {
             content.onScrollVisibilityChange(threshold: 0.01) { visible = $0 }
+        } else {
+            content
+        }
+    }
+}
+
+extension EnvironmentValues {
+    /// Glissement d'iOS pour « Lire ensuite » (test, iOS 27), posé par `NativeSwipeContainer`.
+    @Entry var nativeSwipe = false
+}
+
+/// Réglages › Apparence, en test : sur iOS 27, la liste qui contient les lignes gère leur glissement natif (une seule
+/// ligne ouverte à la fois, refermée au défilement). Ses lignes passent au glissement d'iOS.
+struct NativeSwipeContainer: ViewModifier {
+    @AppStorage("nativeSwipeTest") private var on = false
+
+    func body(content: Content) -> some View {
+        if #available(iOS 27.0, *) {
+            if on {
+                content.swipeActionsContainer().environment(\.nativeSwipe, true)
+            } else {
+                content
+            }
+        } else {
+            content
+        }
+    }
+}
+
+/// « Lire ensuite » par le glissement d'iOS (vers la droite ; glissé jusqu'au bout, il agit tout de suite).
+private struct NativeQueueSwipe: ViewModifier {
+    let enabled: Bool
+    let action: () -> Void
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.swipeActions(edge: .leading, allowsFullSwipe: true) {
+                Button(action: action) { Label(tr("Lire ensuite"), systemImage: "text.line.first.and.arrowtriangle.forward") }
+                    .tint(Theme.accent)
+            }
         } else {
             content
         }
