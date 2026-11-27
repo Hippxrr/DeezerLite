@@ -780,31 +780,11 @@ struct NowPlayingView: View {
                     // partage. Avant, seul l'artiste réagissait. La zone va jusqu'à la moitié de la place libre à droite du
                     // texte : une marge reste avant le « + » et le cœur.
                     HalfGapLayout {
-                        // Verre « neutre » sur le titre, dans un conteneur de verre, et animation de fermeture coupée au bord
-                        // de la zone (méthode de FixedMenu) : avant, iOS 26 laissait un rectangle gris sur la zone d'appui
-                        // une fois le menu refermé.
-                        Menu {
-                            ForEach(t.artistLinks, id: \.id) { a in
-                                Button { player.navigate(.detail(kind: "artist", id: a.id, title: a.name)) } label: { Label(a.name, systemImage: "music.mic") }
-                            }
-                            if t.albumId != 0 {
-                                Button { player.navigate(.detail(kind: "album", id: t.albumId, title: t.album)) } label: { Label(t.album, systemImage: "square.stack") }
-                            }
-                            Divider()
-                            Button { player.creditsTrack = t } label: { Label(tr("Voir les crédits"), systemImage: "person.2") }
-                            ShareTrackButton(track: t)
-                        } label: {
-                            titleTexts(t)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
-                                .modifier(IdentityGlass())
-                        }
-                        // Sans fond gris à l'ouverture et à la fermeture du menu : iOS surlignait toute la zone d'appui (un
-                        // rectangle visible une seconde en revenant des crédits). Zone d'aperçu nulle : rien n'est surligné.
-                        .buttonStyle(.plain)
-                        .contentShape(.contextMenuPreview, Rectangle().size(.zero))
-                        .clipped()
-                        .modifier(GlassContainer())
+                        // Menu ouvert par un bouton d'iOS invisible posé sur le titre (voir `TitleMenuButton`). Avant, un
+                        // `Menu` SwiftUI : iOS 26 laissait un rectangle gris sur la zone d'appui une fois le menu refermé.
+                        titleTexts(t)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .overlay { TitleMenuButton(track: t, player: player) }
                     }
                 } else if let t = player.current {
                     // Flow en chargement (« Chargement… ») : pas de menu, il n'y a ni artiste ni crédits à ouvrir.
@@ -822,7 +802,6 @@ struct NowPlayingView: View {
     }
 
     /// Titre (réduit pour tenir sur la ligne plutôt que coupé par « … ») et artiste, sous la pochette.
-    /// (Voir `IdentityGlass` et `GlassContainer` pour le menu qui l'entoure.)
     private func titleTexts(_ t: Track) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(t.title).font(.title3.weight(.bold)).foregroundStyle(.white).lineLimit(1).minimumScaleFactor(0.5)
@@ -1780,6 +1759,63 @@ private struct CreditCard<Content: View>: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(16)
         .surface(RoundedRectangle(cornerRadius: 16, style: .continuous), interactive: false)
+    }
+}
+
+/// Menu du titre du grand lecteur (artistes, album, crédits, lien) : un bouton d'iOS invisible, posé sur le titre, dont
+/// l'appui ouvre le menu. Rien n'est dessiné par SwiftUI autour : avant, avec un `Menu` SwiftUI, iOS 26 laissait un
+/// rectangle gris sur la zone d'appui une fois le menu refermé. Le menu est construit à l'ouverture, pour le titre en cours.
+private struct TitleMenuButton: UIViewRepresentable {
+    let track: Track
+    let player: Player
+
+    @MainActor
+    final class Coordinator {
+        var track: Track?
+        weak var player: Player?
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> UIButton {
+        let button = UIButton(type: .custom)
+        button.backgroundColor = .clear
+        button.showsMenuAsPrimaryAction = true
+        let coordinator = context.coordinator
+        button.menu = UIMenu(children: [UIDeferredMenuElement.uncached { done in
+            MainActor.assumeIsolated { done(Self.items(coordinator)) }
+        }])
+        button.accessibilityLabel = tr("Plus d'actions")
+        return button
+    }
+
+    func updateUIView(_ button: UIButton, context: Context) {
+        context.coordinator.track = track
+        context.coordinator.player = player
+    }
+
+    @MainActor
+    private static func items(_ c: Coordinator) -> [UIMenuElement] {
+        guard let t = c.track, let player = c.player else { return [] }
+        var open: [UIMenuElement] = t.artistLinks.map { a in
+            UIAction(title: a.name, image: UIImage(systemName: "music.mic")) { [weak player] _ in
+                MainActor.assumeIsolated { player?.navigate(.detail(kind: "artist", id: a.id, title: a.name)) }
+            }
+        }
+        if t.albumId != 0 {
+            open.append(UIAction(title: t.album, image: UIImage(systemName: "square.stack")) { [weak player] _ in
+                MainActor.assumeIsolated { player?.navigate(.detail(kind: "album", id: t.albumId, title: t.album)) }
+            })
+        }
+        var more: [UIMenuElement] = [UIAction(title: tr("Voir les crédits"), image: UIImage(systemName: "person.2")) { [weak player] _ in
+            MainActor.assumeIsolated { player?.creditsTrack = t }
+        }]
+        if let url = t.shareURL {
+            more.append(UIAction(title: tr("Copier le lien"), image: UIImage(systemName: "link")) { [weak player] _ in
+                MainActor.assumeIsolated { player?.copyLink(url) }
+            })
+        }
+        return open + [UIMenu(options: .displayInline, children: more)]
     }
 }
 

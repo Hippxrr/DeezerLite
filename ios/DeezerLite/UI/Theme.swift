@@ -291,21 +291,6 @@ extension View {
     func glassGroup() -> some View { modifier(GlassGroup()) }
 }
 
-/// Verre « neutre » (aucun effet visible), iOS 26 et plus : posé sur l'étiquette d'un menu, iOS ne lui ajoute plus son
-/// propre fond à la fermeture du menu (voir le titre du grand lecteur).
-struct IdentityGlass: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(iOS 26.0, *) { content.glassEffect(.identity) } else { content }
-    }
-}
-
-/// Conteneur de verre, iOS 26 et plus (rien avant).
-struct GlassContainer: ViewModifier {
-    func body(content: Content) -> some View {
-        if #available(iOS 26.0, *) { GlassEffectContainer { content } } else { content }
-    }
-}
-
 extension EnvironmentValues {
     /// `false` : le verre des surfaces ne réagit plus au doigt (pages cachées sous le grand lecteur).
     @Entry var glassReactsToTouch = true
