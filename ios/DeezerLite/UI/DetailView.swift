@@ -629,7 +629,12 @@ struct DetailView: View {
     static func summary(count: Int, seconds: Int) -> String {
         let hours = seconds / 3600, minutes = (seconds % 3600) / 60
         let length = hours > 0 ? "\(hours) h \(String(format: "%02d", minutes)) min" : "\(max(minutes, seconds > 0 ? 1 : 0)) min"
-        return "\(count > 1 ? tr("%@ titres", "\(count)") : tr("1 titre")) · \(length)"
+        return "\(trackCount(count)) · \(length)"
+    }
+
+    /// « 1 titre », « 4 titres » (sans durée : la ligne MP3 de la Bibliothèque, comme les playlists).
+    static func trackCount(_ count: Int) -> String {
+        count == 1 ? tr("1 titre") : tr("%@ titres", "\(count)")
     }
 
     /// Retiré de l'écran tout de suite ; remis à sa place si Deezer refuse. Sans animation : les lignes sont repérées par

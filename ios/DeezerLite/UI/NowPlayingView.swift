@@ -714,8 +714,8 @@ struct NowPlayingView: View {
         startPoint: .top, endPoint: .bottom)
 
     /// Pochette pleine largeur (réglage activé seulement) : son fond, aligné sous elle (mesures de l'écran), par-dessus le fond
-    /// habituel. Paroles ou file ouvertes : il s'efface, le fond flouté habituel revient (le sien est net sous le milieu de
-    /// la pochette, normalement cachée par elle). Dans son propre `background`, pas avec le fond habituel : posés ensemble, il
+    /// habituel. Paroles ou file ouvertes : il reste, flouté et assombri (il est net sous le milieu de la pochette, cachée
+    /// alors). Avant, il s'effaçait et l'ancien fond flouté revenait, d'un autre style. Dans son propre `background`, pas avec le fond habituel : posés ensemble, il
     /// prenait la largeur de celui-ci (bien plus large que l'écran) et son image était étirée en largeur, d'où une copie de
     /// la pochette décalée qui se voyait sous son fondu (pattes d'un cheval en double).
     @ViewBuilder
@@ -726,8 +726,7 @@ struct NowPlayingView: View {
             let screen: CGFloat = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
             let tall: CGFloat = min(max(screen / geo.size.width, 1), 3)
             Backdrop(url: player.cover(player.current), open: player.showFullPlayer, tall: tall,
-                     inset: geo.safeAreaInsets.top * 0.7 / max(geo.size.width, 1))
-                .opacity(shown ? 1 : 0)
+                     inset: geo.safeAreaInsets.top * 0.7 / max(geo.size.width, 1), blurred: !shown)
                 .animation(.easeInOut(duration: 0.3), value: shown)
         }
     }
@@ -960,6 +959,8 @@ private struct Backdrop: View {
     var tall: CGFloat? = nil
     /// Hauteur de la barre d'état (heure, batterie) / largeur de l'écran : la pochette pleine largeur commence juste dessous.
     var inset: CGFloat = 0
+    /// Pochette pleine largeur, paroles ou file ouvertes : fond flouté et assombri pour le texte (même image, rien à refaire).
+    var blurred = false
     @Environment(\.scenePhase) private var phase
     /// Fond précédent (dessous) et nouveau (dessus, qui apparaît en fondu) : d'une pochette à l'autre, jamais de
     /// passage par le noir, et un fondu long pour adoucir un passage clair → sombre.
@@ -979,6 +980,8 @@ private struct Backdrop: View {
                 if let top { layer(top).opacity(topOpacity) }
             }
             .opacity(shown)
+            // Bords opaques : sans eux, le flou rendait les bords de l'écran transparents (fond noir dessous).
+            .blur(radius: blurred ? 40 : 0, opaque: true)
             // Voile sombre : les couleurs restent présentes mais les écarts de clarté sont atténués. Pochette pleine largeur :
             // aucun voile jusqu'au bas de la pochette (elle n'en a pas : sur une pochette claire, la jonction faisait une bande
             // sombre), puis il s'assombrit peu à peu sous le titre et les boutons.
@@ -986,6 +989,8 @@ private struct Backdrop: View {
                 let end = min((inset + 1) / tall, 0.8)
                 LinearGradient(stops: [.init(color: .clear, location: end), .init(color: .black.opacity(0.3), location: min(end + 0.18, 0.95)),
                                        .init(color: .black.opacity(0.5), location: 1)], startPoint: .top, endPoint: .bottom)
+                // Paroles ou file : le haut aussi est assombri, comme le fond habituel (texte lisible sur une pochette claire).
+                Color.black.opacity(blurred ? 0.3 : 0)
             } else {
                 LinearGradient(colors: [.black.opacity(0.3), .black.opacity(0.6)], startPoint: .top, endPoint: .bottom)
             }
@@ -1778,7 +1783,7 @@ private struct TitleMenuButton: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeUIView(context: Context) -> UIButton {
-        let button = UIButton(type: .custom)
+        let button = PointPreviewButton(type: .custom)
         button.backgroundColor = .clear
         button.showsMenuAsPrimaryAction = true
         let coordinator = context.coordinator
@@ -1816,6 +1821,28 @@ private struct TitleMenuButton: UIViewRepresentable {
             })
         }
         return open + [UIMenu(options: .displayInline, children: more)]
+    }
+}
+
+/// Bouton dont le menu sort d'un point invisible (coin haut gauche) et y retourne. Avant, iOS faisait sortir le menu de
+/// tout le bouton et le refermait dans un rectangle gris de sa taille, visible un instant sur le titre.
+private final class PointPreviewButton: UIButton {
+    override func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
+                                         previewForHighlightingMenuWithConfiguration configuration: UIContextMenuConfiguration) -> UITargetedPreview? {
+        pointPreview()
+    }
+
+    override func contextMenuInteraction(_ interaction: UIContextMenuInteraction,
+                                         previewForDismissingMenuWithConfiguration configuration: UIContextMenuConfiguration) -> UITargetedPreview? {
+        pointPreview()
+    }
+
+    private func pointPreview() -> UITargetedPreview {
+        let parameters = UIPreviewParameters()
+        parameters.backgroundColor = .clear
+        let dot = UIView(frame: CGRect(x: 0, y: 0, width: 1, height: 1))
+        dot.backgroundColor = .clear
+        return UITargetedPreview(view: dot, parameters: parameters, target: UIPreviewTarget(container: self, center: CGPoint(x: 1, y: 1)))
     }
 }
 

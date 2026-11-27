@@ -179,11 +179,11 @@ struct LibraryView: View {
             // Nombre de MP3 : la copie en mémoire si elle existe, sinon lue une fois, puis relue seulement après un import,
             // une modification ou une suppression.
             .task(id: player.mp3Revision) {
-                if mp3Summary == nil, let d = player.cachedDetail(Self.mp3Route) { mp3Summary = DetailView.summary(d.tracks) }
+                if mp3Summary == nil, let d = player.cachedDetail(Self.mp3Route) { mp3Summary = DetailView.trackCount(d.tracks.count) }
                 guard mp3Summary == nil || mp3SummaryRevision != player.mp3Revision else { return }
                 let revision = player.mp3Revision
                 if let d = await player.detail(Self.mp3Route, force: false) {
-                    mp3Summary = DetailView.summary(d.tracks)
+                    mp3Summary = DetailView.trackCount(d.tracks.count)
                     mp3SummaryRevision = revision
                 }
             }

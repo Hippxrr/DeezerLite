@@ -39,10 +39,16 @@ struct ShareTrackButton: View {
 struct FavoriteButton: View {
     @Environment(Player.self) private var player
     let card: Card
+    /// Change à chaque appui : la vibration suit l'appui seulement. Avant, elle suivait l'état du cœur, et vibrait aussi à
+    /// l'ouverture de la page d'un album ou d'un artiste favori (cœur rempli à l'arrivée de la liste des favoris).
+    @State private var taps = 0
 
     var body: some View {
         let on = player.isFavorite(card)
-        Button { player.setFavorite(card, !on) } label: {
+        Button {
+            taps += 1
+            player.setFavorite(card, !on)
+        } label: {
             Image(systemName: on ? "heart.fill" : "heart")
                 .font(.system(size: 24))
                 .foregroundStyle(on ? Theme.accent : Color.primary)
@@ -51,7 +57,7 @@ struct FavoriteButton: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.pressable)
-        .sensoryFeedback(.selection, trigger: on)
+        .sensoryFeedback(.selection, trigger: taps)
         .accessibilityLabel(on ? tr("Retirer de ta bibliothèque") : tr("Ajouter à ta bibliothèque"))
         // Favoris de ce type lus si besoin, pour un cœur juste dès l'ouverture de la page.
         .task(id: card.kind) { await player.loadFavorites(card.kind) }
@@ -952,12 +958,10 @@ struct CardRow: View {
             openCard(card, route: openRoute, genre: openGenre)
         } label: {
             ItemRow(title: card.kind == "loved" ? player.lovedTitle : card.kind == "mp3" ? player.mp3Title : card.title,
-                    subtitle: player.playlistSummary(card) ?? card.subtitle) {
+                    subtitle: card.subtitle) {
                 CardArt(card: card)
             }
         }
-        // Playlist : sa durée, si elle n'est pas encore connue (voir `Player.ensurePlaylistLength`).
-        .task(id: card.id) { player.ensurePlaylistLength(card) }
         .buttonStyle(.pressable)
         .contextMenu {
             DownloadCollectionMenu(card: card)
