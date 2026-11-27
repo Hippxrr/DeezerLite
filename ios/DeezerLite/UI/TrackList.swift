@@ -113,7 +113,8 @@ private struct TrackCollection: UIViewRepresentable {
     let likeButton: Bool
     let hideLiked: Bool
     let onRemove: ((Track) -> Void)?
-    let position: TrackListPosition?
+    /// Position gardée (nommée autrement que le modificateur `position` de SwiftUI, que Swift prenait à sa place).
+    let memory: TrackListPosition?
     let onRefresh: (() async -> Void)?
     let onDrag: (() -> Void)?
     let header: AnyView
@@ -130,7 +131,7 @@ private struct TrackCollection: UIViewRepresentable {
         likeButton = page.likeButton
         hideLiked = page.hideLiked
         onRemove = page.onRemove
-        position = page.position
+        memory = page.position
         onRefresh = page.onRefresh
         onDrag = page.onDrag
         self.header = header
@@ -297,7 +298,7 @@ private struct TrackCollection: UIViewRepresentable {
             dataSource.apply(snapshot, animatingDifferences: removal)
 
             // Liste complète affichée (ouverture de la page, ou recherche effacée) : remise à sa position d'avant.
-            if !filtered, first || wasFiltered, let kept = page.position?.kept, let id = rowAt[kept] {
+            if !filtered, first || wasFiltered, let kept = page.memory?.kept, let id = rowAt[kept] {
                 pendingTop = id
                 view?.setNeedsLayout()
             } else if filtered != wasFiltered, let view {
@@ -402,18 +403,18 @@ private struct TrackCollection: UIViewRepresentable {
 
         /// Titre en haut de l'écran, gardé pendant que l'utilisateur fait défiler la liste complète (voir `TrackListPosition`).
         func scrollViewDidScroll(_ scrollView: UIScrollView) {
-            guard !filtered, scrollView.isTracking || scrollView.isDecelerating, let position = page.position,
+            guard !filtered, scrollView.isTracking || scrollView.isDecelerating, let memory = page.memory,
                   let view else { return }
             let point = CGPoint(x: view.bounds.midX, y: view.contentOffset.y + view.contentInset.top + 1)
             guard let path = view.indexPathForItem(at: point), let item = dataSource.itemIdentifier(for: path) else { return }
             switch item {
-            case .header: position.kept = nil
-            case .track(let id): position.kept = rows[id]?.index
+            case .header: memory.kept = nil
+            case .track(let id): memory.kept = rows[id]?.index
             case .message, .disc: break
             }
         }
 
-        func scrollViewDidScrollToTop(_ scrollView: UIScrollView) { page.position?.kept = nil }
+        func scrollViewDidScrollToTop(_ scrollView: UIScrollView) { page.memory?.kept = nil }
 
         // Les lignes gèrent leurs appuis elles-mêmes (boutons SwiftUI) : la liste ne sélectionne ni ne surligne rien.
         func collectionView(_ collectionView: UICollectionView, shouldHighlightItemAt path: IndexPath) -> Bool { false }
