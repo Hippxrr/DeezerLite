@@ -51,7 +51,7 @@ final class Player {
     private(set) var current: Track? {
         didSet {
             if (current != nil) != hasTrack { hasTrack = current != nil }
-            if current?.id != currentId { currentId = current?.id }
+            syncCurrentId()
             syncMiniShown()
         }
     }
@@ -91,7 +91,16 @@ final class Player {
     private(set) var repeatMode: Repeat = .off
     /// Identifiants des titres aimés (pas les fiches : elles restent dans Rust).
     private(set) var lovedIds: Set<Int64> = []
-    var showFullPlayer = false
+    var showFullPlayer = false {
+        didSet { syncCurrentId() }
+    }
+    /// Grand lecteur présenté par-dessus l'app : ce qui s'ouvre depuis lui doit s'ouvrir sur lui.
+    var coverShown: Bool { showFullPlayer }
+    /// Lignes de titres cachées sous le grand lecteur : elles ne suivent pas chaque changement de titre (avant, toutes les
+    /// lignes affichées étaient redessinées à chaque titre, pendant le glissement des pochettes) ; mises à jour à la fermeture.
+    private func syncCurrentId() {
+        if !showFullPlayer, current?.id != currentId { currentId = current?.id }
+    }
     /// Titre affiché dans la file : pendant une rafale de suivant / précédent il devance le cœur
     /// (sert aux pochettes voisines du lecteur plein écran).
     private(set) var shownIndex = 0
@@ -1333,7 +1342,8 @@ final class Player {
             LastSession.clear()
             return
         }
-        last.save()
+        // Changement de titre : écrite en tâche de fond (l'interface se met à jour au même moment).
+        last.save(wait: !atStart)
     }
 
     /// Relance la dernière écoute au titre `index` (et à `position` s'il s'agit du titre gardé).

@@ -8,26 +8,10 @@ import SwiftUI
 final class SlideState {
     var dx: CGFloat = 0
     @ObservationIgnored var axis: Axis?
-    /// Deux dernières positions du doigt et leur moment : vitesse réelle au lâcher (voir `fingerVelocity`).
-    @ObservationIgnored private var samples: [(x: CGFloat, t: TimeInterval)] = []
+    @ObservationIgnored private var speed = FingerSpeed()
 
-    func track(_ x: CGFloat) {
-        samples.append((x, ProcessInfo.processInfo.systemUptime))
-        if samples.count > 2 { samples.removeFirst() }
-    }
-
-    /// Vitesse du doigt sur ses deux derniers mouvements (points par seconde). Celle de `DragGesture` est lissée sur une
-    /// période plus longue et sous-estime un lancer rapide : le ressort partait moins vite que le doigt, et la première
-    /// image après le lâcher semblait freiner d'un coup. `fallback` si les mesures manquent ou sont trop anciennes.
-    func fingerVelocity(fallback: CGFloat) -> CGFloat {
-        defer { samples = [] }
-        guard samples.count == 2 else { return fallback }
-        let (a, b) = (samples[0], samples[1])
-        let dt = b.t - a.t
-        let age = ProcessInfo.processInfo.systemUptime - b.t
-        guard dt > 0.002, dt < 0.05, age < 0.05 else { return fallback }
-        return (b.x - a.x) / dt
-    }
+    func track(_ x: CGFloat) { speed.track(x) }
+    func fingerVelocity(fallback: CGFloat) -> CGFloat { speed.velocity(fallback: fallback) }
 
     /// Geste annulé par le système (appel, Centre de contrôle), donc sans `onEnded` : tout revient en place. Une fin
     /// normale a déjà remis `axis` à zéro, rien à faire alors.
@@ -41,6 +25,33 @@ final class SlideState {
         }
     }
 }
+
+/// Deux dernières positions du doigt et leur moment : vitesse réelle au lâcher (carrousels, fermeture du lecteur).
+struct FingerSpeed {
+    private var samples: [(x: CGFloat, t: TimeInterval)] = []
+
+    mutating func track(_ x: CGFloat) {
+        samples.append((x, ProcessInfo.processInfo.systemUptime))
+        if samples.count > 2 { samples.removeFirst() }
+    }
+
+    /// Vitesse du doigt sur ses deux derniers mouvements (points par seconde). Celle de `DragGesture` est lissée sur une
+    /// période plus longue et sous-estime un lancer rapide : le ressort partait moins vite que le doigt, et la première
+    /// image après le lâcher semblait freiner d'un coup. `fallback` si les mesures manquent ou sont trop anciennes.
+    mutating func velocity(fallback: CGFloat) -> CGFloat {
+        defer { samples = [] }
+        guard samples.count == 2 else { return fallback }
+        let (a, b) = (samples[0], samples[1])
+        let dt = b.t - a.t
+        let age = ProcessInfo.processInfo.systemUptime - b.t
+        guard dt > 0.002, dt < 0.05, age < 0.05 else { return fallback }
+        return (b.x - a.x) / dt
+    }
+}
+
+/// Avance du ressort au lâcher (voir `HeadStartSpring`), réglée sur la vidéo : à 0, l'image du lâcher restait figée ;
+/// à ~20 ms, la première image allait trop loin et la suivante presque pas (un autre accroc).
+private let releaseHeadStart: TimeInterval = 0.01
 
 struct SlideOffset: ViewModifier {
     let state: SlideState
@@ -216,10 +227,6 @@ private struct MiniCarousel: View {
         .onChange(of: swiping) { _, on in if !on { slide.recover { steps.settle(slide: slide, player: player) } } }
     }
 
-    /// Avance du ressort au lâcher (voir `HeadStartSpring`), réglée sur la vidéo : à 0, l'image du lâcher restait figée ;
-    /// à ~20 ms, la première image allait trop loin et la suivante presque pas (un autre accroc).
-    private static let releaseHeadStart: TimeInterval = 0.01
-
     private func swipe(width: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 12, coordinateSpace: .global)
             .updating($swiping) { _, state, _ in state = true }
@@ -238,14 +245,15 @@ private struct MiniCarousel: View {
             .onEnded { v in
                 let horizontal = slide.axis == .horizontal
                 slide.axis = nil
-                guard horizontal else { return }
+                guard horizontal else { steps.settle(slide: slide, player: player); return }
                 let base = steps.base(player)
                 let fling = v.predictedEndTranslation.width
                 let forward = fling < -width * 0.35 && player.queue.indices.contains(base + 1)
                 let backward = fling > width * 0.35 && player.queue.indices.contains(base - 1)
                 steps.land(delta: forward ? 1 : backward ? -1 : 0, distance: width + MiniStrip.gap,
                            velocity: slide.fingerVelocity(fallback: v.velocity.width),
-                           bounce: false, headStart: Self.releaseHeadStart, waitFullStop: true, slide: slide, player: player)
+                           bounce: false, headStart: releaseHeadStart, waitFullStop: true,
+                           coverPixels: Int(cover * UIScreen.main.scale), slide: slide, player: player)
             }
     }
 }
@@ -299,10 +307,15 @@ final class CarouselSteps {
     /// `waitFullStop` : échange des titres une fois le ressort tout à fait arrêté (mini-lecteur : à « presque fini », la fin
     /// du trajet sautait de 2 à 3 points) ; sinon dès qu'il est presque arrivé, et le son suit aussitôt (grand lecteur, où
     /// l'attente avant le son se sentait).
+    /// `coverPixels` : la pochette qui deviendra voisine après ce pas est préparée tout de suite. Pendant une série de
+    /// glissements, le lecteur n'est pas prévenu et ne la préparait pas : elle arrivait vide, puis apparaissait.
     @MainActor func land(delta: Int, distance: CGFloat, velocity: CGFloat, bounce: Bool = true, headStart: TimeInterval = 0,
-                         waitFullStop: Bool = false, slide: SlideState, player: Player) {
+                         waitFullStop: Bool = false, coverPixels: Int, slide: SlideState, player: Player) {
         // Premier pas d'une série : la file à laquelle les pas s'appliquent (voir `schedule`).
         if pending == 0, landing == 0 { pendingQueue = player.queueGeneration }
+        if delta != 0, let url = player.cover(neighbor(player, 2 * delta)) {
+            CoverLoader.shared.prefetch([url], pixels: coverPixels)
+        }
         landingID += 1
         let id = landingID
         landing = delta
@@ -332,6 +345,8 @@ final class CarouselSteps {
 
     /// Nouveau glissement commencé pendant une arrivée : celle-ci est validée tout de suite.
     @MainActor func interrupt(slide: SlideState) {
+        // Le changement de titre attendu ne tombe pas pendant ce nouveau glissement (il le figeait) : sa fin s'en chargera.
+        flush?.cancel()
         landingID += 1
         commitLanding(slide: slide)
     }
@@ -533,80 +548,151 @@ struct LikeButton: View {
 
 // MARK: - Lecteur plein écran
 
-/// Position verticale du lecteur plein écran (0 = ouvert, `height` = caché sous l'écran).
-/// Objet à part : seul le conteneur lit `y`, le contenu du lecteur n'est pas redessiné pendant le geste.
-@Observable
-final class PullState {
-    var y: CGFloat = 100_000 // hors de l'écran tant que la hauteur n'est pas connue
-    @ObservationIgnored var height: CGFloat = 1000
-    /// Position visée par l'animation en cours.
-    @ObservationIgnored var target: CGFloat = 100_000
+/// Rayon des coins de l'écran : le grand lecteur a cette forme, et la garde en haut quand il descend.
+enum DisplayCorners {
+    /// shortcut: valeur interne d'iOS, lue seulement si elle existe (0 sinon : coins droits) ; à remplacer si Apple en publie une.
+    @MainActor static let radius: CGFloat = {
+        let key = "_displayCornerRadius"
+        guard UIScreen.main.responds(to: NSSelectorFromString(key)) else { return 0 }
+        return UIScreen.main.value(forKey: key) as? CGFloat ?? 0
+    }()
+}
 
-    /// Geste annulé par le système alors que le lecteur était tiré vers le bas : il revient en place. Après une fin
-    /// normale, `y` vaut déjà sa position finale et il n'y a rien à faire.
-    @MainActor func recover() {
+/// Lecteur tiré vers le bas : c'est la vue présentée par iOS (le lecteur entier) qui est déplacée, par une simple
+/// translation verticale, et ramenée ou envoyée en bas par un ressort d'UIKit. Le mouvement est fait par le système
+/// d'affichage : rien n'est recalculé dans l'app pendant le geste ni pendant le ressort (avant, SwiftUI déplaçait le
+/// lecteur à chaque image, et la moindre mise à jour en même temps faisait sauter une image).
+@MainActor
+final class PullState {
+    /// Vue présentée par iOS (voir `PlayerSheet`).
+    weak var view: UIView?
+    /// Décalage vers le bas (0 = ouvert).
+    private(set) var y: CGFloat = 0
+    /// Position visée par le ressort en cours.
+    private(set) var target: CGFloat = 0
+    private var speed = FingerSpeed()
+
+    private var height: CGFloat { view?.bounds.height ?? UIScreen.main.bounds.height }
+
+    /// Coins de l'écran (rayon propre à chaque iPhone, 0 sur un écran à coins droits comme le SE) pendant que le lecteur
+    /// bouge ; en place, coins droits : il couvre tout l'écran. Avec les coins arrondis en place, la courbe d'iOS ne
+    /// tombait pas exactement sur celle de l'écran et un liseré de la page de derrière se voyait dans les angles.
+    func round(_ on: Bool) {
+        guard let layer = view?.layer else { return }
+        layer.cornerRadius = on ? DisplayCorners.radius : 0
+        layer.masksToBounds = on
+    }
+
+    /// Lecteur tiré par le doigt : vertical seulement, jamais au-dessus de sa place.
+    func drag(to y: CGFloat) {
+        if target != y { view?.layer.removeAllAnimations() } // ressort en cours rattrapé par le doigt
+        round(y > 0)
+        self.y = y
+        target = y
+        speed.track(y)
+        view?.transform = CGAffineTransform(translationX: 0, y: y)
+    }
+
+    /// Lâcher : le ressort part à la vitesse des derniers mouvements du doigt.
+    func release(open: Bool, fallback: CGFloat, done: (() -> Void)? = nil) {
+        settle(open: open, velocity: speed.velocity(fallback: fallback), done: done)
+    }
+
+    /// Geste annulé par le système alors que le lecteur était tiré vers le bas : il revient en place.
+    func recover() {
         Task { @MainActor in
             await Task.yield()
-            if y > 0, target == 0 { settle(open: true) }
+            if y > 0, target == y { settle(open: true) }
         }
     }
 
-    /// Ressort qui part à la vitesse du doigt : ni arrêt au lâcher, ni à-coup au retour.
+    /// Ressort qui part à la vitesse du doigt, sans rebond : remonte en place, ou descend jusqu'en bas (`done` ensuite).
     func settle(open: Bool, velocity: CGFloat = 0, done: (() -> Void)? = nil) {
+        guard let view else { done?(); return }
         target = open ? 0 : height
         let distance = target - y
         let relative = abs(distance) > 1 ? velocity / distance : 0
-        // Fermeture rapide et sans rebond, qui garde l'élan du doigt jusqu'en bas.
-        let spring: Animation = open
-            ? .interpolatingSpring(mass: 1, stiffness: 300, damping: 34, initialVelocity: relative)
-            : .interpolatingSpring(mass: 1, stiffness: 420, damping: 41, initialVelocity: relative)
-        withAnimation(spring) { y = target } completion: { done?() }
+        y = target
+        let end = target
+        UIView.animate(withDuration: open ? 0.45 : 0.32, delay: 0, usingSpringWithDamping: 1,
+                       initialSpringVelocity: relative, options: [.allowUserInteraction, .beginFromCurrentState]) {
+            view.transform = CGAffineTransform(translationX: 0, y: end)
+        } completion: { [weak self] finished in
+            guard finished else { return }
+            if open { self?.round(false) }
+            done?()
+        }
     }
 }
 
-/// Conteneur du lecteur plein écran, toujours en place (caché sous l'écran quand il est fermé) :
-/// l'ouvrir ou le fermer n'est qu'un déplacement, rien n'est construit au moment de l'animation.
-struct FullPlayerContainer: View {
+/// Grand lecteur présenté par iOS (voir `PlayerCover`) : il monte du bas de l'écran et y redescend, avec les coins de
+/// l'écran pendant qu'il bouge ; en place, il couvre tout l'écran. Fermé, il n'existe plus : rien n'est gardé en mémoire
+/// ni mis à jour à chaque titre.
+struct PlayerSheet: View {
     @Environment(Player.self) private var player
-    @Environment(\.scenePhase) private var scenePhase
     @State private var pull = PullState()
 
     var body: some View {
-        GeometryReader { geo in
-            let height = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
-            // En arrière-plan, le lecteur fermé est retiré (sa grande pochette ne reste pas en mémoire) ;
-            // ouvert, il reste : l'aperçu du sélecteur d'apps montre ce qui était vraiment à l'écran.
-            if scenePhase != .background || player.showFullPlayer {
-                NowPlayingView(pull: pull)
-                    // Toujours en sombre, quel que soit le mode : son fond est la pochette assombrie (comme Apple Music).
-                    .environment(\.colorScheme, .dark)
-                    // Très grandes tailles de texte : bornées (comme le mini-lecteur), sinon sur un petit iPhone (SE) le
-                    // bas du lecteur passait sous la barre du bas.
-                    .dynamicTypeSize(...DynamicTypeSize.accessibility1)
-                    .offset(y: pull.y)
-                    .allowsHitTesting(player.showFullPlayer)
-                    .accessibilityHidden(!player.showFullPlayer)
-                    .onAppear { place(height) }
-                    .onChange(of: height) { _, h in place(h) }
-            }
-        }
-        .onChange(of: player.showFullPlayer) { _, open in
-            // Ouverture par le mini-lecteur, fermeture par la flèche ou une navigation ; le geste lance déjà le sien.
-            if pull.target != (open ? 0 : pull.height) { pull.settle(open: open) }
-        }
+        NowPlayingView(pull: pull)
+            // Toujours en sombre, quel que soit le mode : son fond est la pochette assombrie (comme Apple Music).
+            .environment(\.colorScheme, .dark)
+            // Très grandes tailles de texte : bornées, sinon sur un petit iPhone (SE) le bas passait sous la barre.
+            .dynamicTypeSize(...DynamicTypeSize.accessibility1)
+            .background(SheetHandle(pull: pull))
+            // Fond transparent : l'app reste visible dessous quand on tire le lecteur vers le bas.
+            .presentationBackground(.clear)
+            // Fermé sans le geste (navigation, VoiceOver) : il redescend avec les coins de l'écran.
+            .onChange(of: player.showFullPlayer) { _, open in if !open { pull.round(true) } }
+    }
+}
+
+/// Retrouve la vue présentée par iOS (le lecteur entier) et la confie à `PullState`.
+private struct SheetHandle: UIViewRepresentable {
+    let pull: PullState
+
+    func makeUIView(context: Context) -> SheetProbe {
+        let probe = SheetProbe()
+        probe.pull = pull
+        probe.isUserInteractionEnabled = false
+        return probe
     }
 
-    private func place(_ height: CGFloat) {
-        pull.height = height
-        if !player.showFullPlayer {
-            pull.y = height
-            pull.target = height
+    func updateUIView(_ uiView: SheetProbe, context: Context) {}
+
+    final class SheetProbe: UIView {
+        weak var pull: PullState?
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil, let pull, let presented = presentedController(), let sheet = presented.view else { return }
+            sheet.layer.cornerCurve = .continuous
+            pull.view = sheet
+            // Coins arrondis pendant qu'il monte, droits une fois en place (voir `PullState.round`).
+            pull.round(true)
+            if let transition = presented.transitionCoordinator {
+                transition.animate(alongsideTransition: nil) { [weak pull] _ in pull?.round(false) }
+            } else {
+                pull.round(false)
+            }
+        }
+
+        /// Contrôleur présenté (et non un de ses enfants) : c'est sa vue qu'iOS fait monter et descendre.
+        private func presentedController() -> UIViewController? {
+            var responder: UIResponder? = self
+            while let next = responder?.next {
+                if let controller = next as? UIViewController, let presenting = controller.presentingViewController {
+                    return presenting.presentedViewController
+                }
+                responder = next
+            }
+            return nil
         }
     }
 }
 
 struct NowPlayingView: View {
     @Environment(Player.self) private var player
+    /// Lecteur tiré vers le bas (voir `PullState`).
     let pull: PullState
     /// Grande pochette, ou à sa place la file d'attente ou les paroles (comme dans Apple Music).
     enum Panel { case cover, queue, lyrics }
@@ -615,12 +701,12 @@ struct NowPlayingView: View {
     @State private var addToPlaylist: Track?
     /// Mode épuré (appui long sur la pochette) : seuls la pochette, le titre, l'artiste et la barre restent.
     @State private var clean = false
-    /// Doigt posé sur le lecteur : revient à `false` même si le système annule le geste, sans `onEnded`.
-    @GestureState private var pulling = false
     /// Réglages › Apparence : pochette en haut de l'écran sur toute la largeur, fondue dans le fond.
     @AppStorage("fullBleedCover") private var fullBleed = false
     /// Réglages : un appui long sur la pochette l'enregistre dans Photos, au lieu du mode épuré (désactivé par défaut).
     @AppStorage("saveCoverOnLongPress") private var saveCoverOnLongPress = false
+    /// Haut du titre (sous la pochette), mesuré : la pochette pleine largeur descend jusque-là.
+    @State private var titleTop: CGFloat = 0
     var body: some View {
         GeometryReader { geo in
             let side = min(geo.size.width - 48, geo.size.height * 0.42)
@@ -652,10 +738,11 @@ struct NowPlayingView: View {
                     Spacer(minLength: 8)
                     titleRow
                         .legible(grouped: true)
+                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .named("player")).minY } action: { titleTop = $0 }
                         .padding(.bottom, 18)
                 }
                 VStack(spacing: 18) {
-                    ScrubBar().id("\(player.current?.id ?? 0)|\(player.showFullPlayer)")
+                    ScrubBar().id(player.current?.id)
                     // Masqués sans changer la mise en page : la pochette et le titre ne bougent pas.
                     Group {
                         controls
@@ -671,6 +758,7 @@ struct NowPlayingView: View {
             .padding(.bottom, 4)
             .animation(.easeInOut(duration: 0.3), value: clean)
             }
+            .coordinateSpace(.named("player"))
             .animation(.easeInOut(duration: 0.3), value: panel)
             .background { bleedBackdrop(geo, shown: bleed) }
             .background { Backdrop(url: player.cover(player.current), open: player.showFullPlayer) }
@@ -682,8 +770,7 @@ struct NowPlayingView: View {
         .foregroundStyle(.white)
         .contentShape(Rectangle())
         // File ou paroles ouvertes : le geste est coupé pour laisser défiler la liste.
-        .gesture(pullGesture, including: panel == .cover ? .all : .subviews)
-        .onChange(of: pulling) { _, on in if !on { pull.recover() } }
+        .modifier(PullToClose(pull: pull, enabled: panel == .cover, onEnd: pullEnded))
         .accessibilityAddTraits(.isModal)
         .accessibilityAction(.escape) { player.showFullPlayer = false }
         // VoiceOver : fermeture proposée dans les actions (avant, seul le geste d'échappement à deux doigts la permettait).
@@ -694,7 +781,8 @@ struct NowPlayingView: View {
     /// ce que le compilateur sait vérifier à temps.
     private func bleedCover(_ geo: GeometryProxy) -> some View {
         VStack(spacing: 0) {
-            CoverCarousel(side: geo.size.width, width: geo.size.width, pull: pull, bleed: true, onPullEnd: pullEnded) { coverLongPress() }
+            CoverCarousel(side: geo.size.width * (bleedFit(geo)?.zoom ?? 1), width: geo.size.width, pull: pull, bleed: true,
+                          onPullEnd: pullEnded) { coverLongPress() }
                 .mask { Self.bleedMask }
             Spacer(minLength: 0)
         }
@@ -703,10 +791,10 @@ struct NowPlayingView: View {
     }
 
     /// Bas fondu en courbe douce (pas de départ visible du fondu, comme une ligne). Haut fondu un peu plus long (7 %) : la
-    /// jonction avec le fond se fait en douceur, les logos tout en haut restent lisibles.
+    /// jonction avec le fond se fait en douceur, les logos tout en haut restent lisibles. Sous ces fondus, le fond est flou
+    /// (voir `CoverLoader.bleedBackdrop`) : la pochette se fond dans un flou d'elle-même, et pendant un changement de titre
+    /// on n'y voit que des couleurs floues, jamais la pochette d'avant.
     private static let bleedMask = LinearGradient(
-        // Bas fondu à partir de 70 %, là où commence le flou du fond. Essayé à partir de 75 et 85 % (bas plus net) : le
-        // passage au flou, plus court, se voyait davantage ; 70 % gardé.
         stops: [.init(color: .clear, location: 0), .init(color: .black, location: 0.07),
                 .init(color: .black, location: 0.7), .init(color: .black.opacity(0.74), location: 0.8),
                 .init(color: .black.opacity(0.35), location: 0.88), .init(color: .black.opacity(0.07), location: 0.95),
@@ -714,50 +802,50 @@ struct NowPlayingView: View {
         startPoint: .top, endPoint: .bottom)
 
     /// Pochette pleine largeur (réglage activé seulement) : son fond, aligné sous elle (mesures de l'écran), par-dessus le fond
-    /// habituel. Paroles ou file ouvertes : il reste, flouté et assombri (il est net sous le milieu de la pochette, cachée
-    /// alors). Avant, il s'effaçait et l'ancien fond flouté revenait, d'un autre style. Dans son propre `background`, pas avec le fond habituel : posés ensemble, il
+    /// habituel. Paroles ou file ouvertes : il reste, encore plus flouté et assombri pour le texte. Avant, il s'effaçait et
+    /// l'ancien fond flouté revenait, d'un autre style. Dans son propre `background`, pas avec le fond habituel : posés ensemble, il
     /// prenait la largeur de celui-ci (bien plus large que l'écran) et son image était étirée en largeur, d'où une copie de
     /// la pochette décalée qui se voyait sous son fondu (pattes d'un cheval en double).
     @ViewBuilder
     private func bleedBackdrop(_ geo: GeometryProxy, shown: Bool) -> some View {
-        // Largeur pas encore connue (première mise en page) : rien. Hauteur bornée à 3 fois la largeur : une mesure à 0
+        // Mesures pas encore connues (première mise en page) : rien. Hauteur bornée à 3 fois la largeur : une mesure à 0
         // donnait une image de centaines de milliers de pixels de haut (des centaines de Mo, l'app fermée par iOS).
-        if fullBleed, geo.size.width >= 1 {
-            let screen: CGFloat = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
-            let tall: CGFloat = min(max(screen / geo.size.width, 1), 3)
-            Backdrop(url: player.cover(player.current), open: player.showFullPlayer, tall: tall,
-                     inset: geo.safeAreaInsets.top * 0.7 / max(geo.size.width, 1), blurred: !shown)
+        if fullBleed, let fit = bleedFit(geo) {
+            Backdrop(url: player.cover(player.current), open: player.showFullPlayer, tall: fit.tall, inset: fit.inset, zoom: fit.zoom,
+                     blurred: !shown)
                 .animation(.easeInOut(duration: 0.3), value: shown)
         }
     }
 
-    /// Glissement vertical n'importe où sur le lecteur : tout le lecteur descend.
-    /// Mesuré dans le repère de l'écran : le lecteur qui bouge ne fausse pas la mesure.
-    private var pullGesture: some Gesture {
-        DragGesture(minimumDistance: 8, coordinateSpace: .global)
-            .updating($pulling) { _, state, _ in state = true }
-            .onChanged { v in
-                guard v.translation.height > abs(v.translation.width) || pull.y > 0 else { return }
-                pull.y = max(0, v.translation.height)
-            }
-            .onEnded { v in
-                guard pull.y > 0 else { return }
-                pullEnded(v)
-            }
+    /// Mesures du fond pleine largeur (voir `Backdrop`) ; largeur ou titre pas encore mesurés : aucune. La pochette, posée
+    /// sous l'heure, descend jusqu'au titre (comme Apple Music), son reflet commence là. Arrondie au point : une mesure qui
+    /// varie d'une fraction ne refait pas le fond. Avant la mesure du titre (première image du lecteur, refait à chaque
+    /// ouverture), le fond était fait une première fois avec une pochette carrée : un fond calculé pour rien à chaque
+    /// ouverture, et celui déjà prêt (voir `Backdrop.init`) cherché avec ces mauvaises mesures, donc pas trouvé.
+    private func bleedFit(_ geo: GeometryProxy) -> BleedFit? {
+        guard geo.size.width >= 1, titleTop > 0 else { return nil }
+        let screen = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
+        let height = (titleTop + geo.safeAreaInsets.top * 0.3).rounded()
+        // Pochette 4 % moins haute que la place jusqu'au titre : moins coupée sur les côtés, le reflet commence un peu plus haut.
+        return BleedFit(tall: min(max(screen / geo.size.width, 1), 3), inset: geo.safeAreaInsets.top * 0.7 / geo.size.width,
+                        zoom: min(max(height * 0.96 / geo.size.width, 1), 1.8))
     }
 
+    /// Lâcher du lecteur tiré vers le bas (voir `PullToClose`) : il se ferme ou revient en place.
     private func pullEnded(_ v: DragGesture.Value) {
         let close = v.translation.height > 140 || v.predictedEndTranslation.height > 260 || v.velocity.height > 800
         // Le ressort repart à la vitesse du doigt, dans un sens comme dans l'autre. À la fermeture, le reste de l'app
         // (mini-lecteur, pochettes, barres) n'est mis à jour qu'une fois le lecteur arrivé en bas : rien ne pèse
         // sur l'animation.
         if close {
-            pull.settle(open: false, velocity: v.velocity.height) {
-                // Rattrapé puis relâché vers le haut entre-temps : le lecteur reste ouvert.
-                if pull.target == pull.height { player.showFullPlayer = false }
+            pull.release(open: false, fallback: v.velocity.height) {
+                // Déjà en bas : retiré sans l'animation d'iOS (elle repartirait du haut).
+                var t = Transaction()
+                t.disablesAnimations = true
+                withTransaction(t) { player.showFullPlayer = false }
             }
         } else {
-            pull.settle(open: true, velocity: v.velocity.height)
+            pull.release(open: true, fallback: v.velocity.height)
         }
     }
 
@@ -940,12 +1028,48 @@ struct NowPlayingView: View {
     }
 }
 
+/// Glissement vertical n'importe où sur le lecteur : tout le lecteur descend. Mesuré dans le repère de l'écran : le lecteur
+/// qui bouge ne fausse pas la mesure. File ou paroles ouvertes (`enabled` faux) : coupé pour laisser défiler la liste.
+/// À part du lecteur : poser ou lever le doigt ne redessine que ce petit morceau. Avant, l'état « doigt posé » était dans
+/// le lecteur, refait en entier (titre, boutons, barre) au début et à la fin du geste : une image sautée au lâcher.
+private struct PullToClose: ViewModifier {
+    let pull: PullState
+    let enabled: Bool
+    let onEnd: (DragGesture.Value) -> Void
+    /// Doigt posé sur le lecteur : revient à `false` même si le système annule le geste, sans `onEnded`.
+    @GestureState private var pulling = false
+
+    func body(content: Content) -> some View {
+        content
+            .gesture(
+                DragGesture(minimumDistance: 8, coordinateSpace: .global)
+                    .updating($pulling) { _, state, _ in state = true }
+                    .onChanged { v in
+                        guard v.translation.height > abs(v.translation.width) || pull.y > 0 else { return }
+                        pull.drag(to: max(0, v.translation.height))
+                    }
+                    .onEnded { v in
+                        guard pull.y > 0 else { return }
+                        onEnd(v)
+                    },
+                including: enabled ? .all : .subviews)
+            .onChange(of: pulling) { _, on in if !on { pull.recover() } }
+    }
+}
+
 extension Track {
     /// Artistes proposés par « Aller à l'artiste » : tous ceux d'un feat, sinon l'artiste principal.
     var artistLinks: [ArtistRef] {
         if !artists.isEmpty { return artists }
         return artistId != 0 ? [ArtistRef(id: artistId, name: artist)] : []
     }
+}
+
+/// Mesures du fond de la pochette pleine largeur, en largeurs d'écran (voir `Backdrop.tall` et `Backdrop.inset`).
+private struct BleedFit {
+    let tall: CGFloat
+    let inset: CGFloat
+    let zoom: CGFloat
 }
 
 /// Fond du lecteur : la pochette floutée en bonne qualité (voir `CoverLoader.backdrop`), assombrie pour le texte.
@@ -961,6 +1085,8 @@ private struct Backdrop: View {
     var inset: CGFloat = 0
     /// Pochette pleine largeur, paroles ou file ouvertes : fond flouté et assombri pour le texte (même image, rien à refaire).
     var blurred = false
+    /// Hauteur de la pochette pleine largeur / largeur de l'écran (plus haute que large : coupée sur les côtés).
+    var zoom: CGFloat = 1
     @Environment(\.scenePhase) private var phase
     /// Fond précédent (dessous) et nouveau (dessus, qui apparaît en fondu) : d'une pochette à l'autre, jamais de
     /// passage par le noir, et un fondu long pour adoucir un passage clair → sombre.
@@ -971,6 +1097,17 @@ private struct Backdrop: View {
     @State private var shown: Double = 1
     /// Début du dernier fondu : une image qui arrive pendant un fondu ne fait pas sauter l'affichage.
     @State private var fadeStart = Date.distantPast
+
+    init(url: String?, open: Bool, tall: CGFloat? = nil, inset: CGFloat = 0, zoom: CGFloat = 1, blurred: Bool = false) {
+        self.url = url
+        self.open = open
+        self.tall = tall
+        self.inset = inset
+        self.zoom = zoom
+        self.blurred = blurred
+        // Fond déjà prêt : affiché dès la première image (le lecteur présenté par iOS est construit à l'ouverture).
+        _top = State(initialValue: url.flatMap { CoverLoader.shared.cachedBackdrop(url: $0, saturation: tall == nil ? 1.15 : 1, tall: tall, inset: inset, zoom: zoom) })
+    }
 
     var body: some View {
         ZStack {
@@ -986,7 +1123,7 @@ private struct Backdrop: View {
             // aucun voile jusqu'au bas de la pochette (elle n'en a pas : sur une pochette claire, la jonction faisait une bande
             // sombre), puis il s'assombrit peu à peu sous le titre et les boutons.
             if let tall {
-                let end = min((inset + 1) / tall, 0.8)
+                let end = min((inset + zoom) / tall, 0.8)
                 LinearGradient(stops: [.init(color: .clear, location: end), .init(color: .black.opacity(0.3), location: min(end + 0.18, 0.95)),
                                        .init(color: .black.opacity(0.5), location: 1)], startPoint: .top, endPoint: .bottom)
                 // Paroles ou file : le haut aussi est assombri, comme le fond habituel (texte lisible sur une pochette claire).
@@ -997,12 +1134,12 @@ private struct Backdrop: View {
         }
         .ignoresSafeArea()
         // Avec les mesures : un fond fait avec d'autres mesures (rotation, première mise en page) est refait.
-        .task(id: "\(url ?? "")|\(phase == .background)|\(open)|\(tall ?? 0)|\(inset)") {
+        .task(id: "\(url ?? "")|\(phase == .background)|\(open)|\(tall ?? 0)|\(inset)|\(zoom)") {
             guard phase != .background else { return }
             // Titre sans pochette (image de secours) : fondu vers le noir.
             guard let url else { fadeToBlack(); return }
             func make() async -> UIImage? {
-                if let tall { return await CoverLoader.shared.bleedBackdrop(url: url, download: open, tall: tall, inset: inset) }
+                if let tall { return await CoverLoader.shared.bleedBackdrop(url: url, download: open, tall: tall, inset: inset, zoom: zoom) }
                 return await CoverLoader.shared.backdrop(url: url, download: open, saturation: 1.15)
             }
             var image = await make()
@@ -1085,7 +1222,8 @@ private struct CoverCarousel: View {
     /// Largeur de l'écran : les voisines restent hors champ au repos.
     let width: CGFloat
     let pull: PullState
-    /// Pochette pleine largeur : sans coins arrondis ni ombre, et pas réduite en pause.
+    /// Pochette pleine largeur : sans coins arrondis ni ombre, et pas réduite en pause. `side` est alors sa hauteur (jusqu'au
+    /// titre, comme Apple Music) : plus haute que large, elle est coupée aux bords de l'écran.
     var bleed = false
     let onPullEnd: (DragGesture.Value) -> Void
     /// Appui long : mode épuré du lecteur.
@@ -1095,79 +1233,121 @@ private struct CoverCarousel: View {
     @GestureState private var dragging = false
     @State private var steps = CarouselSteps()
 
-    private var step: CGFloat { (width + side) / 2 + 12 }
+    /// Pleine largeur : pochettes bord à bord, comme Apple Music.
+    private var step: CGFloat { bleed ? width : (width + side) / 2 + 12 }
     private var radius: CGFloat { bleed ? 0 : 14 }
 
+    /// Pochette précédente (-1), en cours (0) ou suivante (1).
+    private struct Slot: Identifiable {
+        let id: String
+        let offset: Int
+        let track: Track?
+    }
+
     var body: some View {
-        let previous = steps.neighbor(player, -1)
-        let next = steps.neighbor(player, 1)
-        let current = steps.current(player)
+        let base = steps.base(player)
         let active = player.status.playing || player.loading
         let open = player.showFullPlayer
+        let slots = [(-1, steps.neighbor(player, -1)), (0, steps.current(player)), (1, steps.neighbor(player, 1))]
+            .filter { $0.0 == 0 || $0.1 != nil }
+            // Identité : la place dans la file et l'image. Au passage au titre voisin, la pochette qui arrive au centre reste
+            // la même vue (seule celle qui entre, hors champ, est construite). Avant, les trois pochettes étaient refaites à
+            // ce moment-là, en plein glissement : une image sautée à chaque titre quand on en passe plusieurs d'affilée.
+            .map { Slot(id: "\(base + $0.0)|\(player.cover($0.1) ?? "")", offset: $0.0, track: $0.1) }
         ZStack {
-            // Chaque pochette a l'identité de son image : rien d'ancien ne s'affiche quand les voisines changent.
-            if let previous { CoverView(url: player.cover(previous), side: side, radius: radius, load: open).id(player.cover(previous) ?? "").offset(x: -step) }
-            if let next { CoverView(url: player.cover(next), side: side, radius: radius, load: open).id(player.cover(next) ?? "").offset(x: step) }
-            // Lecteur fermé : pas de téléchargement de la grande pochette à chaque titre.
-            Group {
-                if current?.id == 0 {
-                    // Flow en chargement : indicateur, pas la pochette de secours des MP3 importés.
-                    RoundedRectangle(cornerRadius: radius, style: .continuous).fill(.white.opacity(0.08))
-                        .frame(width: side, height: side)
-                        .overlay { ProgressView().controlSize(.large).tint(.white) }
-                } else {
-                    CoverView(url: player.cover(current), side: side, radius: radius, load: open, large: bleed)
+            ForEach(slots) { slot in
+                let center = slot.offset == 0
+                Group {
+                    if slot.track?.id == 0 {
+                        // Flow en chargement : indicateur, pas la pochette de secours des MP3 importés.
+                        RoundedRectangle(cornerRadius: radius, style: .continuous).fill(.white.opacity(0.08))
+                            .frame(width: bleed ? width : side, height: side)
+                            .overlay { ProgressView().controlSize(.large).tint(.white) }
+                    } else {
+                        // Lecteur fermé : pas de téléchargement de la grande pochette à chaque titre.
+                        page(CoverView(url: player.cover(slot.track), side: side, radius: radius, load: open, large: bleed))
+                    }
                 }
-            }
-                .id(player.cover(current) ?? "")
-                .shadow(color: .black.opacity(bleed ? 0 : 0.4), radius: active ? 24 : 12, y: active ? 14 : 6)
+                // Ombre et taille réglées par des valeurs (pas des modificateurs ajoutés ou retirés) : devenir la pochette du
+                // centre ne change pas la structure de la vue, rien n'est reconstruit.
+                .shadow(color: .black.opacity(bleed || !center ? 0 : 0.4), radius: center && active ? 24 : 12, y: center && active ? 14 : 6)
                 // Pochette réduite en pause, pleine taille en lecture (comme Apple Music). Pleine largeur : aucun effet.
-                .scaleEffect(active || bleed ? 1 : 0.8)
+                .scaleEffect(!center || active || bleed ? 1 : 0.8)
                 .animation(.spring(response: 0.5, dampingFraction: 0.72), value: active)
+                .offset(x: CGFloat(slot.offset) * step)
+                .zIndex(center ? 1 : 0) // ombre du centre par-dessus les voisines, comme avant
+            }
         }
         .modifier(SlideOffset(state: slide))
-        .frame(width: side, height: side)
+        .frame(width: bleed ? width : side, height: side)
         .frame(maxWidth: .infinity)
         .contentShape(Rectangle())
         // Annulé dès que le doigt glisse : le défilement des pochettes et le geste de fermeture restent prioritaires.
         .simultaneousGesture(LongPressGesture(minimumDuration: 0.45).onEnded { _ in onLongPress() })
-        .gesture(
-            DragGesture(minimumDistance: 8, coordinateSpace: .global)
-                .updating($dragging) { _, state, _ in state = true }
-                .onChanged { v in
-                    if slide.axis == nil {
-                    steps.interrupt(slide: slide)
-                    slide.axis = abs(v.translation.width) > abs(v.translation.height) ? .horizontal : .vertical
-                }
-                    if slide.axis == .vertical {
-                        pull.y = max(0, v.translation.height)
-                    } else {
-                        // Pas de voisine de ce côté : résistance élastique.
-                        let blocked = (v.translation.width > 0 && steps.neighbor(player, -1) == nil)
-                            || (v.translation.width < 0 && steps.neighbor(player, 1) == nil)
-                        slide.dx = blocked ? v.translation.width * 0.3 : v.translation.width
-                    }
-                }
-                .onEnded { v in
-                    let vertical = slide.axis == .vertical
-                    slide.axis = nil
-                    if vertical { onPullEnd(v); return }
-                    let fling = v.predictedEndTranslation.width
-                    let forward = fling < -side * 0.35 && steps.neighbor(player, 1) != nil
-                    let backward = fling > side * 0.35 && steps.neighbor(player, -1) != nil
-                    steps.land(delta: forward ? 1 : backward ? -1 : 0, distance: step, velocity: v.velocity.width,
-                               slide: slide, player: player)
-                }
-        )
+        .gesture(drag)
         .onChange(of: dragging) { _, on in
             if !on { slide.recover { pull.recover(); steps.settle(slide: slide, player: player) } }
         }
     }
+
+    private var drag: some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .global)
+            .updating($dragging) { _, state, _ in state = true }
+            .onChanged { v in
+                if slide.axis == nil {
+                    steps.interrupt(slide: slide)
+                    slide.axis = abs(v.translation.width) > abs(v.translation.height) ? .horizontal : .vertical
+                }
+                if slide.axis == .vertical {
+                    pull.drag(to: max(0, v.translation.height))
+                } else {
+                    follow(v.translation.width)
+                }
+            }
+            .onEnded { v in
+                let vertical = slide.axis == .vertical
+                slide.axis = nil
+                // Titres d'avance pris avant ce geste vertical : le lecteur en est prévenu quand même.
+                if vertical { onPullEnd(v); steps.settle(slide: slide, player: player); return }
+                release(fling: v.predictedEndTranslation.width, velocity: v.velocity.width)
+            }
+    }
+
+    /// Pleine largeur : pochette agrandie (plus haute que l'écran n'est large), coupée aux bords de l'écran.
+    @ViewBuilder
+    private func page(_ cover: CoverView) -> some View {
+        if bleed {
+            cover.frame(width: width, height: side).clipped()
+        } else {
+            cover
+        }
+    }
+
+    /// Pochettes qui suivent le doigt. Pas de voisine de ce côté : résistance élastique.
+    private func follow(_ width: CGFloat) {
+        let blocked = (width > 0 && steps.neighbor(player, -1) == nil) || (width < 0 && steps.neighbor(player, 1) == nil)
+        slide.dx = blocked ? width * 0.3 : width
+        slide.track(slide.dx)
+    }
+
+    /// Lâcher : pochette voisine si l'élan suffit, sinon retour en place.
+    private func release(fling: CGFloat, velocity: CGFloat) {
+        let forward = fling < -min(side, width) * 0.35 && steps.neighbor(player, 1) != nil
+        let backward = fling > min(side, width) * 0.35 && steps.neighbor(player, -1) != nil
+        // Changement de titre une fois la pochette tout à fait arrêtée, comme le mini-lecteur : fait pendant la
+        // fin de sa course, il la figeait un instant (titre, barre, fond refaits d'un coup), puis elle sautait.
+        steps.land(delta: forward ? 1 : backward ? -1 : 0, distance: step,
+                   velocity: slide.fingerVelocity(fallback: velocity), headStart: releaseHeadStart,
+                   waitFullStop: true, coverPixels: bleed ? CoverLoader.large : Int(side * UIScreen.main.scale),
+                   slide: slide, player: player)
+    }
+
 }
 
 /// Barre de progression : fine au repos, plus épaisse sous le doigt ; le saut n'est envoyé qu'au lâcher.
 /// Elle glisse en continu (voir `ProgressLine`) au lieu d'avancer seconde par seconde ; lecteur fermé, elle ne tourne
-/// pas (elle est refaite à l'ouverture, directement à la bonne position).
+/// pas (elle repart à l'ouverture, directement à la bonne position, sans être refaite : moins de travail au moment où le
+/// lecteur commence à monter).
 struct ScrubBar: View {
     @Environment(Player.self) private var player
     /// Position tenue sous le doigt. `@GestureState` : remise à zéro aussi quand iOS interrompt le geste (appel), sinon
@@ -1405,95 +1585,334 @@ private struct PlaylistPicker: View {
     }
 }
 
-/// File d'attente dans le lecteur : appui = lire ; glisser à gauche = retirer ; « Modifier » = réordonner.
+/// Une ligne de la file. Identité : le titre et sa nième apparition (un même titre peut y être deux fois). Repérée par sa
+/// position, une ligne retirée animait la dernière, et un menu ouvert passait sur le titre voisin.
+private struct QueueRow: Hashable {
+    let id: String
+    let index: Int
+}
+
+/// File d'attente dans le lecteur, comme Apple Music : titres déjà écoutés au-dessus (cachés à l'ouverture, visibles en
+/// remontant), puis « À suivre ». Appui = lire (un titre déjà écouté est relancé et ceux d'après redeviennent « À suivre ») ;
+/// appui long = déplacer, vers le haut ou le bas seulement ; glissement à gauche = retirer.
 private struct QueuePanel: View {
     @Environment(Player.self) private var player
-    @State private var editing = false
 
-    /// Une ligne de la file. Identité : le titre et sa nième apparition (un même titre peut y être deux fois). Repérée
-    /// par sa position, une ligne retirée animait la dernière, et un menu ouvert passait sur le titre voisin.
-    private struct Row: Identifiable {
-        let id: String
-        let index: Int
-    }
-
-    /// Lignes déjà calculées, gardées tant que la file et le titre en cours ne changent pas. Avant, des milliers de
-    /// textes et un dictionnaire étaient refaits à chaque mise à jour du lecteur, panneau ouvert. Objet (pas une valeur) :
-    /// le remplir pendant l'affichage ne relance pas l'affichage.
+    /// Lignes déjà calculées, gardées tant que la file ne change pas. Avant, des milliers de textes et un dictionnaire
+    /// étaient refaits à chaque mise à jour du lecteur, panneau ouvert. Objet (pas une valeur) : le remplir pendant
+    /// l'affichage ne relance pas l'affichage.
     private final class RowCache {
-        var start = -1
         var ids: [Int64] = []
-        var rows: [Row] = []
+        var rows: [QueueRow] = []
     }
     @State private var cache = RowCache()
 
-    private func rows(from start: Int) -> [Row] {
+    private var rows: [QueueRow] {
         let ids = player.queue.map(\.id)
-        if cache.start == start, cache.ids == ids { return cache.rows }
+        if cache.ids == ids, !cache.rows.isEmpty || ids.isEmpty { return cache.rows }
         var seen: [Int64: Int] = [:]
-        let rows = (start..<ids.count).map { i in
+        let rows = ids.indices.map { i in
             let track = ids[i]
             let nth = seen[track, default: 0]
             seen[track] = nth + 1
-            return Row(id: "\(track)-\(nth)", index: i)
+            return QueueRow(id: "\(track)-\(nth)", index: i)
         }
-        cache.start = start
         cache.ids = ids
         cache.rows = rows
         return rows
     }
 
     var body: some View {
-        let start = min(player.queueIndex + 1, player.queue.count)
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(tr("À suivre")).font(.headline)
-                if player.queue.count > start {
-                    Text("\(player.queue.count - start)").font(.subheadline).foregroundStyle(.white.opacity(0.55))
-                }
-                Spacer()
-                Button(editing ? "OK" : tr("Modifier")) { withAnimation { editing.toggle() } }
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.white.opacity(0.85))
+        QueueList(player: player, rows: rows, current: player.queueIndex)
+    }
+}
+
+/// Liste d'iOS qui prévient à chaque mise en page (taille connue, lignes mesurées) : file d'attente et paroles.
+private final class WatchedCollectionView: UICollectionView {
+    var onLayout: (() -> Void)?
+
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        onLayout?()
+    }
+}
+
+/// Liste d'UIKit : son déplacement à l'appui long garde la ligne elle-même, tenue à la verticale (celui de la liste de
+/// SwiftUI soulevait un aperçu sombre qu'on promenait partout), et le glissement à gauche pour retirer est celui d'iOS.
+private struct QueueList: UIViewRepresentable {
+    let player: Player
+    let rows: [QueueRow]
+    let current: Int
+
+    func makeCoordinator() -> Coordinator { Coordinator(player: player) }
+
+    func makeUIView(context: Context) -> UICollectionView { context.coordinator.makeView() }
+
+    func updateUIView(_ view: UICollectionView, context: Context) {
+        context.coordinator.update(rows: rows, current: current)
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, UICollectionViewDelegate {
+        enum Section: Hashable { case history, next }
+        private static let empty = "empty"
+
+        private let player: Player
+        private weak var view: UICollectionView?
+        private var dataSource: UICollectionViewDiffableDataSource<Section, String>!
+        /// Ligne → place dans la file.
+        private var indexOf: [String: Int] = [:]
+        private var current = 0
+        private var nextCount = 0
+        /// Première mise en place faite (« À suivre » amené en haut une seule fois).
+        private var placed = false
+        /// Déplacement en cours : la file n'est pas réappliquée pendant ce temps.
+        private var moving = false
+        private var pending: (rows: [QueueRow], current: Int)?
+
+        init(player: Player) { self.player = player }
+
+        func makeView() -> UICollectionView {
+            var config = UICollectionLayoutListConfiguration(appearance: .plain)
+            config.showsSeparators = false
+            config.backgroundColor = .clear
+            config.headerMode = .supplementary
+            config.headerTopPadding = 0
+            config.trailingSwipeActionsConfigurationProvider = { [weak self] path in self?.removeAction(at: path) }
+            let layout = UICollectionViewCompositionalLayout { _, environment in
+                let section = NSCollectionLayoutSection.list(using: config, layoutEnvironment: environment)
+                section.boundarySupplementaryItems.forEach { $0.pinToVisibleBounds = false }
+                return section
             }
-            if start >= player.queue.count {
-                Text(tr("Rien d'autre dans la file.")).font(.subheadline).foregroundStyle(.white.opacity(0.55)).padding(.top, 20)
-                Spacer()
-            } else {
-                List {
-                    ForEach(rows(from: start)) { row in
-                        let i = row.index
-                        let t = player.queue[i]
-                        Button { player.queuePlay(i) } label: {
-                            HStack(spacing: 12) {
-                                CoverView(url: player.mp3Cover(t) ?? player.coverFixes[t.id] ?? t.coverUrl, side: 44, radius: 6)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(t.title).font(.subheadline.weight(.medium)).lineLimit(1)
-                                    Text(t.artist).font(.caption).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
-                                }
-                                Spacer()
-                            }
-                            .contentShape(Rectangle())
+            let view = WatchedCollectionView(frame: .zero, collectionViewLayout: layout)
+            view.onLayout = { [weak self] in self?.laidOut() }
+            view.backgroundColor = .clear
+            view.overrideUserInterfaceStyle = .dark
+            view.delegate = self
+            self.view = view
+
+            let cell = UICollectionView.CellRegistration<UICollectionViewListCell, String> { [weak self] cell, _, id in
+                guard let self else { return }
+                cell.backgroundConfiguration = .clear()
+                guard let i = self.indexOf[id], self.player.queue.indices.contains(i) else {
+                    cell.contentConfiguration = UIHostingConfiguration {
+                        Text(tr("Rien d'autre dans la file.")).font(.subheadline).foregroundStyle(.white.opacity(0.55))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }.margins(.horizontal, 0)
+                    return
+                }
+                let t = self.player.queue[i]
+                let cover = self.player.mp3Cover(t) ?? self.player.coverFixes[t.id] ?? t.coverUrl
+                cell.contentConfiguration = UIHostingConfiguration {
+                    HStack(spacing: 12) {
+                        CoverView(url: cover, side: 44, radius: 6)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(t.title).font(.subheadline.weight(.medium)).foregroundStyle(.white).lineLimit(1)
+                            Text(t.artist).font(.caption).foregroundStyle(.white.opacity(0.6)).lineLimit(1)
                         }
-                        .buttonStyle(.pressable)
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 5, leading: 0, bottom: 5, trailing: 0))
-                        .swipeActions(edge: .trailing) {
-                            Button(role: .destructive) { player.queueRemove(i) } label: { Label(tr("Retirer"), systemImage: "trash") }
-                        }
-                    }
-                    .onMove { from, to in
-                        guard let f = from.first else { return }
-                        let source = start + f
-                        let target = start + to
-                        player.queueMove(from: source, to: target > source ? target - 1 : target)
+                        Spacer(minLength: 0)
                     }
                 }
-                .listStyle(.plain)
-                .scrollContentBackground(.hidden)
-                .environment(\.editMode, .constant(editing ? .active : .inactive))
+                .margins(.horizontal, 0)
+                .margins(.vertical, 5)
+                cell.accessibilityTraits = .button
             }
+            let header = UICollectionView.SupplementaryRegistration<UICollectionViewListCell>(
+                elementKind: UICollectionView.elementKindSectionHeader) { [weak self] cell, _, path in
+                self?.configure(header: cell, at: path)
+            }
+            dataSource = UICollectionViewDiffableDataSource(collectionView: view) { view, path, id in
+                view.dequeueConfiguredReusableCell(using: cell, for: path, item: id)
+            }
+            dataSource.supplementaryViewProvider = { view, _, path in
+                view.dequeueConfiguredReusableSupplementary(using: header, for: path)
+            }
+            dataSource.reorderingHandlers.canReorderItem = { [weak self] id in
+                self?.dataSource.snapshot().sectionIdentifier(containingItem: id) == .next && id != Self.empty
+            }
+            dataSource.reorderingHandlers.didReorder = { [weak self] transaction in self?.reordered(transaction) }
+
+            let press = UILongPressGestureRecognizer(target: self, action: #selector(pressed(_:)))
+            press.minimumPressDuration = 0.3
+            view.addGestureRecognizer(press)
+            return view
+        }
+
+        private func configure(header cell: UICollectionViewListCell, at path: IndexPath) {
+            let section = dataSource.sectionIdentifier(for: path.section)
+            let count = section == .next ? nextCount : 0
+            cell.backgroundConfiguration = .clear()
+            cell.contentConfiguration = UIHostingConfiguration {
+                HStack(spacing: 8) {
+                    Text(section == .history ? tr("Historique") : tr("À suivre")).font(.headline).foregroundStyle(.white)
+                    if count > 0 { Text("\(count)").font(.subheadline).foregroundStyle(.white.opacity(0.55)) }
+                    Spacer(minLength: 0)
+                }
+            }
+            .margins(.horizontal, 0)
+            .margins(.vertical, 8)
+        }
+
+        func update(rows: [QueueRow], current: Int) {
+            if moving { pending = (rows, current); return }
+            guard let view else { return }
+            // Titre suivant : la liste garde sa place par rapport à « À suivre » (l'historique reste caché).
+            let shift = current != self.current && placed && !view.isDragging
+                ? nextHeader().map { view.contentOffset.y + view.adjustedContentInset.top - $0.minY } : nil
+            self.current = current
+            indexOf = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0.index) })
+            let history = rows.prefix(min(current, rows.count)).map(\.id)
+            let next = rows.dropFirst(min(current + 1, rows.count)).map(\.id)
+            let countChanged = next.count != nextCount
+            nextCount = next.count
+            var snapshot = NSDiffableDataSourceSnapshot<Section, String>()
+            if !history.isEmpty {
+                snapshot.appendSections([.history])
+                snapshot.appendItems(history, toSection: .history)
+            }
+            snapshot.appendSections([.next])
+            snapshot.appendItems(next.isEmpty ? [Self.empty] : next, toSection: .next)
+            // Titre réparé ou pochette retrouvée : lignes déjà là redessinées.
+            snapshot.reconfigureItems(snapshot.itemIdentifiers.filter { dataSource.indexPath(for: $0) != nil })
+            dataSource.apply(snapshot, animatingDifferences: placed) { [weak self] in
+                guard let self else { return }
+                if countChanged { self.refreshNextHeader() }
+                // Historique déjà ouvert à la main (shift négatif) : laissé tel quel.
+                guard let shift, shift >= -1 else { return }
+                view.layoutIfNeeded()
+                self.fitBottom()
+                if let header = self.nextHeader() {
+                    view.setContentOffset(CGPoint(x: 0, y: header.minY - view.adjustedContentInset.top + max(0, shift)), animated: true)
+                }
+            }
+        }
+
+        /// À chaque mise en page : place sous la fin de la file, et à la première (taille connue) « À suivre » amené en haut.
+        private func laidOut() {
+            guard let view, view.bounds.height > 0, dataSource.snapshot().numberOfItems > 0 else { return }
+            fitBottom()
+            guard !placed else { return }
+            placed = true
+            showNext()
+            // Lignes mesurées pendant ce premier défilement : position reprise une fois leur taille connue.
+            DispatchQueue.main.async { [weak self] in self?.showNext() }
+        }
+
+        private func refreshNextHeader() {
+            guard let view, let section = dataSource.snapshot().indexOfSection(.next) else { return }
+            let path = IndexPath(item: 0, section: section)
+            if let header = view.supplementaryView(forElementKind: UICollectionView.elementKindSectionHeader, at: path) as? UICollectionViewListCell {
+                configure(header: header, at: path)
+            }
+        }
+
+        /// Place sous la fin de la file : « À suivre » peut monter tout en haut, l'historique reste caché au-dessus.
+        private func fitBottom() {
+            guard let view, let header = nextHeader() else { return }
+            let below = view.collectionViewLayout.collectionViewContentSize.height - header.minY
+            let inset = max(0, view.bounds.height - below)
+            if abs(view.contentInset.bottom - inset) > 1 { view.contentInset.bottom = inset }
+        }
+
+        /// À l'ouverture : « À suivre » en haut, l'historique caché au-dessus (visible en remontant).
+        private func showNext() {
+            guard let view, let section = dataSource.snapshot().indexOfSection(.next) else { return }
+            view.scrollToItem(at: IndexPath(item: 0, section: section), at: .top, animated: false)
+            view.layoutIfNeeded()
+            if let header = nextHeader() { view.contentOffset.y = header.minY - view.adjustedContentInset.top }
+        }
+
+        private func nextHeader() -> CGRect? {
+            guard let view, let section = dataSource.snapshot().indexOfSection(.next) else { return nil }
+            return view.collectionViewLayout.layoutAttributesForSupplementaryView(
+                ofKind: UICollectionView.elementKindSectionHeader, at: IndexPath(item: 0, section: section))?.frame
+        }
+
+        // MARK: Gestes
+
+        /// Appui long : la ligne suit le doigt, à la verticale seulement (le doigt peut aller sur le côté, pas la ligne).
+        @objc private func pressed(_ press: UILongPressGestureRecognizer) {
+            guard let view else { return }
+            let point = press.location(in: view)
+            let held = CGPoint(x: view.bounds.midX, y: point.y)
+            switch press.state {
+            case .began:
+                guard let path = view.indexPathForItem(at: point),
+                      let id = dataSource.itemIdentifier(for: path),
+                      dataSource.snapshot().sectionIdentifier(containingItem: id) == .next, id != Self.empty,
+                      view.beginInteractiveMovementForItem(at: path) else { return }
+                moving = true
+                lift(view.cellForItem(at: path) as? UICollectionViewListCell)
+                UISelectionFeedbackGenerator().selectionChanged()
+                view.updateInteractiveMovementTargetPosition(held)
+            case .changed:
+                view.updateInteractiveMovementTargetPosition(held)
+            case .ended:
+                view.endInteractiveMovement()
+                finishMove()
+            default:
+                view.cancelInteractiveMovement()
+                finishMove()
+            }
+        }
+
+        /// Ligne déplacée : fond givré clair (pas noir) sous elle, pour ne pas se mêler aux textes qu'elle survole.
+        private weak var lifted: UICollectionViewListCell?
+
+        private func lift(_ cell: UICollectionViewListCell?) {
+            var background = UIBackgroundConfiguration.clear()
+            background.visualEffect = UIBlurEffect(style: .systemUltraThinMaterialDark)
+            background.backgroundColor = .white.withAlphaComponent(0.14)
+            background.cornerRadius = 10
+            background.backgroundInsets = NSDirectionalEdgeInsets(top: 0, leading: -8, bottom: 0, trailing: -8)
+            cell?.backgroundConfiguration = background
+            lifted = cell
+        }
+
+        private func finishMove() {
+            guard moving else { return }
+            moving = false
+            lifted?.backgroundConfiguration = .clear()
+            lifted = nil
+            if let pending { self.pending = nil; update(rows: pending.rows, current: pending.current) }
+        }
+
+        /// Ligne posée : le titre est déplacé dans la file (du lecteur), à sa nouvelle place parmi « À suivre ».
+        private func reordered(_ transaction: NSDiffableDataSourceTransaction<Section, String>) {
+            guard let change = transaction.sectionTransactions.first(where: { $0.sectionIdentifier == .next }) else { return }
+            for step in change.difference.inferringMoves() {
+                if case let .insert(to, _, from?) = step {
+                    player.queueMove(from: current + 1 + from, to: current + 1 + to)
+                    return
+                }
+            }
+        }
+
+        /// Déplacement gardé dans « À suivre » (jamais dans les titres déjà écoutés).
+        func collectionView(_ collectionView: UICollectionView, targetIndexPathForMoveOfItemFromOriginalIndexPath original: IndexPath,
+                            atCurrentIndexPath current: IndexPath, toProposedIndexPath proposed: IndexPath) -> IndexPath {
+            dataSource.sectionIdentifier(for: proposed.section) == .next ? proposed : current
+        }
+
+        func collectionView(_ collectionView: UICollectionView, shouldSelectItemAt path: IndexPath) -> Bool {
+            dataSource.itemIdentifier(for: path).map { indexOf[$0] != nil } ?? false
+        }
+
+        func collectionView(_ collectionView: UICollectionView, didSelectItemAt path: IndexPath) {
+            collectionView.deselectItem(at: path, animated: false)
+            guard let id = dataSource.itemIdentifier(for: path), let i = indexOf[id] else { return }
+            player.queuePlay(i)
+        }
+
+        private func removeAction(at path: IndexPath) -> UISwipeActionsConfiguration? {
+            guard let id = dataSource.itemIdentifier(for: path), let i = indexOf[id],
+                  dataSource.snapshot().sectionIdentifier(containingItem: id) == .next else { return nil }
+            let remove = UIContextualAction(style: .destructive, title: tr("Retirer")) { [weak self] _, _, done in
+                self?.player.queueRemove(i)
+                done(true)
+            }
+            remove.image = UIImage(systemName: "trash")
+            return UISwipeActionsConfiguration(actions: [remove])
         }
     }
 }
@@ -1512,8 +1931,6 @@ private struct LyricsPanel: View {
     @Environment(\.scenePhase) private var phase
     /// Ligne en cours (-1 : avant la première).
     @State private var active = -1
-    /// Jusqu'à quand le texte ne suit plus la ligne en cours (l'utilisateur le fait défiler).
-    @State private var readingUntil = Date.distantPast
     /// Lignes à partager en image (appui long sur une ligne).
     @State private var share: LyricsShareRequest?
 
@@ -1522,57 +1939,13 @@ private struct LyricsPanel: View {
             if !loaded {
                 ProgressView().tint(.white).frame(maxWidth: .infinity, maxHeight: .infinity)
             } else if let lyrics {
-                ScrollViewReader { proxy in
-                    ScrollView(showsIndicators: false) {
-                        VStack(alignment: .leading, spacing: 18) {
-                            // Paroles de secours : Genius précisé en haut, comme sur ordinateur (rien pour celles de Deezer).
-                            // Avant, la mention n'était qu'en bas, après toutes les lignes.
-                            if lyrics.fromGenius {
-                                Text(tr("Paroles : Genius")).font(.footnote.weight(.semibold)).foregroundStyle(.white.opacity(0.6))
-                            }
-                            ForEach(lyrics.lines.indices, id: \.self) { i in
-                                let line = lyrics.lines[i]
-                                Text(line.text.trimmingCharacters(in: .whitespaces).isEmpty ? "♪" : line.text)
-                                    .font(.title2.weight(.bold))
-                                    .foregroundStyle(.white.opacity(!lyrics.synced || i == active ? 1 : 0.35))
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture {
-                                        guard lyrics.synced else { return }
-                                        player.seek(seconds: Double(line.ms) / 1000)
-                                        active = i
-                                    }
-                                    // Appui long : partager cette ligne (et d'autres) en image avec la pochette.
-                                    .onLongPressGesture(minimumDuration: 0.4) { shareLine(i, lyrics) }
-                                    .accessibilityAction(named: tr("Partager en image")) { shareLine(i, lyrics) }
-                                    // Paroles synchronisées : un appui va à cette ligne (annoncé comme un bouton).
-                                    .accessibilityAddTraits(lyrics.synced ? .isButton : [])
-                                    .id(i)
-                            }
-                            if !lyrics.copyright.isEmpty {
-                                Text(lyrics.copyright).font(.caption).foregroundStyle(.white.opacity(0.4)).padding(.top, 12)
-                            }
-                        }
-                        .padding(.vertical, 24)
-                    }
-                    // Texte déplacé à la main : le suivi reprend 4 s après (on peut lire la suite tranquillement).
-                    .modifier(ScrollWatch { reading in
-                        readingUntil = reading ? .distantFuture : Date().addingTimeInterval(4)
-                    })
-                    .onChange(of: active) { old, i in
-                        guard i >= 0, Date() >= readingUntil else { return }
-                        // Ouverture des paroles (aucune ligne avant) : directement à la bonne ligne. Avant, le texte défilait
-                        // depuis le début jusqu'à elle.
-                        if old < 0 {
-                            var instant = Transaction()
-                            instant.disablesAnimations = true
-                            withTransaction(instant) { proxy.scrollTo(i, anchor: .center) }
-                        } else {
-                            withAnimation(.easeInOut(duration: 0.45)) { proxy.scrollTo(i, anchor: .center) }
-                        }
-                    }
-                }
-                .animation(.easeOut(duration: 0.3), value: active)
+                LyricsList(lyrics: lyrics, active: active, onTap: { i in
+                    // Paroles synchronisées : un appui amène la lecture à cette ligne.
+                    player.seek(seconds: Double(lyrics.lines[i].ms) / 1000)
+                    active = i
+                }, onShare: { i in shareLine(i, lyrics) })
+                // Paroles rechargées (autre titre, nouvel essai) : liste refaite, à la bonne ligne.
+                .id(shownFor)
                 .background {
                     if lyrics.synced { LyricsClock(lines: lyrics.lines) { active = $0 } }
                 }
@@ -1639,6 +2012,185 @@ private struct LyricsPanel: View {
         guard let track = player.current, track.id != 0,
               !lyrics.lines[i].text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
         share = LyricsShareRequest(track: track, lines: lyrics.lines, first: i)
+    }
+}
+
+/// Lignes des paroles dans une liste d'iOS (comme la file d'attente) : seules les lignes à l'écran existent, et la ligne en
+/// cours est amenée au centre par le défilement d'iOS. Avant, une liste SwiftUI : toutes les lignes mises en page à chaque
+/// changement de ligne, et un défilement moins doux. Ligne en cours en blanc, les autres atténuées (paroles synchronisées) ;
+/// appui = aller à cette ligne ; appui long = partager en image. Défilé à la main : le suivi reprend 4 s après le lâcher.
+private struct LyricsList: UIViewRepresentable {
+    let lyrics: Lyrics
+    let active: Int
+    let onTap: (Int) -> Void
+    let onShare: (Int) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> UICollectionView { context.coordinator.makeView(lyrics) }
+
+    func updateUIView(_ view: UICollectionView, context: Context) {
+        context.coordinator.onTap = onTap
+        context.coordinator.onShare = onShare
+        context.coordinator.show(active)
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, UICollectionViewDelegate {
+        enum Item: Hashable { case genius, line(Int), copyright }
+
+        var onTap: (Int) -> Void = { _ in }
+        var onShare: (Int) -> Void = { _ in }
+        private var synced = false
+        private weak var view: UICollectionView?
+        private var dataSource: UICollectionViewDiffableDataSource<Int, Item>!
+        /// Ligne en cours (-1 : avant la première).
+        private var active = -1
+        /// Ligne à centrer dès que la liste a sa taille (ouverture des paroles).
+        private var pendingCenter: Int?
+        /// Jusqu'à quand le texte ne suit plus la ligne en cours (l'utilisateur le fait défiler).
+        private var readingUntil = Date.distantPast
+
+        func makeView(_ lyrics: Lyrics) -> UICollectionView {
+            synced = lyrics.synced
+            var config = UICollectionLayoutListConfiguration(appearance: .plain)
+            config.showsSeparators = false
+            config.backgroundColor = .clear
+            let view = WatchedCollectionView(frame: .zero, collectionViewLayout: UICollectionViewCompositionalLayout.list(using: config))
+            view.onLayout = { [weak self] in self?.laidOut() }
+            view.backgroundColor = .clear
+            view.overrideUserInterfaceStyle = .dark
+            view.showsVerticalScrollIndicator = false
+            // Marges du haut et du bas : 24 points avec celles des lignes (9 points chacune).
+            view.contentInset = UIEdgeInsets(top: 15, left: 0, bottom: 15, right: 0)
+            view.delegate = self
+            self.view = view
+
+            let lines = lyrics.lines
+            let copyright = lyrics.copyright
+            let cell = UICollectionView.CellRegistration<UICollectionViewListCell, Item> { [weak self] cell, _, item in
+                cell.backgroundConfiguration = .clear()
+                cell.accessibilityTraits = []
+                cell.accessibilityCustomActions = nil
+                switch item {
+                case .genius:
+                    // Paroles de secours : Genius précisé en haut, comme sur ordinateur (rien pour celles de Deezer).
+                    cell.contentConfiguration = UIHostingConfiguration {
+                        Text(tr("Paroles : Genius")).font(.footnote.weight(.semibold)).foregroundStyle(.white.opacity(0.6))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }.margins(.horizontal, 0).margins(.vertical, 9)
+                    cell.contentView.alpha = 1
+                case .copyright:
+                    cell.contentConfiguration = UIHostingConfiguration {
+                        Text(copyright).font(.caption).foregroundStyle(.white.opacity(0.4))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 12)
+                    }.margins(.horizontal, 0).margins(.vertical, 9)
+                    cell.contentView.alpha = 1
+                case .line(let i):
+                    let text = lines[i].text
+                    cell.contentConfiguration = UIHostingConfiguration {
+                        Text(text.trimmingCharacters(in: .whitespaces).isEmpty ? "♪" : text)
+                            .font(.title2.weight(.bold)).foregroundStyle(.white)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }.margins(.horizontal, 0).margins(.vertical, 9)
+                    cell.contentView.alpha = self?.alpha(i) ?? 1
+                    // Paroles synchronisées : un appui va à cette ligne (annoncé comme un bouton).
+                    if self?.synced == true { cell.accessibilityTraits = .button }
+                    cell.accessibilityCustomActions = [UIAccessibilityCustomAction(name: tr("Partager en image")) { [weak self] _ in
+                        MainActor.assumeIsolated { self?.onShare(i) }
+                        return true
+                    }]
+                }
+            }
+            dataSource = UICollectionViewDiffableDataSource(collectionView: view) { view, path, item in
+                view.dequeueConfiguredReusableCell(using: cell, for: path, item: item)
+            }
+            var snapshot = NSDiffableDataSourceSnapshot<Int, Item>()
+            snapshot.appendSections([0])
+            if lyrics.fromGenius { snapshot.appendItems([.genius]) }
+            snapshot.appendItems(lines.indices.map { .line($0) })
+            if !copyright.isEmpty { snapshot.appendItems([.copyright]) }
+            dataSource.apply(snapshot, animatingDifferences: false)
+
+            // Appui long : partager cette ligne (et d'autres) en image avec la pochette.
+            let press = UILongPressGestureRecognizer(target: self, action: #selector(pressed(_:)))
+            press.minimumPressDuration = 0.4
+            view.addGestureRecognizer(press)
+            return view
+        }
+
+        /// Ligne en cours en blanc, les autres atténuées ; non synchronisées : toutes en blanc.
+        private func alpha(_ i: Int) -> CGFloat { !synced || i == active ? 1 : 0.35 }
+
+        func show(_ i: Int) {
+            guard i != active else { return }
+            let old = active
+            active = i
+            fade(old)
+            fade(i)
+            guard i >= 0, Date() >= readingUntil else { return }
+            // Ouverture des paroles (aucune ligne avant) : directement à la bonne ligne, sans défiler depuis le début.
+            center(i, animated: old >= 0)
+        }
+
+        private func fade(_ i: Int) {
+            guard i >= 0, let path = dataSource.indexPath(for: .line(i)), let cell = view?.cellForItem(at: path) else { return }
+            let alpha = alpha(i)
+            UIView.animate(withDuration: 0.3, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) { cell.contentView.alpha = alpha }
+        }
+
+        /// Ligne amenée au centre (bornée au début et à la fin du texte).
+        private func center(_ i: Int, animated: Bool) {
+            guard let view, view.bounds.height > 0, let path = dataSource.indexPath(for: .line(i)) else {
+                pendingCenter = i
+                return
+            }
+            if !animated {
+                // Lignes pas encore mesurées (hauteur estimée) : d'abord à peu près, puis exactement une fois mesurées.
+                view.scrollToItem(at: path, at: .centeredVertically, animated: false)
+                view.layoutIfNeeded()
+            }
+            guard let frame = view.layoutAttributesForItem(at: path)?.frame else { return }
+            let inset = view.adjustedContentInset
+            let bottom = max(-inset.top, view.contentSize.height + inset.bottom - view.bounds.height)
+            let y = min(max(frame.midY - view.bounds.height / 2, -inset.top), bottom)
+            view.setContentOffset(CGPoint(x: 0, y: y), animated: animated)
+        }
+
+        /// Liste à sa taille : la ligne en cours, demandée avant, est centrée (hors de la mise en page en cours).
+        private func laidOut() {
+            guard let i = pendingCenter, let view, view.bounds.height > 0 else { return }
+            pendingCenter = nil
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.active == i else { return }
+                self.center(i, animated: false)
+            }
+        }
+
+        @objc private func pressed(_ press: UILongPressGestureRecognizer) {
+            guard press.state == .began, let view, let path = view.indexPathForItem(at: press.location(in: view)),
+                  case let .line(i) = dataSource.itemIdentifier(for: path) else { return }
+            onShare(i)
+        }
+
+        func collectionView(_ collectionView: UICollectionView, shouldSelectItemAt path: IndexPath) -> Bool {
+            guard synced, case .line = dataSource.itemIdentifier(for: path) else { return false }
+            return true
+        }
+
+        func collectionView(_ collectionView: UICollectionView, didSelectItemAt path: IndexPath) {
+            collectionView.deselectItem(at: path, animated: false)
+            guard case let .line(i) = dataSource.itemIdentifier(for: path) else { return }
+            onTap(i)
+        }
+
+        // Texte déplacé à la main : le suivi reprend 4 s après le lâcher (on peut lire la suite tranquillement).
+        func scrollViewWillBeginDragging(_ scrollView: UIScrollView) { readingUntil = .distantFuture }
+
+        func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
+            readingUntil = Date().addingTimeInterval(4)
+        }
     }
 }
 

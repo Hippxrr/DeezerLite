@@ -165,7 +165,8 @@ struct RootView: View {
                 LaunchCover { launchCover = false }
             }
         }
-        .alert("Deezer Lite", isPresented: Binding(get: { player.message != nil }, set: { if !$0 { player.message = nil } })) {
+        // Grand lecteur présenté par iOS : le message s'affiche sur lui (voir `PlayerCover`).
+        .alert("Deezer Lite", isPresented: Binding(get: { player.message != nil && !player.coverShown }, set: { if !$0 { player.message = nil } })) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(player.message ?? "")
@@ -493,10 +494,9 @@ struct MainTabs: View {
                 .accessibilityHidden(player.showFullPlayer)
                 .animation(.spring(response: 0.4, dampingFraction: 0.85), value: !player.miniShown)
             }
-            // Le lecteur plein écran reste en place, hors de l'écran quand il est fermé : l'ouvrir ou le fermer
-            // n'est qu'un déplacement (rien à construire), et il suit le doigt pendant le geste.
-            FullPlayerContainer().zIndex(1)
         }
+        // Grand lecteur : présenté par iOS, il monte du bas de l'écran (voir `PlayerCover`).
+        .modifier(PlayerCover())
         // Pochette perso : la photo choisie est lue en mémoire, cadrée à la main, puis enregistrée (rien d'autre ne reste).
         .photosPicker(isPresented: Binding(get: { player.pickingCover }, set: { player.pickingCover = $0 }), selection: $picked, matching: .images)
         .onChange(of: picked) { _, item in
@@ -536,7 +536,8 @@ struct MainTabs: View {
         .sheet(isPresented: Binding(get: { player.choosingProfile && !player.settingsOpen }, set: { player.choosingProfile = $0 }), onDismiss: { player.keepCurrentProfile() }) {
             ProfilePicker().environment(player).presentationDetents([.medium, .large])
         }
-        .sheet(item: Binding(get: { player.creditsTrack }, set: { player.creditsTrack = $0 })) { track in
+        // Grand lecteur présenté par iOS : les crédits demandés depuis lui s'ouvrent sur lui (voir `PlayerCover`).
+        .sheet(item: Binding(get: { player.coverShown ? nil : player.creditsTrack }, set: { player.creditsTrack = $0 })) { track in
             CreditsView(track: track).environment(player).presentationDetents([.medium, .large])
         }
         .sheet(item: Binding(get: { player.playlistTrack }, set: { player.playlistTrack = $0 })) { track in
@@ -690,6 +691,30 @@ extension View {
     func miniPlayerSpace() -> some View { modifier(MiniPlayerSpace()) }
 }
 
+/// Grand lecteur présenté par iOS : il monte du bas de l'écran et y redescend, verticalement, avec les coins de l'écran ;
+/// tiré vers le bas, il suit le doigt (voir `PullState`). Les mouvements sont faits par iOS, hors de l'app : rien ne
+/// saccade, même lentement. Avant, l'app le déplaçait elle-même, image par image.
+private struct PlayerCover: ViewModifier {
+    @Environment(Player.self) private var player
+
+    func body(content: Content) -> some View {
+        content.fullScreenCover(isPresented: Binding(get: { player.showFullPlayer }, set: { player.showFullPlayer = $0 })) {
+            PlayerSheet()
+                .environment(player)
+                // Posés sur le lecteur aussi : posés seulement sur l'app, ils restaient cachés dessous.
+                .toastOverlay()
+                .sheet(item: Binding(get: { player.creditsTrack }, set: { player.creditsTrack = $0 })) { track in
+                    CreditsView(track: track).environment(player).presentationDetents([.medium, .large])
+                }
+                .alert("Deezer Lite", isPresented: Binding(get: { player.message != nil }, set: { if !$0 { player.message = nil } })) {
+                    Button("OK", role: .cancel) {}
+                } message: {
+                    Text(player.message ?? "")
+                }
+        }
+    }
+}
+
 /// Verre des pages « au repos » (sans réaction au doigt) pendant que le grand lecteur est ouvert, mais seulement une fois
 /// son animation d'ouverture finie. Avant, le verre de toutes les pages était reconfiguré dès la première image de
 /// l'animation (à-coup à l'ouverture). Les appuis sur les pages sont déjà bloqués dès l'ouverture (`allowsHitTesting`).
@@ -702,7 +727,9 @@ private struct GlassCalm: ViewModifier {
             .environment(\.glassReactsToTouch, !calm)
             .task(id: open) {
                 guard open else { calm = false; return }
-                try? await Task.sleep(for: .milliseconds(450))
+                // Après la fin du ressort d'ouverture (~0,6 s) : à 450 ms, le lecteur bougeait encore et cette mise à jour de
+                // toutes les pages freinait ses dernières images.
+                try? await Task.sleep(for: .milliseconds(700))
                 if !Task.isCancelled { calm = true }
             }
     }

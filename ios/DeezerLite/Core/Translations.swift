@@ -101,6 +101,7 @@ enum Translations {
         "Récents": ("Recent", "Recientes"),
         "Aucun titre récent": ("No recent tracks", "Ninguna canción reciente"),
         "À suivre": ("Up next", "A continuación"),
+        "Historique": ("History", "Historial"),
         "Connexion à Deezer…": ("Connecting to Deezer…", "Conectando con Deezer…"),
         "Connecte-toi dans l'app sur ton iPhone": ("Sign in from the app on your iPhone", "Inicia sesión en la app de tu iPhone"),
         "Rien sur l'accueil": ("Nothing on Home", "Nada en Inicio"),

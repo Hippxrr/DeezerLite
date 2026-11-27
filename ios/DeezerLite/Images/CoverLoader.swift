@@ -164,6 +164,13 @@ final class CoverLoader: @unchecked Sendable {
     /// Contexte Core Image partagé (le créer coûte cher ; un seul pour toute l'app).
     private let blurContext = CIContext(options: [.cacheIntermediates: false])
 
+    /// Fond déjà fait (voir `backdrop` et `bleedBackdrop`), lu tout de suite : le lecteur s'ouvre avec son fond, sans
+    /// passer par le noir le temps d'aller le chercher.
+    func cachedBackdrop(url: String, saturation: CGFloat = 1, tall: CGFloat? = nil, inset: CGFloat = 0, zoom: CGFloat = 1) -> UIImage? {
+        let key = tall.map { "\($0)|\(inset)|\(zoom)|\(url)" } ?? (saturation == 1 ? url : "\(saturation)|\(url)")
+        return backdrops.object(forKey: key as NSString)
+    }
+
     /// Fond du lecteur : la pochette en bonne qualité (500 px), réduite à 400 px puis floutée une seule fois, hors du
     /// thread principal. Le résultat est gardé : afficher ou animer le lecteur ne recalcule aucun flou.
     /// La grande pochette déjà en mémoire (celle de l'écran verrouillé) sert si elle est là : pas de second
@@ -198,9 +205,10 @@ final class CoverLoader: @unchecked Sendable {
     /// Fond de la pochette pleine largeur, posé sous la pochette nette (sous la barre d'état) : ses couleurs du haut
     /// prolongées derrière l'heure ; sous elle, son reflet, de plus en plus flou (en partant de presque rien), qui finit
     /// sur une seule couleur. Fait une fois par
-    /// titre, hors du thread principal. `tall` : hauteur de l'écran / largeur ; `inset` : hauteur de la barre d'état / largeur.
-    func bleedBackdrop(url: String, download: Bool, tall: CGFloat, inset: CGFloat) async -> UIImage? {
-        let key = "\(tall)|\(inset)|\(url)" as NSString
+    /// titre, hors du thread principal. `tall` : hauteur de l'écran / largeur ; `inset` : hauteur de la barre d'état / largeur ;
+    /// `zoom` : hauteur de la pochette / largeur (plus haute que large, elle est centrée et coupée sur les côtés).
+    func bleedBackdrop(url: String, download: Bool, tall: CGFloat, inset: CGFloat, zoom: CGFloat = 1) async -> UIImage? {
+        let key = "\(tall)|\(inset)|\(zoom)|\(url)" as NSString
         if let hit = backdrops.object(forKey: key) { return hit }
         let inMemory = anyCached(url: url).flatMap { ($0.cgImage?.width ?? 0) >= 400 ? $0 : nil }
         let picture: UIImage?
@@ -212,10 +220,14 @@ final class CoverLoader: @unchecked Sendable {
         let source = full.cropping(to: CGRect(x: (full.width - edge) / 2, y: (full.height - edge) / 2, width: edge, height: edge)) ?? full
         let context = blurContext
         let extended: UIImage? = await Task.detached(priority: .userInitiated) {
-            let scale = 400 / CGFloat(max(source.width, source.height, 1))
-            let input = CIImage(cgImage: source).transformed(by: CGAffineTransform(scaleX: scale, y: scale))
-            let width = input.extent.width
-            let side = input.extent.height
+            let width: CGFloat = 400
+            let scale = width * zoom / CGFloat(max(source.width, source.height, 1))
+            let side = (CGFloat(source.height) * scale).rounded()
+            // Bords prolongés avant la réduction : sinon ses lignes du bord sortent à moitié transparentes, et le reflet,
+            // collé au bord net de la pochette, y faisait un trait sombre.
+            let input = CIImage(cgImage: source).clampedToExtent().transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+                .cropped(to: CGRect(x: 0, y: 0, width: CGFloat(source.width) * scale, height: side))
+                .transformed(by: CGAffineTransform(translationX: -(width * zoom - width) / 2, y: 0))
             let canvas = CGRect(x: 0, y: 0, width: width, height: (width * tall).rounded())
             // Repère de Core Image : origine en bas. La pochette est posée sous la barre d'état.
             let gap = (width * inset).rounded()
@@ -245,14 +257,17 @@ final class CoverLoader: @unchecked Sendable {
             // pochette (cachée ou en train de s'effacer), à peine au bas de celle-ci ; puis sous elle, il part de presque rien
             // et monte doucement sur les trois quarts de la hauteur restante (avant : la moitié, plus vite au départ, le flou
             // arrivait « d'un coup »).
+            let blurred: CGFloat = 0.3 // sous le bas fondu de la pochette, et au départ de son reflet
             let base: CGFloat = 0.15 // 13 % avant : les traînées des hauts très chargés (fourrure, capuche) se voyaient un peu plus
             func eased(_ t: CGFloat) -> CGFloat { let t = min(max(t, 0), 1); return t * t * (3 - 2 * t) }
             func amount(_ row: CGFloat) -> CGFloat { // `row` : depuis le haut de l'écran
                 if row < gap { return base }
-                if row < gap + side * 0.1 { return base * (1 - eased((row - gap) / (side * 0.1))) }
-                if row < gap + side * 0.7 { return 0 }
-                if row < gap + side { return 0.04 * pow((row - gap - side * 0.7) / (side * 0.3), 2) }
-                return 0.04 + 0.96 * pow(min((row - gap - side) / (bottom * 0.75), 1), 1.8)
+                // Sous la pochette : flou partout (caché tant qu'elle est opaque). Elle se fond dans un flou d'elle-même, et une
+                // pochette pas encore chargée pendant des glissements rapides laisse voir des couleurs floues, plus l'ancienne
+                // pochette nette. En haut, aussi léger que derrière l'heure (plus fort, le fondu du haut faisait une démarcation) ;
+                // plus fort sous le fondu du bas (à partir de 70 %).
+                if row < gap + side { return base + (blurred - base) * eased((row - gap - side * 0.7) / (side * 0.08)) }
+                return blurred + (1 - blurred) * pow(min((row - gap - side) / (bottom * 0.75), 1), 1.8)
             }
             let rows = Int(canvas.height)
             let column = (0..<rows).map { UInt8((amount(CGFloat($0)) * 255).rounded()) }

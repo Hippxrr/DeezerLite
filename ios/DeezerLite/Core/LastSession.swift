@@ -52,11 +52,20 @@ struct LastSession: Codable {
         return try? JSONDecoder().decode(LastSession.self, from: data)
     }
 
-    func save() {
-        if let data = try? JSONEncoder().encode(self) { UserDefaults.standard.set(data, forKey: Self.key) }
+    /// Écritures dans l'ordre, hors du fil principal : au changement de titre, l'encodage et l'écriture tombaient pendant
+    /// que l'interface se met à jour (un accroc de plus dans le glissement des pochettes).
+    private static let writer = DispatchQueue(label: "LastSession", qos: .utility)
+
+    /// `wait` : écrite avant de rendre la main (passage en arrière-plan, fermeture : iOS peut arrêter l'app juste après).
+    func save(wait: Bool = true) {
+        let key = Self.key
+        let write = { if let data = try? JSONEncoder().encode(self) { UserDefaults.standard.set(data, forKey: key) } }
+        if wait { Self.writer.sync(execute: write) } else { Self.writer.async(execute: write) }
     }
 
     static func clear() {
-        UserDefaults.standard.removeObject(forKey: key)
+        let key = key
+        // Après les écritures en attente : une dernière écoute déjà effacée (déconnexion) n'est jamais réécrite.
+        writer.sync { UserDefaults.standard.removeObject(forKey: key) }
     }
 }
