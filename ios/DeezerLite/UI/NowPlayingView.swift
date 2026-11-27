@@ -731,6 +731,8 @@ struct NowPlayingView: View {
     @State private var clean = false
     /// Réglages › Apparence : pochette en haut de l'écran sur toute la largeur, fondue dans le fond.
     @AppStorage("fullBleedCover") private var fullBleed = false
+    /// Réglages › Apparence : pochette pleine largeur haute jusqu'au titre (agrandie, coupée sur les côtés) ; sinon entière.
+    @AppStorage("fullBleedTall") private var fullBleedTall = false
     /// Réglages : un appui long sur la pochette l'enregistre dans Photos, au lieu du mode épuré (désactivé par défaut).
     @AppStorage("saveCoverOnLongPress") private var saveCoverOnLongPress = false
     /// Haut du titre (sous la pochette), mesuré : la pochette pleine largeur descend jusque-là.
@@ -854,9 +856,11 @@ struct NowPlayingView: View {
         guard geo.size.width >= 1, titleTop > 0 else { return nil }
         let screen = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
         let height = (titleTop + geo.safeAreaInsets.top * 0.3).rounded()
-        // Pochette 4 % moins haute que la place jusqu'au titre : moins coupée sur les côtés, le reflet commence un peu plus haut.
+        // Pochette haute : 4 % moins haute que la place jusqu'au titre (moins coupée sur les côtés, le reflet commence un peu
+        // plus haut). Sinon entière : carrée, sur toute la largeur, son reflet flou descend jusqu'au titre.
+        let zoom = fullBleedTall ? min(max(height * 0.96 / geo.size.width, 1), 1.8) : 1
         return BleedFit(tall: min(max(screen / geo.size.width, 1), 3), inset: geo.safeAreaInsets.top * 0.7 / geo.size.width,
-                        zoom: min(max(height * 0.96 / geo.size.width, 1), 1.8))
+                        zoom: zoom)
     }
 
     /// Lâcher du lecteur tiré vers le bas (voir `PullToClose`) : il se ferme ou revient en place.

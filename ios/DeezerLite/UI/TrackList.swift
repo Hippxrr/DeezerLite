@@ -94,6 +94,10 @@ private struct RowEnvironment: ViewModifier {
             .environment(\.askUnlike, askUnlike)
             // Couleur du thème (barres de téléchargement, boutons) : posée sur l'app, elle n'arrive pas jusqu'ici.
             .tint(Theme.accent)
+            // La liste passe sous les barres (navigation en haut, onglets et mini-lecteur en bas) : une ligne sous une barre
+            // recevait sa marge et son contenu était poussé, écrasé contre les lignes voisines. Les marges de la liste sont
+            // déjà gérées par elle (voir `applyInsets`).
+            .ignoresSafeArea()
     }
 }
 

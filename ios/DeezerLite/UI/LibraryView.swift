@@ -373,6 +373,7 @@ struct SettingsView: View {
     }
     @AppStorage("miniProgress") private var miniProgress = true
     @AppStorage("fullBleedCover") private var fullBleedCover = false
+    @AppStorage("fullBleedTall") private var fullBleedTall = false
     @AppStorage("saveCoverOnLongPress") private var saveCoverOnLongPress = false
     @AppStorage("downloadCheckGreen") private var downloadCheckGreen = false
     @AppStorage(BackgroundDownloadManager.wifiOnlyKey) private var downloadsWifiOnly = false
@@ -576,6 +577,22 @@ struct SettingsView: View {
             }
             .tint(Theme.accent)
             .padding(14)
+            // Choix de forme, seulement avec la pochette pleine largeur : entière (carrée, prolongée par son reflet), ou
+            // haute jusqu'au titre comme Apple Music (agrandie, coupée sur les côtés).
+            if fullBleedCover {
+                divider
+                Toggle(isOn: $fullBleedTall) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "rectangle.portrait").foregroundStyle(Theme.accent).frame(width: 26)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(tr("Pochette haute"))
+                            Text(tr("Jusqu'au titre, comme Apple Music : agrandie et coupée sur les côtés. Désactivée : la pochette entière, prolongée par son reflet")).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                .tint(Theme.accent)
+                .padding(14)
+            }
             divider
             Toggle(isOn: $saveCoverOnLongPress) {
                 HStack(spacing: 12) {

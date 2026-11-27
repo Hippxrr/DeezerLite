@@ -264,6 +264,8 @@ enum Translations {
         "Barre de progression du mini-lecteur": ("Mini player progress bar", "Barra de progreso del minirreproductor"),
         "Fine barre en bas du mini-lecteur": ("Thin bar at the bottom of the mini player", "Barra fina en la parte inferior del minirreproductor"),
         "Pochette pleine largeur": ("Full-width artwork", "Portada a todo el ancho"),
+        "Pochette haute": ("Tall artwork", "Portada alta"),
+        "Jusqu'au titre, comme Apple Music : agrandie et coupée sur les côtés. Désactivée : la pochette entière, prolongée par son reflet": ("Down to the title, like Apple Music: enlarged and cropped at the sides. Off: the whole artwork, extended by its reflection", "Hasta el título, como Apple Music: ampliada y recortada por los lados. Desactivada: la portada entera, prolongada por su reflejo"),
         "Grand lecteur : la pochette en haut, sur toute la largeur, fondue dans le fond": ("Full player: artwork at the top, edge to edge, fading into the background", "Reproductor: la portada arriba, a todo el ancho, fundida con el fondo"),
         "Barre d'onglets complète": ("Full tab bar", "Barra de pestañas completa"),
         "Toute la largeur, la recherche passe à droite quand la barre se réduit. Désactivée : la barre d'iOS": ("Full width, Search moves right when the bar shrinks. Off: the iOS bar", "Ancho completo, Buscar pasa a la derecha cuando la barra se reduce. Desactivada: la barra de iOS"),
