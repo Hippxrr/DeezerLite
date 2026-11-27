@@ -571,6 +571,22 @@ struct TrackRow: View {
                       onOpenAlbum: openAlbum,
                       onOpenArtist: openArtist)
                 .equatable()
+        } preview: {
+            // Aperçu de l'appui long : la ligne sur une carte opaque. Avant, la ligne elle-même, sans fond : en bas de
+            // l'écran, iOS la remonte pour laisser la place au menu, et elle passait par-dessus les lignes voisines (leurs
+            // textes se mêlaient au sien).
+            HStack(spacing: 12) {
+                CoverView(url: rowCover(isCurrent: isCurrent), side: 48, radius: 8)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(number.map { "\($0). \(track.title)" } ?? track.title).font(.body.weight(.medium)).lineLimit(1)
+                    Text(track.unavailable ? unavailableLabel : track.artist).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Text(formatTime(Double(track.durationS))).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
+            }
+            .padding(12)
+            .frame(width: UIScreen.main.bounds.width - 32)
+            .background(Color(uiColor: .secondarySystemBackground))
         }
         .task(id: track.id) { player.observeDownloads(downloadStatus, for: track.id) }
     }
