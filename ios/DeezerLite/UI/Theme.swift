@@ -53,6 +53,8 @@ enum Theme {
     static var background: Color { ThemeStore.shared.backgroundColor }
     /// Texte posé sur la couleur d'accent (noir sur les accents très clairs du mode sombre, comme Graphite ou Ambre).
     static var onAccent: Color { ThemeStore.shared.palette.onAccent }
+    /// Vert de la coche des titres téléchargés (réglage « Coche verte »), celui de l'app Deezer : coche noire dessus.
+    static let downloadGreen = Color(red: 78 / 255, green: 175 / 255, blue: 77 / 255)
     /// Cartes et emplacements vides : un voile blanc sur fond sombre, un voile gris sur fond clair.
     static let card = Color(UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 1, alpha: 0.06) : UIColor(white: 0, alpha: 0.05) })
     static let radius: CGFloat = 12

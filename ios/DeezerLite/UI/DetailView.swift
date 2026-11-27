@@ -114,8 +114,8 @@ struct DetailView: View {
     /// Change à chaque appui sur « Aléatoire » : l'icône joue son animation.
     @State private var shuffleTaps = false
     /// Boutons du haut (épingler, rechercher, trier ; épingler seul sur un artiste) dépliés par « … » : repliés à chaque
-    /// ouverture de la page, ils ne servent pas à chaque visite. Repliés aussi en faisant défiler la liste, en ouvrant la
-    /// recherche ou en changeant le tri. Télécharger et partager sont sous l'en-tête (voir `actions`).
+    /// ouverture de la page, ils ne servent pas à chaque visite. Repliés aussi en faisant défiler la liste au doigt, en
+    /// ouvrant la recherche ou en changeant le tri. Télécharger et partager sont sous l'en-tête (voir `actions`).
     @State private var toolsOpen = false
     @AppStorage private var sortRaw: String
     @AppStorage private var sortReversed: Bool
@@ -313,14 +313,17 @@ struct DetailView: View {
                 // (`scrollPosition`), SwiftUI la réappliquait parfois quand la page se mettait à jour (changement de titre
                 // depuis le mini-lecteur…) et la liste sautait ailleurs.
                 .modifier(TopRowTracker { index in
-                    // Liste qui défile : les boutons dépliés se replient (écrit seulement s'ils l'étaient, pas à chaque ligne).
-                    if toolsOpen, index != memory.top { withAnimation(.snappy) { toolsOpen = false } }
                     memory.top = index
                     // Positions de la liste complète seulement (pas des résultats filtrés, ni loupe ouverte), et pas pendant
                     // la reconstruction (liste recréée par la loupe, pas encore remise à sa place : elle signalerait la ligne
                     // du haut). Avant, en touchant Annuler, iOS vide d'abord le texte puis ferme la loupe un instant après :
                     // entre les deux, la liste complète revenue en haut était enregistrée comme position, et on y retournait.
                     if memory.tracking, !searching, memory.searching == searching, Date().timeIntervalSince(memory.toggledAt) > 0.5 { memory.kept = index }
+                })
+                // Liste reprise au doigt : les boutons dépliés se replient. Pas pendant la lancée d'un défilement d'avant : un
+                // appui sur « … » pendant qu'elle défilait encore les ouvrait, puis ils se repliaient aussitôt.
+                .modifier(ScrollWatch { dragging in
+                    if dragging, toolsOpen { withAnimation(.snappy) { toolsOpen = false } }
                 })
                 .onChange(of: query.isEmpty, initial: true) { _, empty in
                     memory.tracking = empty

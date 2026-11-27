@@ -66,6 +66,10 @@ struct SearchView: View {
     @State private var failed = false
     /// Clavier ouvert sur le champ de recherche.
     @FocusState private var typing: Bool
+    /// Recherche en cours de saisie : titre replié et « Annuler » visible, du premier appui sur le champ jusqu'à « Annuler ».
+    /// Baisser le clavier en glissant ne la ferme pas, comme la recherche d'iOS. Avant, le titre revenait pendant que le doigt
+    /// glissait encore la page : la liste sautait vers le bas puis remontait.
+    @State private var active = false
     /// Change à chaque nouvel appui sur l'onglet Recherche déjà ouvert : ouvre le clavier.
     var focusRequest = 0
 
@@ -80,7 +84,7 @@ struct SearchView: View {
     private var searchField: some View {
         VStack(alignment: .leading, spacing: 10) {
             // Titre de la page : replié pendant la frappe, pour laisser la place aux résultats.
-            if !typing {
+            if !active {
                 PageTitleBar(title: tr("Recherche"))
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
@@ -116,15 +120,16 @@ struct SearchView: View {
             Button(tr("Annuler")) {
                 query = ""
                 typing = false
+                active = false
             }
             .lineLimit(1)
             .fixedSize()
             .padding(.leading, 10)
-            .frame(width: typing ? cancelWidth + 10 : 0, alignment: .leading)
+            .frame(width: active ? cancelWidth + 10 : 0, alignment: .leading)
             .clipped()
-            .opacity(typing ? 1 : 0)
-            .allowsHitTesting(typing)
-            .accessibilityHidden(!typing)
+            .opacity(active ? 1 : 0)
+            .allowsHitTesting(active)
+            .accessibilityHidden(!active)
         }
         }
         .padding(.horizontal, 16)
@@ -139,7 +144,8 @@ struct SearchView: View {
             // Titre replié ou rouvert : la liste suit le même mouvement que le champ. Avant, l'animation était posée sur le
             // champ seul : la place réservée en haut changeait d'un coup, la liste sautait (vers le haut, ou vers le bas en
             // laissant un vide) pendant que le titre et le champ glissaient.
-            .animation(.easeOut(duration: 0.2), value: typing)
+            .animation(.easeOut(duration: 0.2), value: active)
+            .onChange(of: typing) { _, on in if on { active = true } }
             .toolbar(.hidden, for: .navigationBar)
             // Résultats au fil de la frappe : la recherche part 300 ms après la dernière lettre (pas une requête par lettre).
             .onChange(of: query) { _, _ in run(after: .milliseconds(300)) }

@@ -590,7 +590,7 @@ struct SettingsView: View {
             divider
             Toggle(isOn: $downloadCheckGreen) {
                 HStack(spacing: 12) {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(downloadCheckGreen ? Color.green : Theme.accent).frame(width: 26)
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(downloadCheckGreen ? Theme.downloadGreen : Theme.accent).frame(width: 26)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(tr("Coche verte"))
                         Text(tr("Titres téléchargés : coche verte devant le titre, au lieu de la couleur du thème")).font(.caption).foregroundStyle(.secondary)

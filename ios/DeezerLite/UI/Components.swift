@@ -492,7 +492,7 @@ struct TrackRow: View {
                         if isDownloaded, downloadUpdate == nil {
                             Image(systemName: "checkmark.circle.fill").font(.footnote)
                                 .symbolRenderingMode(.palette)
-                                .foregroundStyle(greenCheck ? Color.white : Theme.onAccent, greenCheck ? Color.green : Theme.accent)
+                                .foregroundStyle(greenCheck ? Color.black : Theme.onAccent, greenCheck ? Theme.downloadGreen : Theme.accent)
                                 .accessibilityLabel(tr("Téléchargé"))
                         }
                         Text(number.map { "\($0). \(track.title)" } ?? track.title)
