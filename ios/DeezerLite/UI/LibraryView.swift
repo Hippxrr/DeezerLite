@@ -376,6 +376,7 @@ struct SettingsView: View {
     @AppStorage("fullBleedTall") private var fullBleedTall = false
     @AppStorage("saveCoverOnLongPress") private var saveCoverOnLongPress = false
     @AppStorage("downloadCheckGreen") private var downloadCheckGreen = false
+    @AppStorage("queueHistory") private var queueHistory = true
     @AppStorage(BackgroundDownloadManager.wifiOnlyKey) private var downloadsWifiOnly = false
     /// Titres téléchargés dans une autre qualité que celle des téléchargements (« Mettre à jour »).
     @State private var qualityChanges: [QualityChange] = []
@@ -600,6 +601,18 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(tr("Appui long : enregistrer la pochette"))
                         Text(tr("Grand lecteur : un appui long sur la pochette l'enregistre dans Photos (au lieu du mode épuré)")).font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .tint(Theme.accent)
+            .padding(14)
+            divider
+            Toggle(isOn: $queueHistory) {
+                HStack(spacing: 12) {
+                    Image(systemName: "clock.arrow.circlepath").foregroundStyle(Theme.accent).frame(width: 26)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(tr("Historique dans la file"))
+                        Text(tr("File d'attente du lecteur : les titres déjà écoutés au-dessus d'« À suivre »")).font(.caption).foregroundStyle(.secondary)
                     }
                 }
             }

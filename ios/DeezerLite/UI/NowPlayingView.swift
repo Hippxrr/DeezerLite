@@ -1636,6 +1636,8 @@ private struct QueueRow: Hashable {
 /// appui long = déplacer, vers le haut ou le bas seulement ; glissement à gauche = retirer.
 private struct QueuePanel: View {
     @Environment(Player.self) private var player
+    /// Réglages › Apparence : titres déjà écoutés au-dessus d'« À suivre » (activé par défaut).
+    @AppStorage("queueHistory") private var showHistory = true
 
     /// Lignes déjà calculées, gardées tant que la file ne change pas. Avant, des milliers de textes et un dictionnaire
     /// étaient refaits à chaque mise à jour du lecteur, panneau ouvert. Objet (pas une valeur) : le remplir pendant
@@ -1663,7 +1665,7 @@ private struct QueuePanel: View {
 
     var body: some View {
         // Pochettes réparées suivies ici : leurs lignes sont alors refaites (la liste d'iOS ne les suit pas elle-même).
-        QueueList(player: player, rows: rows, current: player.queueIndex, fixes: player.coverFixes.count)
+        QueueList(player: player, rows: rows, current: player.queueIndex, fixes: player.coverFixes.count, history: showHistory)
     }
 }
 
@@ -1685,12 +1687,15 @@ private struct QueueList: UIViewRepresentable {
     let current: Int
     /// Nombre de pochettes réparées : en changeant, il fait refaire les lignes (voir `Coordinator.update`).
     let fixes: Int
+    /// Réglages › Apparence : titres déjà écoutés affichés au-dessus d'« À suivre ».
+    let history: Bool
 
     func makeCoordinator() -> Coordinator { Coordinator(player: player) }
 
     func makeUIView(context: Context) -> UICollectionView { context.coordinator.makeView() }
 
     func updateUIView(_ view: UICollectionView, context: Context) {
+        context.coordinator.showsHistory = history
         context.coordinator.update(rows: rows, current: current)
     }
 
@@ -1698,6 +1703,8 @@ private struct QueueList: UIViewRepresentable {
     final class Coordinator: NSObject, UICollectionViewDelegate {
         enum Section: Hashable { case history, next }
         private static let empty = "empty"
+        /// Historique affiché (réglage) : sinon la file commence à « À suivre ».
+        var showsHistory = true
 
         private let player: Player
         private weak var view: UICollectionView?
@@ -1803,7 +1810,7 @@ private struct QueueList: UIViewRepresentable {
                 ? nextHeader().map { view.contentOffset.y + view.adjustedContentInset.top - $0.minY } : nil
             self.current = current
             indexOf = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0.index) })
-            let history = rows.prefix(min(current, rows.count)).map(\.id)
+            let history = showsHistory ? rows.prefix(min(current, rows.count)).map(\.id) : []
             let next = rows.dropFirst(min(current + 1, rows.count)).map(\.id)
             let countChanged = next.count != nextCount
             nextCount = next.count

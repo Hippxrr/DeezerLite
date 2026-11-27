@@ -1,0 +1,75 @@
+Deezer Lite 2.6.7 (iPhone): what's new and fixed since 2.6.6
+============================================================
+
+NEW
+---
+
+Full player
+- The full player rises from the bottom of the screen and goes back down with the iPhone's rounded corners; pulled down,
+  it follows the finger, smooth even when moved slowly.
+- Queue like Apple Music: tracks already played ("History") sit above "Up Next" and show when scrolling up; tapping one
+  plays it again. Long press to move a track (vertically), swipe left to remove it.
+- Full-width artwork: new "Tall artwork" setting (Settings > Appearance). On: the artwork goes down to the title, like
+  Apple Music (enlarged, cropped at the sides). Off (default): the whole square artwork, extended by its blurred
+  reflection.
+- With full-width artwork, its background stays (blurred and darkened) when lyrics or the queue are open.
+
+Playlist, album and artist pages
+- Action bar under the header: heart (albums), search in the list, copy link, download (with confirmation and the space
+  it will take), shuffle (small animated icon).
+- Favorite albums and artists: a heart on their page; they show in Library > Albums and Artists.
+- Artist page with a large edge-to-edge photo and the name on it.
+- Genre pages: the "Genre" cards on Home open; "Your favorite genres" is back in recommendations.
+- Albums: each track with its artwork and number, discs split (Disc 1, Disc 2...).
+- Heart on every track in playlists, albums and mixes (removing a liked track asks for confirmation); no hearts in
+  Liked tracks (they all are).
+- Downloaded tracks: a check before the title, in the theme color; new "Green check" setting (Deezer's green, black tick).
+- Top buttons (pin, search, sort) folded behind "...".
+- "Share" copies the link directly.
+- Long press on a track: the preview shows on a card.
+
+Elsewhere
+- Tab bar on iOS 27: Apple Music layout by default; "Search apart" option for the previous one.
+- Library: the MP3 row shows its track count.
+- More Home layouts requested from Deezer (rows that were missing now show).
+
+IMPROVEMENTS
+------------
+
+- Playlist, album, mix, Liked tracks, MP3 and Downloads pages shown in an iOS list: smoother scrolling, even in very
+  large playlists.
+- Lyrics in an iOS list: smoother scrolling, opens right on the current line.
+- Smoother artwork carousels (mini player and full player), the next artwork prepared in advance.
+- The full player opens with its background ready; less work on each track change (less memory and CPU).
+- iOS 27 audio interruptions (calls, voice messages, other apps) handled with iOS's new notifications.
+- Search: an artist's exact name wins over a slightly more followed lookalike.
+- Genius lyrics: only from a properly credited artist (no more lyrics from a namesake).
+- "Clear all" in search history: rows leave one by one.
+- Downloads: a quality update only downloads a different quality (never above FLAC, lowering always possible); failed
+  updates can be retried; updates stay visible after a relaunch; resumed downloads follow the current "Wi-Fi only"
+  setting.
+- Even volume: the end of each track is leveled too.
+
+FIXES
+-----
+
+- The app no longer crashes when scrolling a large playlist.
+- No more overlapping rows at the top and bottom of pages (under the bars).
+- Full player: the artwork no longer drops back when a pull to close is cancelled (small bounce); pulling it closed from
+  outside the artwork no longer brings it back up; a track change by swiping right before closing is no longer lost; no
+  more grey rectangle on the title after its menu.
+- Lyrics: the tapped line lights up right away (before, the line above did for half a second).
+- Full-width artwork: no more pieces of the previous artwork when skipping several tracks in a row (tall artwork).
+- Library Albums and Artists pages that kept loading forever.
+- Favorites: a failure only reverts that card, adds and removes reach Deezer in order, nothing leaks from one profile to
+  another.
+- Several quick "next" taps then another list played: no more wrong track starting.
+- Cancelled "Play next" swipe: the track no longer starts.
+- Track count no longer written twice at the top of Liked tracks and MP3.
+- Search: the title no longer comes back when the keyboard is swiped down.
+- "..." buttons: they stay open when tapped while the list is still scrolling; white dots.
+- The heart no longer vibrates on its own when a favorite album or artist page opens.
+- Theme color in lists (download bars, buttons); the current row keeps its own artwork under the open player; a repaired
+  artwork shows in the open queue.
+- Stats: month arrow hidden when there is no other month.
+- Listens also sent while repeating one track.

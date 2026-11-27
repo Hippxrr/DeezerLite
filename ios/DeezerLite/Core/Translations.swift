@@ -265,6 +265,8 @@ enum Translations {
         "Fine barre en bas du mini-lecteur": ("Thin bar at the bottom of the mini player", "Barra fina en la parte inferior del minirreproductor"),
         "Pochette pleine largeur": ("Full-width artwork", "Portada a todo el ancho"),
         "Pochette haute": ("Tall artwork", "Portada alta"),
+        "Historique dans la file": ("History in the queue", "Historial en la cola"),
+        "File d'attente du lecteur : les titres déjà écoutés au-dessus d'« À suivre »": ("Player queue: tracks already played above \u{201C}Up next\u{201D}", "Cola del reproductor: las canciones ya escuchadas encima de \u{201C}A continuación\u{201D}"),
         "Jusqu'au titre, comme Apple Music : agrandie et coupée sur les côtés. Désactivée : la pochette entière, prolongée par son reflet": ("Down to the title, like Apple Music: enlarged and cropped at the sides. Off: the whole artwork, extended by its reflection", "Hasta el título, como Apple Music: ampliada y recortada por los lados. Desactivada: la portada entera, prolongada por su reflejo"),
         "Grand lecteur : la pochette en haut, sur toute la largeur, fondue dans le fond": ("Full player: artwork at the top, edge to edge, fading into the background", "Reproductor: la portada arriba, a todo el ancho, fundida con el fondo"),
         "Barre d'onglets complète": ("Full tab bar", "Barra de pestañas completa"),
