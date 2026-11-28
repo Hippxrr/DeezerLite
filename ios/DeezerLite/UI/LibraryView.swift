@@ -373,9 +373,10 @@ struct SettingsView: View {
     @AppStorage("miniProgress") private var miniProgress = true
     @AppStorage("fullBleedCover") private var fullBleedCover = false
     @AppStorage(BleedShape.key) private var bleedShape = BleedShape.saved
-    /// Test du flou de la pochette pleine largeur, en % (voir `CoverLoader.blurTest`).
-    @AppStorage("bleedBlurStart") private var bleedBlurStart = 30.0
-    @AppStorage("bleedBlurMax") private var bleedBlurMax = 100.0
+    @AppStorage("autoCrop") private var autoCrop = false
+    /// Flou du fond de la pochette pleine largeur, en % (voir `CoverLoader.blurLevels`).
+    @AppStorage("bleedBlurStart") private var bleedBlurStart = 20.0
+    @AppStorage("bleedBlurMax") private var bleedBlurMax = 90.0
     @AppStorage("saveCoverOnLongPress") private var saveCoverOnLongPress = false
     @AppStorage("downloadCheckGreen") private var downloadCheckGreen = false
     @AppStorage("queueHistory") private var queueHistory = true
@@ -552,8 +553,8 @@ struct SettingsView: View {
         }
         group(tr("Grand lecteur")) {
             toggle("photo", tr("Pochette pleine largeur"), $fullBleedCover)
-            // Hauteur de la pochette pleine largeur : entière (carrée, prolongée par son reflet), moyenne (avec le fond d'entière
-            // ou celui de haute), ou haute jusqu'au titre. Avant, un interrupteur « Pochette haute » : entière ou haute seulement.
+            // Hauteur de la pochette pleine largeur : entière (carrée, prolongée par son reflet) ou haute jusqu'au titre. Avant,
+            // un interrupteur « Pochette haute ».
             if fullBleedCover {
                 divider
                 VStack(alignment: .leading, spacing: 12) {
@@ -567,8 +568,11 @@ struct SettingsView: View {
                     .pickerStyle(.segmented)
                 }
                 .padding(14)
-                // shortcut: curseurs de test, à retirer une fois les bonnes valeurs choisies.
-                if bleedShape == .tall || bleedShape == .mediumBlur {
+                // Flou du fond : au départ (Haute seulement, la seule à l'utiliser) et maximal. Recadrage auto : Haute seulement,
+                // la seule coupée sur les côtés.
+                if bleedShape == .tall {
+                    divider
+                    toggle("viewfinder", tr("Recadrage auto"), $autoCrop)
                     divider
                     percentSlider(tr("Flou au départ"), $bleedBlurStart, range: 0...100)
                 }
@@ -757,7 +761,7 @@ struct SettingsView: View {
         }
     }
 
-    /// Curseur en % (test du flou), par pas de 5.
+    /// Curseur en %, par pas de 5.
     private func percentSlider(_ title: String, _ value: Binding<Double>, range: ClosedRange<Double>) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {

@@ -733,6 +733,10 @@ struct NowPlayingView: View {
     @AppStorage("fullBleedCover") private var fullBleed = false
     /// Réglages › Apparence : hauteur de la pochette pleine largeur (voir `BleedShape`).
     @AppStorage(BleedShape.key) private var bleedShape = BleedShape.saved
+    /// Réglages › Apparence : pochette haute recadrée sur son sujet plutôt qu'au centre (voir `CoverLoader.focus`).
+    @AppStorage("autoCrop") private var autoCrop = false
+    /// Sujet de la pochette en cours trouvé : le fond est refait avec le bon cadrage (il l'est d'avance pour les voisines).
+    @State private var focusFound = 0
     /// Réglages : un appui long sur la pochette l'enregistre dans Photos, au lieu du mode épuré (désactivé par défaut).
     @AppStorage("saveCoverOnLongPress") private var saveCoverOnLongPress = false
     /// Haut du titre (sous la pochette), mesuré : la pochette pleine largeur descend jusque-là.
@@ -812,7 +816,7 @@ struct NowPlayingView: View {
     private func bleedCover(_ geo: GeometryProxy) -> some View {
         VStack(spacing: 0) {
             CoverCarousel(side: geo.size.width * (bleedFit(geo)?.zoom ?? 1), width: geo.size.width, pull: pull, bleed: true,
-                          onPullEnd: pullEnded) { coverLongPress() }
+                          crop: cropping, onPullEnd: pullEnded) { coverLongPress() }
                 .mask { Self.bleedMask }
             Spacer(minLength: 0)
         }
@@ -841,11 +845,23 @@ struct NowPlayingView: View {
         // Mesures pas encore connues (première mise en page) : rien. Hauteur bornée à 3 fois la largeur : une mesure à 0
         // donnait une image de centaines de milliers de pixels de haut (des centaines de Mo, l'app fermée par iOS).
         if fullBleed, let fit = bleedFit(geo) {
-            Backdrop(url: player.cover(player.current), open: player.showFullPlayer, tall: fit.tall, inset: fit.inset, zoom: fit.zoom,
-                     classic: bleedShape == .whole || bleedShape == .medium, blurred: !shown)
+            let url = player.cover(player.current)
+            let _ = focusFound // relu une fois le sujet trouvé
+            Backdrop(url: url, open: player.showFullPlayer, tall: fit.tall, inset: fit.inset, zoom: fit.zoom,
+                     classic: bleedShape == .whole,
+                     center: cropping ? CoverLoader.cropCenter(focus: url.flatMap { CoverLoader.shared.cachedFocus(url: $0) }, zoom: fit.zoom) : 0.5,
+                     blurred: !shown)
                 .animation(.easeInOut(duration: 0.3), value: shown)
+                // Sujet pas encore connu (titre lancé sans passer par le carrousel) : cherché ici, puis le fond est refait.
+                .task(id: "\(url ?? "")|\(cropping)") {
+                    guard cropping, let url, CoverLoader.shared.cachedFocus(url: url) == nil else { return }
+                    if await CoverLoader.shared.focus(url: url) != nil, !Task.isCancelled { focusFound += 1 }
+                }
         }
     }
+
+    /// Recadrage auto : seulement pour la pochette haute, la seule coupée sur les côtés.
+    private var cropping: Bool { autoCrop && bleedShape == .tall }
 
     /// Mesures du fond pleine largeur (voir `Backdrop`) ; largeur ou titre pas encore mesurés : aucune. La pochette, posée
     /// sous l'heure, descend jusqu'au titre (comme Apple Music), son reflet commence là. Arrondie au point : une mesure qui
@@ -857,14 +873,8 @@ struct NowPlayingView: View {
         let screen = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
         let height = (titleTop + geo.safeAreaInsets.top * 0.3).rounded()
         // Haute : 4 % moins haute que la place jusqu'au titre (moins coupée sur les côtés, le reflet commence un peu plus haut).
-        // Moyenne (et moyenne floue) : à mi-chemin entre carrée et haute, sur tout écran (bien moins coupée, son reflet flou
-        // descend jusqu'au titre). Entière : carrée, sur toute la largeur, son reflet flou descend jusqu'au titre.
-        let tallZoom = min(max(height * 0.96 / geo.size.width, 1), 1.8)
-        let zoom = switch bleedShape {
-        case .whole: CGFloat(1)
-        case .medium, .mediumBlur: (1 + tallZoom) / 2
-        case .tall: tallZoom
-        }
+        // Entière : carrée, sur toute la largeur, son reflet flou descend jusqu'au titre.
+        let zoom = bleedShape == .tall ? min(max(height * 0.96 / geo.size.width, 1), 1.8) : 1
         return BleedFit(tall: min(max(screen / geo.size.width, 1), 3), inset: geo.safeAreaInsets.top * 0.7 / geo.size.width,
                         zoom: zoom)
     }
@@ -1103,16 +1113,45 @@ extension Track {
     }
 }
 
-/// Hauteur de la pochette pleine largeur. Avant, un interrupteur « Pochette haute » : entière ou haute seulement.
+/// Pochette pleine largeur décalée sur son sujet (recadrage auto ; voir `CoverLoader.cropCenter`). Sujet déjà trouvé :
+/// placée tout de suite ; sinon centrée, puis glissée en place une fois trouvé (ce qui arrive surtout au premier titre :
+/// les voisines du carrousel le cherchent d'avance).
+private struct FocusShift: ViewModifier {
+    let url: String?
+    let zoom: CGFloat
+    let side: CGFloat
+    let enabled: Bool
+    @State private var focus: CGRect?
+    @State private var focusURL: String?
+
+    init(url: String?, zoom: CGFloat, side: CGFloat, enabled: Bool) {
+        self.url = url
+        self.zoom = zoom
+        self.side = side
+        self.enabled = enabled
+        _focus = State(initialValue: url.flatMap { CoverLoader.shared.cachedFocus(url: $0) })
+        _focusURL = State(initialValue: url)
+    }
+
+    func body(content: Content) -> some View {
+        let shown = enabled && focusURL == url ? focus : nil
+        content
+            .offset(x: (0.5 - CoverLoader.cropCenter(focus: shown, zoom: zoom)) * side)
+            .task(id: "\(url ?? "")|\(enabled)") {
+                guard enabled, let url else { return }
+                if focusURL != url { focus = CoverLoader.shared.cachedFocus(url: url); focusURL = url }
+                guard focus == nil, let found = await CoverLoader.shared.focus(url: url), !Task.isCancelled else { return }
+                withAnimation(.easeInOut(duration: 0.35)) { focus = found }
+            }
+    }
+}
+
+/// Hauteur de la pochette pleine largeur. Avant, un interrupteur « Pochette haute ». Les hauteurs moyennes, essayées,
+/// ont été retirées : un choix enregistré resté sur l'une d'elles reprend la valeur de départ ci-dessous.
 enum BleedShape: String, CaseIterable {
     /// Carrée : rien de coupé.
     case whole
-    /// Un peu agrandie : coupée sur les côtés, bien moins que haute. Fond d'Entière : son reflet presque net au départ.
-    case medium
-    /// Comme moyenne, avec le fond de Haute : le bas de la pochette se fond dans un flou d'elle-même. Les deux sont
-    /// proposées pour comparer.
-    case mediumBlur
-    /// Jusqu'au titre.
+    /// Jusqu'au titre, coupée sur les côtés.
     case tall
 
     static let key = "fullBleedShape"
@@ -1123,8 +1162,6 @@ enum BleedShape: String, CaseIterable {
     var title: String {
         switch self {
         case .whole: tr("Entière")
-        case .medium: tr("Moyenne")
-        case .mediumBlur: tr("Moy. floue")
         case .tall: tr("Haute")
         }
     }
@@ -1152,8 +1189,10 @@ private struct Backdrop: View {
     var blurred = false
     /// Hauteur de la pochette pleine largeur / largeur de l'écran (plus haute que large : coupée sur les côtés).
     var zoom: CGFloat = 1
-    /// Pochette entière ou moyenne : le flou d'avant, net sous la pochette (voir `CoverLoader.bleedBackdrop`).
+    /// Pochette entière (pas haute) : le flou d'avant, net sous la pochette (voir `CoverLoader.bleedBackdrop`).
     var classic = false
+    /// Recadrage auto : centre de la partie montrée de la pochette (0,5 : centrée).
+    var center: CGFloat = 0.5
     @Environment(\.scenePhase) private var phase
     /// Fond précédent (dessous) et nouveau (dessus, qui apparaît en fondu) : d'une pochette à l'autre, jamais de
     /// passage par le noir, et un fondu long pour adoucir un passage clair → sombre.
@@ -1166,17 +1205,18 @@ private struct Backdrop: View {
     @State private var fadeStart = Date.distantPast
 
     init(url: String?, open: Bool, tall: CGFloat? = nil, inset: CGFloat = 0, zoom: CGFloat = 1, classic: Bool = false,
-         blurred: Bool = false) {
+         center: CGFloat = 0.5, blurred: Bool = false) {
         self.url = url
         self.open = open
         self.tall = tall
         self.inset = inset
         self.zoom = zoom
         self.classic = classic
+        self.center = center
         self.blurred = blurred
         // Fond déjà prêt : affiché dès la première image (le lecteur présenté par iOS est construit à l'ouverture).
         _top = State(initialValue: url.flatMap { CoverLoader.shared.cachedBackdrop(url: $0, saturation: tall == nil ? 1.15 : 1, tall: tall, inset: inset, zoom: zoom,
-                                                                                   classic: classic) })
+                                                                                   classic: classic, center: center) })
     }
 
     var body: some View {
@@ -1204,13 +1244,14 @@ private struct Backdrop: View {
         }
         .ignoresSafeArea()
         // Avec les mesures : un fond fait avec d'autres mesures (rotation, première mise en page) est refait.
-        .task(id: "\(url ?? "")|\(phase == .background)|\(open)|\(tall ?? 0)|\(inset)|\(zoom)|\(classic)") {
+        .task(id: "\(url ?? "")|\(phase == .background)|\(open)|\(tall ?? 0)|\(inset)|\(zoom)|\(classic)|\(center)") {
             guard phase != .background else { return }
             // Titre sans pochette (image de secours) : fondu vers le noir.
             guard let url else { fadeToBlack(); return }
             func make() async -> UIImage? {
                 if let tall {
-                    return await CoverLoader.shared.bleedBackdrop(url: url, download: open, tall: tall, inset: inset, zoom: zoom, classic: classic)
+                    return await CoverLoader.shared.bleedBackdrop(url: url, download: open, tall: tall, inset: inset, zoom: zoom, classic: classic,
+                                                                  center: center)
                 }
                 return await CoverLoader.shared.backdrop(url: url, download: open, saturation: 1.15)
             }
@@ -1297,6 +1338,8 @@ private struct CoverCarousel: View {
     /// Pochette pleine largeur : sans coins arrondis ni ombre, et pas réduite en pause. `side` est alors sa hauteur (jusqu'au
     /// titre, comme Apple Music) : plus haute que large, elle est coupée aux bords de l'écran.
     var bleed = false
+    /// Recadrage auto (pochette haute) : chaque pochette décalée sur son sujet (voir `FocusShift`).
+    var crop = false
     let onPullEnd: (DragGesture.Value) -> Void
     /// Appui long : mode épuré du lecteur.
     let onLongPress: () -> Void
@@ -1337,7 +1380,8 @@ private struct CoverCarousel: View {
                             .overlay { ProgressView().controlSize(.large).tint(.white) }
                     } else {
                         // Lecteur fermé : pas de téléchargement de la grande pochette à chaque titre.
-                        page(CoverView(url: player.cover(slot.track), side: side, radius: radius, load: open, large: bleed))
+                        page(CoverView(url: player.cover(slot.track), side: side, radius: radius, load: open, large: bleed),
+                             url: player.cover(slot.track))
                     }
                 }
                 // Ombre et taille réglées par des valeurs (pas des modificateurs ajoutés ou retirés) : devenir la pochette du
@@ -1391,9 +1435,10 @@ private struct CoverCarousel: View {
 
     /// Pleine largeur : pochette agrandie (plus haute que l'écran n'est large), coupée aux bords de l'écran.
     @ViewBuilder
-    private func page(_ cover: CoverView) -> some View {
+    private func page(_ cover: CoverView, url: String?) -> some View {
         if bleed {
-            cover.frame(width: width, height: side).clipped()
+            cover.modifier(FocusShift(url: url, zoom: side / max(width, 1), side: side, enabled: crop))
+                .frame(width: width, height: side).clipped()
         } else {
             cover
         }

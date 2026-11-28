@@ -2,6 +2,7 @@ import CoreImage
 import CoreImage.CIFilterBuiltins
 import ImageIO
 import UIKit
+import Vision
 
 /// Pochettes : demandées à Deezer directement à la bonne taille, décodées à cette taille (ImageIO),
 /// gardées dans un cache borné vidé au passage en arrière-plan. Jamais d'image 1000 x 1000 décodée pour une miniature.
@@ -65,6 +66,7 @@ final class CoverLoader: @unchecked Sendable {
         cache.removeAllObjects()
         colors.removeAllObjects()
         backdrops.removeAllObjects()
+        focuses.removeAllObjects()
         session.configuration.urlCache?.removeAllCachedResponses()
     }
 
@@ -128,6 +130,56 @@ final class CoverLoader: @unchecked Sendable {
         return image
     }
 
+    /// Recadrage auto (réglage) : partie de la pochette qui attire l'œil, de gauche à droite, en fractions de sa largeur
+    /// (`minX`…`maxX` ; pas de sujet trouvé : toute la largeur). Gardée par adresse : analysée une seule fois.
+    private let focuses = NSCache<NSString, NSValue>()
+    /// Analyses en cours, sous `lock` : la pochette nette et son fond, qui la demandent ensemble, n'en font qu'une.
+    private var focusing: [String: Task<CGRect, Never>] = [:]
+
+    func cachedFocus(url: String) -> CGRect? { focuses.object(forKey: url as NSString)?.cgRectValue }
+
+    /// Sujet de la pochette, trouvé par iOS sur l'appareil (Vision, saillance « attention » : visages, personnes, objet
+    /// principal), sur l'image de 500 px du fond, recadrée en carré comme la pochette affichée. Hors du thread principal.
+    func focus(url: String) async -> CGRect? {
+        if let hit = cachedFocus(url: url) { return hit }
+        let inMemory = anyCached(url: url).flatMap { ($0.cgImage?.width ?? 0) >= 400 ? $0 : nil }
+        let picture: UIImage?
+        if let inMemory { picture = inMemory } else { picture = await image(url: url, pixels: 500) }
+        guard let full = picture?.cgImage else { return nil }
+        let task: Task<CGRect, Never> = lock.withLock {
+            if let existing = focusing[url] { return existing }
+            let task = Task.detached(priority: .userInitiated) { [focuses] () -> CGRect in
+                let edge = min(full.width, full.height)
+                let square = full.cropping(to: CGRect(x: (full.width - edge) / 2, y: (full.height - edge) / 2, width: edge, height: edge)) ?? full
+                let request = VNGenerateAttentionBasedSaliencyImageRequest()
+                try? VNImageRequestHandler(cgImage: square, options: [:]).perform([request])
+                let box = (request.results?.first?.salientObjects ?? []).reduce(CGRect.null) { $0.union($1.boundingBox) }
+                let found = box.isNull || box.width <= 0 ? CGRect(x: 0, y: 0, width: 1, height: 1) : box
+                focuses.setObject(NSValue(cgRect: found), forKey: url as NSString)
+                return found
+            }
+            focusing[url] = task
+            return task
+        }
+        let box = await task.value
+        lock.withLock { if focusing[url] == task { focusing[url] = nil } }
+        return box
+    }
+
+    /// Centre de la partie montrée d'une pochette agrandie `zoom` fois (coupée sur les côtés), en fraction de sa largeur.
+    /// Centrée, sauf si le sujet en sortirait : alors décalée juste assez pour qu'il entre (ou centrée sur lui s'il est
+    /// plus large que la partie montrée), sans jamais montrer au-delà du bord de l'image. Arrondi au centième : une mesure
+    /// qui varie d'un rien ne refait pas le fond.
+    static func cropCenter(focus: CGRect?, zoom: CGFloat) -> CGFloat {
+        guard let focus, zoom > 1 else { return 0.5 }
+        let half = 0.5 / zoom
+        var center: CGFloat = 0.5
+        if focus.width > 2 * half { center = focus.midX }
+        else if focus.minX < center - half { center = focus.minX + half }
+        else if focus.maxX > center + half { center = focus.maxX - half }
+        return (min(max(center, half), 1 - half) * 100).rounded() / 100
+    }
+
     private let colors = NSCache<NSString, UIColor>()
 
     /// Couleur dominante de la pochette, assombrie pour servir de fond. Calculée une fois par pochette
@@ -167,9 +219,9 @@ final class CoverLoader: @unchecked Sendable {
     /// Fond déjà fait (voir `backdrop` et `bleedBackdrop`), lu tout de suite : le lecteur s'ouvre avec son fond, sans
     /// passer par le noir le temps d'aller le chercher.
     func cachedBackdrop(url: String, saturation: CGFloat = 1, tall: CGFloat? = nil, inset: CGFloat = 0, zoom: CGFloat = 1,
-                        classic: Bool = false) -> UIImage? {
-        let test = Self.blurTest
-        let key = tall.map { "\($0)|\(inset)|\(zoom)|\(classic)|\(test.start)|\(test.max)|\(url)" }
+                        classic: Bool = false, center: CGFloat = 0.5) -> UIImage? {
+        let test = Self.blurLevels
+        let key = tall.map { "\($0)|\(inset)|\(zoom)|\(classic)|\(center)|\(test.start)|\(test.max)|\(url)" }
             ?? (saturation == 1 ? url : "\(saturation)|\(url)")
         return backdrops.object(forKey: key as NSString)
     }
@@ -210,20 +262,21 @@ final class CoverLoader: @unchecked Sendable {
     /// sur une seule couleur. Fait une fois par
     /// titre, hors du thread principal. `tall` : hauteur de l'écran / largeur ; `inset` : hauteur de la barre d'état / largeur ;
     /// `zoom` : hauteur de la pochette / largeur (plus haute que large, elle est centrée et coupée sur les côtés).
-    /// `classic` : pochette entière ou moyenne (pas haute ni moyenne floue) : le flou d'avant, net sous la pochette.
-    /// Réglages › Test du flou (pochette pleine largeur), de 0 à 1 : flou au départ, sous la pochette (Haute et Moy. floue ;
-    /// 0,3 avant) et flou maximal (part du rayon de 110). Lus à chaque fond fait ; ils font partie de sa clé, donc un fond
-    /// déjà fait avec d'autres valeurs n'est pas repris.
-    /// shortcut: réglage de test, à retirer une fois les bonnes valeurs choisies (elles remplaceront 0,3 et 110).
-    static var blurTest: (start: CGFloat, max: CGFloat) {
+    /// `classic` : pochette entière (pas haute) : le flou d'avant, net sous la pochette.
+    /// `center` : centre de la partie montrée, en fraction de la largeur de la pochette (recadrage auto ; 0,5 : centrée).
+    /// Réglages › Grand lecteur, de 0 à 1 : flou au départ, sous la pochette (Haute seulement) et flou maximal (part du
+    /// rayon de 110). Par défaut 20 % et 90 %, choisis à l'essai (avant : 30 % et 100 %). Lus une fois par fond fait, rien
+    /// à chaque image ; ils font partie de sa clé, donc un fond fait avec d'autres valeurs n'est pas repris.
+    static var blurLevels: (start: CGFloat, max: CGFloat) {
         let d = UserDefaults.standard
-        return (CGFloat(d.object(forKey: "bleedBlurStart") as? Double ?? 30) / 100,
-                CGFloat(d.object(forKey: "bleedBlurMax") as? Double ?? 100) / 100)
+        return (CGFloat(d.object(forKey: "bleedBlurStart") as? Double ?? 20) / 100,
+                CGFloat(d.object(forKey: "bleedBlurMax") as? Double ?? 90) / 100)
     }
 
-    func bleedBackdrop(url: String, download: Bool, tall: CGFloat, inset: CGFloat, zoom: CGFloat = 1, classic: Bool = false) async -> UIImage? {
-        let test = Self.blurTest
-        let key = "\(tall)|\(inset)|\(zoom)|\(classic)|\(test.start)|\(test.max)|\(url)" as NSString
+    func bleedBackdrop(url: String, download: Bool, tall: CGFloat, inset: CGFloat, zoom: CGFloat = 1, classic: Bool = false,
+                       center: CGFloat = 0.5) async -> UIImage? {
+        let test = Self.blurLevels
+        let key = "\(tall)|\(inset)|\(zoom)|\(classic)|\(center)|\(test.start)|\(test.max)|\(url)" as NSString
         if let hit = backdrops.object(forKey: key) { return hit }
         let inMemory = anyCached(url: url).flatMap { ($0.cgImage?.width ?? 0) >= 400 ? $0 : nil }
         let picture: UIImage?
@@ -242,7 +295,7 @@ final class CoverLoader: @unchecked Sendable {
             // collé au bord net de la pochette, y faisait un trait sombre.
             let input = CIImage(cgImage: source).clampedToExtent().transformed(by: CGAffineTransform(scaleX: scale, y: scale))
                 .cropped(to: CGRect(x: 0, y: 0, width: CGFloat(source.width) * scale, height: side))
-                .transformed(by: CGAffineTransform(translationX: -(width * zoom - width) / 2, y: 0))
+                .transformed(by: CGAffineTransform(translationX: -(width * zoom * center - width / 2), y: 0))
             let canvas = CGRect(x: 0, y: 0, width: width, height: (width * tall).rounded())
             // Repère de Core Image : origine en bas. La pochette est posée sous la barre d'état.
             let gap = (width * inset).rounded()
@@ -272,7 +325,7 @@ final class CoverLoader: @unchecked Sendable {
             // pochette (cachée ou en train de s'effacer), à peine au bas de celle-ci ; puis sous elle, il part de presque rien
             // et monte doucement sur les trois quarts de la hauteur restante (avant : la moitié, plus vite au départ, le flou
             // arrivait « d'un coup »).
-            let blurred = test.start // sous le bas fondu de la pochette, et au départ de son reflet (0,3 avant le test)
+            let blurred = test.start // sous le bas fondu de la pochette, et au départ de son reflet
             let base: CGFloat = 0.15 // 13 % avant : les traînées des hauts très chargés (fourrure, capuche) se voyaient un peu plus
             func eased(_ t: CGFloat) -> CGFloat { let t = min(max(t, 0), 1); return t * t * (3 - 2 * t) }
             func amount(_ row: CGFloat) -> CGFloat { // `row` : depuis le haut de l'écran
