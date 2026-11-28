@@ -58,8 +58,11 @@ networking, the play queue and audio.
 - **Gapless playback** between tracks, plus an adjustable **crossfade** from 0 to 10 s.
 - **5-band equalizer** (60 Hz, 230 Hz, 910 Hz, 3.6 kHz, 14 kHz) with about fifteen presets and a custom mode. When
   flat, the signal is left strictly untouched.
-- **Full player**: synced lyrics (Genius as an optional plain-text fallback, online only), editable queue, track
-  credits, sharing, blurred background taken from the cover.
+- **Full player**: rises from the bottom of the screen and follows the finger when pulled down to close. Synced lyrics
+  (Genius as an optional plain-text fallback, online only), track credits, sharing, blurred background taken from the
+  cover.
+- **Queue like Apple Music**: tracks already played ("History") sit above "Up Next" and show when scrolling up (can be
+  hidden: "History in the queue" setting). Tap a track to play it, long press to move it, swipe left to remove it.
 - **Mini player**: swipe sideways to change track (the carousel follows the finger's speed and lands smoothly), tap
   to open the full player; its progress bar can be hidden.
 - **Lock screen and Control Center**: title, artwork, position and controls.
@@ -69,7 +72,11 @@ networking, the play queue and audio.
   them back within 30 minutes resumes.
 - **Resume on launch**: the last session comes back at the same position (can be turned off).
 - **Sleep timer**: 15, 30, 45 or 60 minutes, or the end of the current track, with a gentle fade out.
-- **Full-width artwork** option for the full player; a long press on the artwork can save it to Photos.
+- **Full-width artwork** option for the full player, in two heights: **Whole** (the square artwork, extended by its
+  blurred reflection) or **Tall** (down to the title, cropped at the sides). The background blur is adjustable, and an
+  optional **auto crop** keeps the subject of a tall artwork in frame (found by iOS on the device, nothing is sent).
+  Its background stays, blurred and darkened, when lyrics or the queue are open.
+- **Long press on the artwork**: clean view (only the artwork, title, artist and progress bar), or saving it to Photos.
 - **Lyrics as an image**: pick up to 6 lines and share them as a card (Messages, Instagram, Photos…).
 
 ### 📥 Offline
@@ -85,19 +92,29 @@ networking, the play queue and audio.
   network.
 - **Offline listens**: listens made without a network are kept and reported to Deezer later, with their real time.
 - **Downloads page**: downloads in progress first, then failures, in the order they were requested.
+- **Downloaded tracks** are marked with a check before their title, in the theme color or in Deezer's green ("Green
+  check" setting).
+- **Download quality updates**: tracks downloaded in another quality can be updated (a different quality only, never
+  above FLAC), and a failed update can be retried.
 
 ### Browsing
 
 - 🏠 **Home**: Flow, liked tracks, pinned playlists, albums and artists, then Deezer's recommendations grouped by
   category (recently played, new releases, mixes, "Mixes inspired by"…), each one can be toggled and reordered.
+  Genre cards open their own page.
 - 🔍 **Search**: results as you type, a featured artist with their latest release, tracks, albums, playlists and
   artists; search history. Tolerant matching: accents, punctuation and small typos are ignored, and the most followed
   artist wins among close names ("booskap" finds Booska-P).
-- 📚 **Library**: playlists, albums, artists and stats.
+- 📚 **Library**: playlists, favorite albums and artists, your MP3s, downloads and stats.
+- 📄 **Playlist, album and mix pages**: an action bar under the header (heart for albums, search in the list, copy
+  link, download with the space it will take, shuffle); pin, search and sort folded behind "…". A heart on every
+  track (removing a liked track asks first); albums show track numbers and split their discs (Disc 1, Disc 2…). A long
+  press on a track opens its menu with a preview card.
 - 🎶 **Your playlists**: create one from the Library, add any track from its long press ("Add to a playlist", with
   "New playlist" right there), delete your own playlists after confirmation.
-- 🎤 **Artist pages**: popular tracks, latest release, the artist's own discography, a separate "Appears on" row for
-  albums where they are featured (other artists' compilations are left out), similar artists.
+- 🎤 **Artist pages**: a large edge-to-edge photo with the name on it, a heart to follow, popular tracks, latest
+  release, the artist's own discography, a separate "Appears on" row for albums where they are featured (other
+  artists' compilations are left out), similar artists.
 - ⏳ **Unreleased tracks**: shown greyed out with their release date, playable once they are out.
 - 📊 **Official stats**: Deezer's monthly recap (listening time, tracks, artists, genres) as a shareable image, and
   the latest listens from Deezer's history.
@@ -110,8 +127,11 @@ networking, the play queue and audio.
 - 🌍 **Language**: French, English, Spanish, switched without restarting the app.
 - 🎨 **Appearance**: dark, light or system mode; color themes; black, OLED black, slate blue or plum background;
   four app icons.
-- **Tab bar** (iOS 26.1 and later): the iOS bar, with the mini player inside it; it shrinks while scrolling. On iOS 27,
-  search sits with Home and Library like Apple Music, or apart on the right ("Search apart" setting).
+- **Tab bar** (iOS 26.1 and later): the iOS bar, with the mini player inside it; it shrinks while scrolling when
+  something is playing. Tab names can be hidden. On iOS 27, search sits with Home and Library like Apple Music, or
+  apart on the right ("Search apart" setting).
+- **Settings** grouped by where they act (theme and icon, tab bar, full player, mini player, downloads), with short
+  labels and no long explanations.
 - **Custom playlist covers**, cropped inside the app.
 - **Renamable liked tracks** (on the phone only).
 - **Page headers**: each main page shows its name with your profile picture, which opens the settings.
@@ -124,6 +144,8 @@ networking, the play queue and audio.
 - **Cover repair**: when Deezer keeps the address of a deleted image, the album's current cover is found and
   remembered.
 - **Local copy** of home and library: shown instantly at launch, then refreshed.
+- **Native iOS lists** for track pages, downloads, lyrics and the queue: smooth scrolling even in playlists of
+  thousands of tracks.
 
 ---
 
