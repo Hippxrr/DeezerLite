@@ -316,7 +316,7 @@ final class CoverLoader: @unchecked Sendable {
             let blur = CIFilter.maskedVariableBlur()
             blur.inputImage = extendedCover
             blur.mask = mask
-            blur.radius = 110 * test.max
+            blur.radius = Float(110 * test.max)
             // Puis une seule couleur : la moyenne du bas de la pochette.
             let average = CIFilter.areaAverage()
             average.inputImage = placed
