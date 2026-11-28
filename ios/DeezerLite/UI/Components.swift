@@ -337,13 +337,12 @@ struct FallbackArt: View {
 /// `playing` : faux aussi sous le grand lecteur (opaque) : l'animation ne tourne pas pour rien.
 struct PlayingBars: View {
     let playing: Bool
-    @Environment(\.pageVisible) private var visible
 
     var body: some View {
         Image(systemName: "waveform")
             .font(.system(size: 15, weight: .bold))
             .foregroundStyle(Theme.accent)
-            .symbolEffect(.variableColor.iterative, options: .repeating, isActive: playing && visible)
+            .symbolEffect(.variableColor.iterative, options: .repeating, isActive: playing)
     }
 }
 
@@ -1017,11 +1016,10 @@ struct FlowArt: View {
 }
 
 /// Flow en cours : petit nuage blanc posé sur sa pochette (accueil). Animé pendant la lecture, en points en pause. Il ne bouge
-/// que si l'accueil est vraiment à l'écran : onglet ouvert, page du dessus, grand lecteur fermé, app au premier plan. Sinon
+/// que si l'accueil est vraiment à l'écran : page du dessus, grand lecteur fermé, app au premier plan. Sinon
 /// l'horloge de l'animation est arrêtée (rien n'est recalculé).
 struct FlowPulse: View {
     @Environment(Player.self) private var player
-    @Environment(\.pageVisible) private var pageVisible
     @Environment(\.scenePhase) private var phase
     @State private var onScreen = false
     var side: CGFloat = 64
@@ -1036,7 +1034,7 @@ struct FlowPulse: View {
 
     var body: some View {
         if player.isFlow {
-            let moving = player.status.playing && onScreen && pageVisible && phase == .active && !player.showFullPlayer
+            let moving = player.status.playing && onScreen && phase == .active && !player.showFullPlayer
             // Cadence de l'écran (60 ou 120 images/s). Avant, 30 : sur un écran 120 Hz, chaque pas durait 4 images (saccades).
             TimelineView(.animation(minimumInterval: nil, paused: !moving)) { context in
                 let t = context.date.timeIntervalSinceReferenceDate

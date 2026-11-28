@@ -82,7 +82,6 @@ private final class PageCollectionView: UICollectionView {
 private struct RowEnvironment: ViewModifier {
     let player: Player
     let openRoute: (Route) -> Void
-    let pageVisible: Bool
     let glassReacts: Bool
     let phase: ScenePhase
     let askUnlike: (Track) -> Void
@@ -91,7 +90,6 @@ private struct RowEnvironment: ViewModifier {
         content
             .environment(player)
             .environment(\.openRoute, openRoute)
-            .environment(\.pageVisible, pageVisible)
             .environment(\.glassReactsToTouch, glassReacts)
             .environment(\.scenePhase, phase)
             .environment(\.askUnlike, askUnlike)
@@ -142,7 +140,6 @@ private final class HostingCell: UICollectionViewCell {
 private struct TrackCollection: UIViewRepresentable {
     @Environment(Player.self) private var player
     @Environment(\.openRoute) private var openRoute
-    @Environment(\.pageVisible) private var pageVisible
     @Environment(\.glassReactsToTouch) private var glassReacts
     @Environment(\.scenePhase) private var phase
     /// Réglages de la page, lus à chaque mise à jour (un `TrackList` de n'importe quel en-tête).
@@ -185,7 +182,7 @@ private struct TrackCollection: UIViewRepresentable {
 
     /// Lu pendant la mise à jour de la vue seulement (plus tard, l'environnement n'est plus valable) : gardé par la liste.
     var environment: RowEnvironment {
-        RowEnvironment(player: player, openRoute: openRoute, pageVisible: pageVisible, glassReacts: glassReacts, phase: phase,
+        RowEnvironment(player: player, openRoute: openRoute, glassReacts: glassReacts, phase: phase,
                        askUnlike: askUnlike)
     }
 
@@ -275,7 +272,7 @@ private struct TrackCollection: UIViewRepresentable {
             self.page = page
             env = page.environment
             applyInsets(page.insets)
-            let envNow = "\(env.pageVisible)|\(env.glassReacts)|\(env.phase)|\(page.likeButton)|\(page.hideLiked)"
+            let envNow = "\(env.glassReacts)|\(env.phase)|\(page.likeButton)|\(page.hideLiked)"
             if key != page.key || !Self.same(page.tracks, tracks) || !Self.same(page.list, list) {
                 envKey = envNow
                 shownHeader = page.headerKey

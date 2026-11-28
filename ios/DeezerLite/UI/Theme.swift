@@ -296,8 +296,6 @@ extension View {
 extension EnvironmentValues {
     /// `false` : le verre des surfaces ne réagit plus au doigt (pages cachées sous le grand lecteur).
     @Entry var glassReactsToTouch = true
-    /// `false` : page d'un onglet caché (laissée en place sous l'onglet affiché). Ses animations s'arrêtent.
-    @Entry var pageVisible = true
 }
 
 #if compiler(>=6.2)
