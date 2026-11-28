@@ -263,6 +263,8 @@ enum Translations {
         "Entière": ("Whole", "Entera"),
         "Moyenne": ("Medium", "Media"),
         "Moy. floue": ("Med. blur", "Media difusa"),
+        "Flou au départ": ("Starting blur", "Desenfoque inicial"),
+        "Flou maximal": ("Maximum blur", "Desenfoque máximo"),
         "Haute": ("Tall", "Alta"),
         "Thème et icône": ("Theme and icon", "Tema e icono"),
         "Barre d'onglets": ("Tab bar", "Barra de pestañas"),

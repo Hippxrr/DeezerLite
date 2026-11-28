@@ -373,6 +373,9 @@ struct SettingsView: View {
     @AppStorage("miniProgress") private var miniProgress = true
     @AppStorage("fullBleedCover") private var fullBleedCover = false
     @AppStorage(BleedShape.key) private var bleedShape = BleedShape.saved
+    /// Test du flou de la pochette pleine largeur, en % (voir `CoverLoader.blurTest`).
+    @AppStorage("bleedBlurStart") private var bleedBlurStart = 30.0
+    @AppStorage("bleedBlurMax") private var bleedBlurMax = 100.0
     @AppStorage("saveCoverOnLongPress") private var saveCoverOnLongPress = false
     @AppStorage("downloadCheckGreen") private var downloadCheckGreen = false
     @AppStorage("queueHistory") private var queueHistory = true
@@ -564,6 +567,13 @@ struct SettingsView: View {
                     .pickerStyle(.segmented)
                 }
                 .padding(14)
+                // shortcut: curseurs de test, à retirer une fois les bonnes valeurs choisies.
+                if bleedShape == .tall || bleedShape == .mediumBlur {
+                    divider
+                    percentSlider(tr("Flou au départ"), $bleedBlurStart, range: 0...100)
+                }
+                divider
+                percentSlider(tr("Flou maximal"), $bleedBlurMax, range: 10...150)
             }
             divider
             toggle("square.and.arrow.down", tr("Appui long : enregistrer la pochette"), $saveCoverOnLongPress)
@@ -745,6 +755,19 @@ struct SettingsView: View {
             VStack(spacing: 0) { content() }
                 .surface(RoundedRectangle(cornerRadius: 14, style: .continuous), interactive: false)
         }
+    }
+
+    /// Curseur en % (test du flou), par pas de 5.
+    private func percentSlider(_ title: String, _ value: Binding<Double>, range: ClosedRange<Double>) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text("\(Int(value.wrappedValue)) %").foregroundStyle(.secondary).monospacedDigit()
+            }
+            Slider(value: value, in: range, step: 5)
+        }
+        .padding(14)
     }
 
     /// Interrupteur : icône et titre, et une précision seulement quand le titre ne suffit pas.

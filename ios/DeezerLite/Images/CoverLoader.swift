@@ -168,7 +168,9 @@ final class CoverLoader: @unchecked Sendable {
     /// passer par le noir le temps d'aller le chercher.
     func cachedBackdrop(url: String, saturation: CGFloat = 1, tall: CGFloat? = nil, inset: CGFloat = 0, zoom: CGFloat = 1,
                         classic: Bool = false) -> UIImage? {
-        let key = tall.map { "\($0)|\(inset)|\(zoom)|\(classic)|\(url)" } ?? (saturation == 1 ? url : "\(saturation)|\(url)")
+        let test = Self.blurTest
+        let key = tall.map { "\($0)|\(inset)|\(zoom)|\(classic)|\(test.start)|\(test.max)|\(url)" }
+            ?? (saturation == 1 ? url : "\(saturation)|\(url)")
         return backdrops.object(forKey: key as NSString)
     }
 
@@ -209,8 +211,19 @@ final class CoverLoader: @unchecked Sendable {
     /// titre, hors du thread principal. `tall` : hauteur de l'écran / largeur ; `inset` : hauteur de la barre d'état / largeur ;
     /// `zoom` : hauteur de la pochette / largeur (plus haute que large, elle est centrée et coupée sur les côtés).
     /// `classic` : pochette entière ou moyenne (pas haute ni moyenne floue) : le flou d'avant, net sous la pochette.
+    /// Réglages › Test du flou (pochette pleine largeur), de 0 à 1 : flou au départ, sous la pochette (Haute et Moy. floue ;
+    /// 0,3 avant) et flou maximal (part du rayon de 110). Lus à chaque fond fait ; ils font partie de sa clé, donc un fond
+    /// déjà fait avec d'autres valeurs n'est pas repris.
+    /// shortcut: réglage de test, à retirer une fois les bonnes valeurs choisies (elles remplaceront 0,3 et 110).
+    static var blurTest: (start: CGFloat, max: CGFloat) {
+        let d = UserDefaults.standard
+        return (CGFloat(d.object(forKey: "bleedBlurStart") as? Double ?? 30) / 100,
+                CGFloat(d.object(forKey: "bleedBlurMax") as? Double ?? 100) / 100)
+    }
+
     func bleedBackdrop(url: String, download: Bool, tall: CGFloat, inset: CGFloat, zoom: CGFloat = 1, classic: Bool = false) async -> UIImage? {
-        let key = "\(tall)|\(inset)|\(zoom)|\(classic)|\(url)" as NSString
+        let test = Self.blurTest
+        let key = "\(tall)|\(inset)|\(zoom)|\(classic)|\(test.start)|\(test.max)|\(url)" as NSString
         if let hit = backdrops.object(forKey: key) { return hit }
         let inMemory = anyCached(url: url).flatMap { ($0.cgImage?.width ?? 0) >= 400 ? $0 : nil }
         let picture: UIImage?
@@ -259,7 +272,7 @@ final class CoverLoader: @unchecked Sendable {
             // pochette (cachée ou en train de s'effacer), à peine au bas de celle-ci ; puis sous elle, il part de presque rien
             // et monte doucement sur les trois quarts de la hauteur restante (avant : la moitié, plus vite au départ, le flou
             // arrivait « d'un coup »).
-            let blurred: CGFloat = 0.3 // sous le bas fondu de la pochette, et au départ de son reflet
+            let blurred = test.start // sous le bas fondu de la pochette, et au départ de son reflet (0,3 avant le test)
             let base: CGFloat = 0.15 // 13 % avant : les traînées des hauts très chargés (fourrure, capuche) se voyaient un peu plus
             func eased(_ t: CGFloat) -> CGFloat { let t = min(max(t, 0), 1); return t * t * (3 - 2 * t) }
             func amount(_ row: CGFloat) -> CGFloat { // `row` : depuis le haut de l'écran
@@ -303,7 +316,7 @@ final class CoverLoader: @unchecked Sendable {
             let blur = CIFilter.maskedVariableBlur()
             blur.inputImage = extendedCover
             blur.mask = mask
-            blur.radius = 110
+            blur.radius = 110 * test.max
             // Puis une seule couleur : la moyenne du bas de la pochette.
             let average = CIFilter.areaAverage()
             average.inputImage = placed
