@@ -853,8 +853,10 @@ struct NowPlayingView: View {
                      blurred: !shown)
                 .animation(.easeInOut(duration: 0.3), value: shown)
                 // Sujet pas encore connu (titre lancé sans passer par le carrousel) : cherché ici, puis le fond est refait.
+                // Toujours attendu puis relu, même déjà trouvé : avant, s'il l'était entre le dessin du lecteur et le début de
+                // cette tâche (par la pochette nette), le fond restait centré sous une pochette décalée.
                 .task(id: "\(url ?? "")|\(cropping)") {
-                    guard cropping, let url, CoverLoader.shared.cachedFocus(url: url) == nil else { return }
+                    guard cropping, let url else { return }
                     if await CoverLoader.shared.focus(url: url) != nil, !Task.isCancelled { focusFound += 1 }
                 }
         }
