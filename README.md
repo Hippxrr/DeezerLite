@@ -17,7 +17,7 @@ networking, the play queue and audio.
 
 **At a glance**
 
-- 📱 **Runs on**: iPhone with iOS 17 or later (portrait). Liquid Glass on iOS 26, and the app's own tab bar on iOS 26.1+.
+- 📱 **Runs on**: iPhone with iOS 17 or later (portrait). Liquid Glass on iOS 26, and the mini player inside the iOS tab bar on iOS 26.1+.
 - 🎵 **Needs**: a Deezer account. FLAC requires a subscription that includes lossless.
 - 🛠 **Built with**: a Mac and Xcode, one command (`bash scripts/build-ipa.sh`), producing an unsigned IPA.
 - 📲 **Installed by**: sideloading only (no App Store, no TestFlight, no source to add).
@@ -110,8 +110,8 @@ networking, the play queue and audio.
 - 🌍 **Language**: French, English, Spanish, switched without restarting the app.
 - 🎨 **Appearance**: dark, light or system mode; color themes; black, OLED black, slate blue or plum background;
   four app icons.
-- **Tab bar** (iOS 26.1 and later): the app's own full-width bar, which shrinks while scrolling (current tab on the
-  left, mini player in the middle, search on the right), or the native iOS bar.
+- **Tab bar** (iOS 26.1 and later): the iOS bar, with the mini player inside it; it shrinks while scrolling. On iOS 27,
+  search sits with Home and Library like Apple Music, or apart on the right ("Search apart" setting).
 - **Custom playlist covers**, cropped inside the app.
 - **Renamable liked tracks** (on the phone only).
 - **Page headers**: each main page shows its name with your profile picture, which opens the settings.

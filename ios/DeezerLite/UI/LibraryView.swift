@@ -364,7 +364,6 @@ struct SettingsView: View {
     @AppStorage("settingsTab") private var tab = SettingsTab.general
     /// Onglets du bas sans leur nom (voir `MainTabs`).
     @AppStorage("tabLabelsHidden") private var tabLabelsHidden = false
-    @AppStorage("tabBarFull") private var tabBarFull = true
     @AppStorage("tabBarSearchApart") private var tabBarSearchApart = false
     /// iOS 27 ou plus (« Recherche à part » n'a d'effet qu'à partir de là).
     private static var iOS27: Bool {
@@ -484,8 +483,6 @@ struct SettingsView: View {
             }
             .padding(14)
         }
-        Text(tr("Le fond s'applique en mode sombre. Le grand lecteur garde le fond de la pochette."))
-            .font(.caption).foregroundStyle(.secondary).padding(.top, -14).padding(.leading, 4)
     }
 
     private func backgroundChoice(_ b: AppBackground) -> some View {
@@ -510,7 +507,8 @@ struct SettingsView: View {
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
-    /// Thème, icône.
+    /// Mode et fond, thème et icône, puis les réglages rangés par endroit de l'app (barre d'onglets, grand lecteur,
+    /// mini-lecteur, téléchargements). Avant, tous les interrupteurs à la suite dans un seul bloc, chacun avec une phrase.
     @ViewBuilder
     private var look: some View {
         group(tr("Mode")) {
@@ -520,10 +518,8 @@ struct SettingsView: View {
             .pickerStyle(.segmented)
             .padding(14)
         }
-        Text(tr("Système : clair ou sombre comme l'iPhone. Le grand lecteur reste toujours sombre."))
-            .font(.caption).foregroundStyle(.secondary).padding(.top, -14).padding(.leading, 4)
         backgroundGroup
-        group(tr("Apparence")) {
+        group(tr("Thème et icône")) {
             VStack(alignment: .leading, spacing: 12) {
                 HStack {
                     Image(systemName: "paintpalette").foregroundStyle(Theme.accent).frame(width: 26)
@@ -542,152 +538,46 @@ struct SettingsView: View {
                 AppIconPicker()
             }
             .padding(14)
-            divider
-            Toggle(isOn: $tabLabelsHidden) {
-                HStack(spacing: 12) {
-                    Image(systemName: "textformat").foregroundStyle(Theme.accent).frame(width: 26)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(tr("Masquer le nom des onglets"))
-                        Text(tr("Icônes seules dans la barre du bas")).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
+        }
+        group(tr("Barre d'onglets")) {
+            toggle("textformat", tr("Masquer le nom des onglets"), $tabLabelsHidden)
+            // Barre d'iOS, sur iOS 27 : avant, la recherche y est toujours à part.
+            if MiniPlayerMetrics.inTabBar, Self.iOS27 {
+                divider
+                toggle("magnifyingglass.circle", tr("Recherche à part"), $tabBarSearchApart)
             }
-            .tint(Theme.accent)
-            .padding(14)
-            divider
-            Toggle(isOn: $miniProgress) {
-                HStack(spacing: 12) {
-                    Image(systemName: "minus").foregroundStyle(Theme.accent).frame(width: 26)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(tr("Barre de progression du mini-lecteur"))
-                        Text(tr("Fine barre en bas du mini-lecteur")).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .tint(Theme.accent)
-            .padding(14)
-            divider
-            Toggle(isOn: $fullBleedCover) {
-                HStack(spacing: 12) {
-                    Image(systemName: "photo").foregroundStyle(Theme.accent).frame(width: 26)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(tr("Pochette pleine largeur"))
-                        Text(tr("Grand lecteur : la pochette en haut, sur toute la largeur, fondue dans le fond")).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .tint(Theme.accent)
-            .padding(14)
-            // Choix de forme, seulement avec la pochette pleine largeur : entière (carrée, prolongée par son reflet), ou
-            // haute jusqu'au titre comme Apple Music (agrandie, coupée sur les côtés).
+        }
+        group(tr("Grand lecteur")) {
+            toggle("photo", tr("Pochette pleine largeur"), $fullBleedCover)
+            // Forme de la pochette pleine largeur : entière (carrée, prolongée par son reflet), ou haute comme Apple Music.
             if fullBleedCover {
                 divider
-                Toggle(isOn: $fullBleedTall) {
-                    HStack(spacing: 12) {
-                        Image(systemName: "rectangle.portrait").foregroundStyle(Theme.accent).frame(width: 26)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(tr("Pochette haute"))
-                            Text(tr("Jusqu'au titre, comme Apple Music : agrandie et coupée sur les côtés. Désactivée : la pochette entière, prolongée par son reflet")).font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .tint(Theme.accent)
-                .padding(14)
+                toggle("rectangle.portrait", tr("Pochette haute"), $fullBleedTall, detail: tr("Jusqu'au titre, coupée sur les côtés"))
             }
             divider
-            Toggle(isOn: $saveCoverOnLongPress) {
-                HStack(spacing: 12) {
-                    Image(systemName: "square.and.arrow.down").foregroundStyle(Theme.accent).frame(width: 26)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(tr("Appui long : enregistrer la pochette"))
-                        Text(tr("Grand lecteur : un appui long sur la pochette l'enregistre dans Photos (au lieu du mode épuré)")).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .tint(Theme.accent)
-            .padding(14)
+            toggle("square.and.arrow.down", tr("Appui long : enregistrer la pochette"), $saveCoverOnLongPress)
             divider
-            Toggle(isOn: $queueHistory) {
-                HStack(spacing: 12) {
-                    Image(systemName: "clock.arrow.circlepath").foregroundStyle(Theme.accent).frame(width: 26)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(tr("Historique dans la file"))
-                        Text(tr("File d'attente du lecteur : les titres déjà écoutés au-dessus d'« À suivre »")).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .tint(Theme.accent)
-            .padding(14)
-            divider
-            Toggle(isOn: $downloadCheckGreen) {
-                HStack(spacing: 12) {
-                    Image(systemName: "checkmark.circle.fill").foregroundStyle(downloadCheckGreen ? Theme.downloadGreen : Theme.accent).frame(width: 26)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(tr("Coche verte"))
-                        Text(tr("Titres téléchargés : coche verte devant le titre, au lieu de la couleur du thème")).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .tint(Theme.accent)
-            .padding(14)
-            if MiniPlayerMetrics.inTabBar {
-                divider
-                Toggle(isOn: $tabBarFull) {
-                    HStack(spacing: 12) {
-                        Image(systemName: "rectangle.bottomthird.inset.filled").foregroundStyle(Theme.accent).frame(width: 26)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(tr("Barre d'onglets complète"))
-                            Text(tr("Toute la largeur, la recherche passe à droite quand la barre se réduit. Désactivée : la barre d'iOS")).font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-                .tint(Theme.accent)
-                .padding(14)
-                // Seulement pour la barre d'iOS, et sur iOS 27 : avant, la recherche y est toujours à part.
-                if !tabBarFull, Self.iOS27 {
-                    divider
-                    Toggle(isOn: $tabBarSearchApart) {
-                        HStack(spacing: 12) {
-                            Image(systemName: "magnifyingglass.circle").foregroundStyle(Theme.accent).frame(width: 26)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(tr("Recherche à part"))
-                                Text(tr("Accueil et Bibliothèque à gauche, la recherche dans un rond à droite. Désactivée : les trois ensemble, comme Apple Music")).font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
-                    }
-                    .tint(Theme.accent)
-                    .padding(14)
-                }
-            }
+            toggle("clock.arrow.circlepath", tr("Historique dans la file"), $queueHistory)
+        }
+        group(tr("Mini-lecteur")) {
+            toggle("minus", tr("Barre de progression"), $miniProgress)
+        }
+        group(tr("Téléchargements")) {
+            toggle("checkmark.circle.fill", tr("Coche verte"), $downloadCheckGreen,
+                   iconColor: downloadCheckGreen ? Theme.downloadGreen : Theme.accent)
         }
     }
 
     @ViewBuilder
     private var lecture: some View {
         group(tr("Lecture")) {
-            Toggle(isOn: Binding(get: { player.resumeOnLaunch }, set: { player.setResumeOnLaunch($0) })) {
-                HStack(spacing: 12) {
-                    Image(systemName: "clock.arrow.circlepath").foregroundStyle(Theme.accent).frame(width: 26)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(tr("Reprendre la dernière écoute"))
-                        Text(tr("Au relancement de l'app : même titre, même position")).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .tint(Theme.accent)
-            .padding(14)
+            toggle("clock.arrow.circlepath", tr("Reprendre la dernière écoute"),
+                   Binding(get: { player.resumeOnLaunch }, set: { player.setResumeOnLaunch($0) }))
             divider
-            Toggle(isOn: Binding(get: { player.geniusLyrics }, set: { player.setGeniusLyrics($0) })) {
-                HStack(spacing: 12) {
-                    Image(systemName: "quote.bubble").foregroundStyle(Theme.accent).frame(width: 26)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(tr("Paroles de secours (Genius)"))
-                        Text(tr("Si Deezer n'a pas les paroles : texte simple, en ligne. Genius reçoit alors le titre et l'artiste.")).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .tint(Theme.accent)
-            .padding(14)
+            // Seule précision gardée : ce que Genius reçoit (un autre service que Deezer).
+            toggle("quote.bubble", tr("Paroles de secours (Genius)"),
+                   Binding(get: { player.geniusLyrics }, set: { player.setGeniusLyrics($0) }),
+                   detail: tr("Genius reçoit le titre et l'artiste"))
         }
     }
 
@@ -698,31 +588,17 @@ struct SettingsView: View {
             Stepper(value: Binding(get: { player.crossfade }, set: { player.setCrossfade($0) }), in: 0...10) {
                 HStack(spacing: 12) {
                     Image(systemName: "arrow.triangle.merge").foregroundStyle(Theme.accent).frame(width: 26)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(tr("Fondu enchaîné"))
-                        Text(player.crossfade == 0 ? tr("Désactivé : les titres s'enchaînent sans blanc") : tr("%@ s : la fin d'un titre se mêle au début du suivant", "\(player.crossfade)"))
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
+                    Text(tr("Fondu enchaîné"))
+                    Spacer()
+                    Text(player.crossfade == 0 ? tr("Désactivé") : "\(player.crossfade) s").foregroundStyle(.secondary)
                 }
             }
             .padding(14)
             divider
-            Toggle(isOn: Binding(get: { player.normalizeVolume }, set: { player.setNormalizeVolume($0) })) {
-                HStack(spacing: 12) {
-                    Image(systemName: "speaker.wave.2").foregroundStyle(Theme.accent).frame(width: 26)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(tr("Volume égal entre les titres"))
-                        Text(tr("Les titres forts sont baissés et les calmes remontés, d'après le volume mesuré par Deezer"))
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .tint(Theme.accent)
-            .padding(14)
+            toggle("speaker.wave.2", tr("Volume égal entre les titres"),
+                   Binding(get: { player.normalizeVolume }, set: { player.setNormalizeVolume($0) }))
         }
         group(tr("Égaliseur")) { EqualizerPanel() }
-        Text(tr("Fréquences en Hz. Toucher un curseur crée ton réglage « Personnalisé »."))
-            .font(.caption).foregroundStyle(.secondary).padding(.top, -14).padding(.leading, 4)
     }
 
     /// Qualité en Wi-Fi, en données mobiles, des téléchargements.
@@ -733,24 +609,13 @@ struct SettingsView: View {
         group(tr("Qualité des téléchargements")) { qualityRows(player.downloadQuality) { player.setDownloadQuality($0) } }
             // Recalculé à chaque changement de qualité, hors du fil principal.
             .task(id: player.downloadQuality) { qualityChanges = await player.downloadsInOtherQuality() }
-        Text(tr("Pour les nouveaux téléchargements, en Wi-Fi et en 4G/5G.")).font(.caption).foregroundStyle(.secondary).padding(.top, -14).padding(.leading, 4)
         if !qualityChanges.isEmpty { qualityUpdateRow }
         if let playing = player.current?.quality {
             Text(tr("Titre en cours : %@", playing)).font(.caption).foregroundStyle(.secondary).padding(.top, -14).padding(.leading, 4)
         }
         group(tr("Téléchargements")) {
-            Toggle(isOn: $downloadsWifiOnly) {
-                HStack(spacing: 12) {
-                    Image(systemName: "wifi").foregroundStyle(Theme.accent).frame(width: 26)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(tr("Télécharger en Wi-Fi seulement"))
-                        Text(tr("En données mobiles, les téléchargements attendent le Wi-Fi")).font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .tint(Theme.accent)
-            .padding(14)
-            .onChange(of: downloadsWifiOnly) { BackgroundDownloadManager.shared.wifiOnlyChanged() }
+            toggle("wifi", tr("Télécharger en Wi-Fi seulement"), $downloadsWifiOnly)
+                .onChange(of: downloadsWifiOnly) { BackgroundDownloadManager.shared.wifiOnlyChanged() }
         }
     }
 
@@ -869,6 +734,22 @@ struct SettingsView: View {
             VStack(spacing: 0) { content() }
                 .surface(RoundedRectangle(cornerRadius: 14, style: .continuous), interactive: false)
         }
+    }
+
+    /// Interrupteur : icône et titre, et une précision seulement quand le titre ne suffit pas.
+    private func toggle(_ icon: String, _ title: String, _ isOn: Binding<Bool>, detail: String? = nil,
+                        iconColor: Color? = nil) -> some View {
+        Toggle(isOn: isOn) {
+            HStack(spacing: 12) {
+                Image(systemName: icon).foregroundStyle(iconColor ?? Theme.accent).frame(width: 26)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                    if let detail { Text(detail).font(.caption).foregroundStyle(.secondary) }
+                }
+            }
+        }
+        .tint(Theme.accent)
+        .padding(14)
     }
 
     private func row<Trailing: View>(_ icon: String, _ title: String, @ViewBuilder trailing: () -> Trailing) -> some View {
@@ -1014,8 +895,6 @@ struct RecoSettingsView: View {
                 Toggle(isOn: Binding(get: { player.lovedOnHome }, set: { player.setLovedOnHome($0) })) {
                     SettingLabel(tr("%@ sur l'accueil", player.lovedTitle), icon: "heart.fill")
                 }
-            } footer: {
-                Text(tr("Désactivés, ils se trouvent en tête de tes playlists dans la Bibliothèque. Sur l'accueil, appui long puis « Réorganiser l'accueil » pour changer leur ordre."))
             }
             Section {
                 Toggle(isOn: Binding(
@@ -1027,8 +906,6 @@ struct RecoSettingsView: View {
                 )) {
                     SettingLabel(tr("Recommandations"), icon: "sparkles")
                 }
-            } footer: {
-                Text(tr("Désactivées, l'accueil ne contacte plus Deezer pour ses suggestions."))
             }
             if player.reco.enabled {
                 Section {
@@ -1044,7 +921,7 @@ struct RecoSettingsView: View {
                 } header: {
                     Text(tr("Catégories"))
                 } footer: {
-                    Text(tr("Fais glisser pour changer l'ordre sur l'accueil. Appui long sur le titre d'une rangée de l'accueil pour la masquer."))
+                    Text(tr("Fais glisser pour changer l'ordre."))
                 }
                 Section {
                     Stepper(value: Binding(

@@ -175,7 +175,7 @@ struct MiniPlayer: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 8)
                     // Bulle flottante : verre en fond, le contenu dessiné par-dessus. Contenu dans le verre, celui-ci était
-                    // recalculé à chaque image quand le titre glisse (iOS 26.0), comme dans la barre de l'app (`GlassTabBar`).
+                    // recalculé à chaque image quand le titre glisse (iOS 26.0), comme dans l'ancienne barre de l'app.
                     .background { Color.clear.surface(bubble, interactive: false, material: true) }
                     .overlay { progress(bubble) },
                 bubble

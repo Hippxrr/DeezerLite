@@ -1403,18 +1403,15 @@ final class Player {
     /// Réglages ouverts : « Qui écoute ? » s'affiche par-dessus eux (iOS ne montre qu'une fenêtre à la fois depuis
     /// un même écran ; sinon la question n'apparaissait pas).
     var settingsOpen = false {
-        // « Barre d'onglets complète » figée tant que les Réglages sont ouverts : changer de barre reconstruit les pages,
-        // et la feuille des Réglages (ouverte depuis l'une d'elles) se refermait. Figée dès l'ouverture : la figer au
-        // changement arrivait après la reconstruction. La nouvelle barre arrive à la fermeture.
+        // « Recherche à part » figée tant que les Réglages sont ouverts : changer la barre reconstruit les pages, et la
+        // feuille des Réglages (ouverte depuis l'une d'elles) se refermait. Figée dès l'ouverture : la figer au changement
+        // arrivait après la reconstruction. La nouvelle barre arrive à la fermeture.
         didSet {
             guard settingsOpen != oldValue else { return }
-            tabBarFullHeld = settingsOpen ? (UserDefaults.standard.object(forKey: "tabBarFull") as? Bool ?? true) : nil
             tabBarSearchApartHeld = settingsOpen ? UserDefaults.standard.bool(forKey: "tabBarSearchApart") : nil
         }
     }
-    /// Valeur de « Barre d'onglets complète » affichée pendant que les Réglages sont ouverts (voir `settingsOpen`).
-    private(set) var tabBarFullHeld: Bool?
-    /// Pareil pour « Recherche à part ».
+    /// Valeur de « Recherche à part » affichée pendant que les Réglages sont ouverts (voir `settingsOpen`).
     private(set) var tabBarSearchApartHeld: Bool?
     /// Change à chaque changement de profil (et à la déconnexion) : une réponse de Deezer demandée pour le profil
     /// d'avant, arrivée après, n'est pas affichée.

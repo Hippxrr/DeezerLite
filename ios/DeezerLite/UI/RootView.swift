@@ -283,21 +283,8 @@ struct MainTabs: View {
     @State private var mp3Name = ""
     /// Réglages > Apparence : onglets sans leur nom, icônes seules.
     @AppStorage("tabLabelsHidden") private var tabLabelsHidden = false
-    /// Réglages > Apparence : barre de l'app sur toute la largeur, sinon celle d'iOS.
-    @AppStorage("tabBarFull") private var tabBarFull = true
-    /// Valeur figée tant que les Réglages sont ouverts (voir `Player.settingsOpen`).
-    private var barFullShown: Bool { player.tabBarFullHeld ?? tabBarFull }
     /// Réglages › Apparence, option : la recherche à part, à droite de la barre d'iOS (voir `searchRole`).
     @AppStorage("tabBarSearchApart") private var tabBarSearchApart = false
-    /// Barre de l'app réduite par le défilement.
-    @State private var barCollapsed = false
-    /// Onglets déjà ouverts : une page n'est construite qu'à sa première visite.
-    @State private var visited: Set<Int> = [0]
-    /// Dernier onglet ouvert autre que la recherche.
-    @State private var lastPage = 0
-    /// Nouvel appui sur l'accueil ou la bibliothèque déjà ouverts : retour à leur première page.
-    @State private var homePop = 0
-    @State private var libraryPop = 0
     /// Nouvel appui sur l'onglet Recherche déjà ouvert : ouvre le clavier.
     @State private var searchFocus = 0
 
@@ -392,73 +379,21 @@ struct MainTabs: View {
     }
     #endif
 
-    /// Onglet choisi dans la barre de l'app : un nouvel appui revient à la première page (et ouvre le clavier sur la recherche).
-    private func selectOwn(_ new: Int) {
-        if new == tab {
-            switch new {
-            case 0: homePop += 1
-            case 1: searchFocus += 1
-            default: libraryPop += 1
-            }
-        }
-        visited.insert(new)
-        if new != 1 { lastPage = new }
-        tab = new
-        barCollapsed = false
-    }
-
     /// Réglages › Téléchargements : la Bibliothèque, puis sa page Téléchargements une fois la feuille des Réglages fermée.
     private func showDownloadsPage() {
-        selectOwn(2)
+        tab = 2
         Task {
             try? await Task.sleep(for: .milliseconds(400))
             player.requestedSection = .downloads
         }
     }
 
-    /// Page d'un onglet : gardée en place une fois ouverte, cachée quand un autre onglet est affiché.
-    private func ownPage<Page: View>(_ id: Int, _ page: Page) -> some View {
-        page
-            .opacity(tab == id ? 1 : 0)
-            .allowsHitTesting(tab == id)
-            .accessibilityHidden(tab != id)
-            // Animations arrêtées dans les pages cachées : avant, l'icône du titre en cours y tournait pour rien.
-            .environment(\.pageVisible, tab == id)
-    }
-
-    /// Barre de l'app : les pages restent en place l'une sur l'autre, et la barre est posée par-dessus. Elle ignore le
-    /// clavier, qui la recouvre simplement.
-    private var ownTabs: some View {
-        ZStack {
-            ownPage(0, TabStack(active: tab == 0, popRequest: homePop) { HomeView() })
-            if visited.contains(1) || tab == 1 {
-                ownPage(1, TabStack(active: tab == 1, popRequest: searchFocus) { SearchView(focusRequest: searchFocus) })
-            }
-            if visited.contains(2) || tab == 2 {
-                ownPage(2, TabStack(active: tab == 2, popRequest: libraryPop) { LibraryView() })
-            }
-            VStack {
-                Spacer()
-                GlassTabBar(tab: tab, lastPage: lastPage, collapsed: barCollapsed, labelsHidden: tabLabelsHidden,
-                            onSelect: { selectOwn($0) }, onExpand: { barCollapsed = false })
-            }
-            .ignoresSafeArea(.container, edges: .bottom)
-            .ignoresSafeArea(.keyboard)
-        }
-        .background(ScrollCollapse(active: !player.showFullPlayer && player.miniShown,
-                                   collapsed: barCollapsed) { barCollapsed = $0 })
-        .onChange(of: !player.miniShown) { _, empty in if empty { barCollapsed = false } }
-    }
-
+    /// Barre d'iOS (l'ancienne barre de l'app, « Barre d'onglets complète », a été retirée).
     @ViewBuilder
     private var tabs: some View {
         #if compiler(>=6.2.1)
         if #available(iOS 26.1, *) {
-            if barFullShown {
-                ownTabs
-            } else {
-                barTabs
-            }
+            barTabs
         } else {
             classicTabs
         }
@@ -672,15 +607,11 @@ struct TabStack<Content: View>: View {
 /// n'hérite plus de celui posé sur la pile elle-même, et son dernier titre restait caché.
 private struct MiniPlayerSpace: ViewModifier {
     @Environment(Player.self) private var player
-    @AppStorage("tabBarFull") private var tabBarFull = true
 
     func body(content: Content) -> some View {
-        let mini = player.miniShown
         content.safeAreaInset(edge: .bottom, spacing: 0) {
-            if MiniPlayerMetrics.inTabBar {
-                // Barre de l'app : la place est à laisser ici. Barre d'iOS : c'est elle qui s'en charge.
-                if player.tabBarFullHeld ?? tabBarFull { Color.clear.frame(height: GlassBarMetrics.pageSpace(mini: mini)) }
-            } else if mini {
+            // Mini-lecteur dans la barre d'iOS (26.1 et plus) : c'est elle qui laisse la place. Avant : posé par l'app.
+            if !MiniPlayerMetrics.inTabBar, player.miniShown {
                 Color.clear.frame(height: MiniPlayerMetrics.mini)
             }
         }
