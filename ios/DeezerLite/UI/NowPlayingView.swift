@@ -1313,6 +1313,10 @@ private struct CoverCarousel: View {
                 // Pochette réduite en pause, pleine taille en lecture (comme Apple Music). Pleine largeur : aucun effet.
                 .scaleEffect(!center || active || bleed ? 1 : 0.8)
                 .animation(.spring(response: 0.5, dampingFraction: 0.72), value: active)
+                // Déplacement réglé ici, hors de ce ressort. Avant, en pause, « suivant » relançait la lecture au moment où les
+                // pochettes changeaient de place : le ressort de la taille s'appliquait aussi à ce déplacement, et la nouvelle
+                // pochette arrivait en glissant, dépassait le centre puis revenait (pleine largeur comprise).
+                .geometryGroup()
                 .offset(x: CGFloat(slot.offset) * step)
                 .zIndex(center ? 1 : 0) // ombre du centre par-dessus les voisines, comme avant
             }
