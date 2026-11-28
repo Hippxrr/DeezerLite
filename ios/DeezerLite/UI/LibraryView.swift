@@ -372,7 +372,7 @@ struct SettingsView: View {
     }
     @AppStorage("miniProgress") private var miniProgress = true
     @AppStorage("fullBleedCover") private var fullBleedCover = false
-    @AppStorage("fullBleedTall") private var fullBleedTall = false
+    @AppStorage(BleedShape.key) private var bleedShape = BleedShape.saved
     @AppStorage("saveCoverOnLongPress") private var saveCoverOnLongPress = false
     @AppStorage("downloadCheckGreen") private var downloadCheckGreen = false
     @AppStorage("queueHistory") private var queueHistory = true
@@ -549,10 +549,21 @@ struct SettingsView: View {
         }
         group(tr("Grand lecteur")) {
             toggle("photo", tr("Pochette pleine largeur"), $fullBleedCover)
-            // Forme de la pochette pleine largeur : entière (carrée, prolongée par son reflet), ou haute comme Apple Music.
+            // Hauteur de la pochette pleine largeur : entière (carrée, prolongée par son reflet), moyenne (avec le fond d'entière
+            // ou celui de haute), ou haute jusqu'au titre. Avant, un interrupteur « Pochette haute » : entière ou haute seulement.
             if fullBleedCover {
                 divider
-                toggle("rectangle.portrait", tr("Pochette haute"), $fullBleedTall, detail: tr("Jusqu'au titre, coupée sur les côtés"))
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(spacing: 12) {
+                        Image(systemName: "rectangle.portrait").foregroundStyle(Theme.accent).frame(width: 26)
+                        Text(tr("Hauteur de la pochette"))
+                    }
+                    Picker(tr("Hauteur de la pochette"), selection: $bleedShape) {
+                        ForEach(BleedShape.allCases, id: \.self) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                }
+                .padding(14)
             }
             divider
             toggle("square.and.arrow.down", tr("Appui long : enregistrer la pochette"), $saveCoverOnLongPress)

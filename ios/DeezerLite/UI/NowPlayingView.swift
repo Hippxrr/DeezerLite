@@ -731,8 +731,8 @@ struct NowPlayingView: View {
     @State private var clean = false
     /// Réglages › Apparence : pochette en haut de l'écran sur toute la largeur, fondue dans le fond.
     @AppStorage("fullBleedCover") private var fullBleed = false
-    /// Réglages › Apparence : pochette pleine largeur haute jusqu'au titre (agrandie, coupée sur les côtés) ; sinon entière.
-    @AppStorage("fullBleedTall") private var fullBleedTall = false
+    /// Réglages › Apparence : hauteur de la pochette pleine largeur (voir `BleedShape`).
+    @AppStorage(BleedShape.key) private var bleedShape = BleedShape.saved
     /// Réglages : un appui long sur la pochette l'enregistre dans Photos, au lieu du mode épuré (désactivé par défaut).
     @AppStorage("saveCoverOnLongPress") private var saveCoverOnLongPress = false
     /// Haut du titre (sous la pochette), mesuré : la pochette pleine largeur descend jusque-là.
@@ -842,7 +842,7 @@ struct NowPlayingView: View {
         // donnait une image de centaines de milliers de pixels de haut (des centaines de Mo, l'app fermée par iOS).
         if fullBleed, let fit = bleedFit(geo) {
             Backdrop(url: player.cover(player.current), open: player.showFullPlayer, tall: fit.tall, inset: fit.inset, zoom: fit.zoom,
-                     classic: !fullBleedTall, blurred: !shown)
+                     classic: bleedShape == .whole || bleedShape == .medium, blurred: !shown)
                 .animation(.easeInOut(duration: 0.3), value: shown)
         }
     }
@@ -856,9 +856,15 @@ struct NowPlayingView: View {
         guard geo.size.width >= 1, titleTop > 0 else { return nil }
         let screen = geo.size.height + geo.safeAreaInsets.top + geo.safeAreaInsets.bottom
         let height = (titleTop + geo.safeAreaInsets.top * 0.3).rounded()
-        // Pochette haute : 4 % moins haute que la place jusqu'au titre (moins coupée sur les côtés, le reflet commence un peu
-        // plus haut). Sinon entière : carrée, sur toute la largeur, son reflet flou descend jusqu'au titre.
-        let zoom = fullBleedTall ? min(max(height * 0.96 / geo.size.width, 1), 1.8) : 1
+        // Haute : 4 % moins haute que la place jusqu'au titre (moins coupée sur les côtés, le reflet commence un peu plus haut).
+        // Moyenne (et moyenne floue) : à mi-chemin entre carrée et haute, sur tout écran (bien moins coupée, son reflet flou
+        // descend jusqu'au titre). Entière : carrée, sur toute la largeur, son reflet flou descend jusqu'au titre.
+        let tallZoom = min(max(height * 0.96 / geo.size.width, 1), 1.8)
+        let zoom = switch bleedShape {
+        case .whole: CGFloat(1)
+        case .medium, .mediumBlur: (1 + tallZoom) / 2
+        case .tall: tallZoom
+        }
         return BleedFit(tall: min(max(screen / geo.size.width, 1), 3), inset: geo.safeAreaInsets.top * 0.7 / geo.size.width,
                         zoom: zoom)
     }
@@ -1097,6 +1103,33 @@ extension Track {
     }
 }
 
+/// Hauteur de la pochette pleine largeur. Avant, un interrupteur « Pochette haute » : entière ou haute seulement.
+enum BleedShape: String, CaseIterable {
+    /// Carrée : rien de coupé.
+    case whole
+    /// Un peu agrandie : coupée sur les côtés, bien moins que haute. Fond d'Entière : son reflet presque net au départ.
+    case medium
+    /// Comme moyenne, avec le fond de Haute : le bas de la pochette se fond dans un flou d'elle-même. Les deux sont
+    /// proposées pour comparer.
+    case mediumBlur
+    /// Jusqu'au titre.
+    case tall
+
+    static let key = "fullBleedShape"
+    /// Valeur de départ : celle de l'ancien interrupteur (« Pochette haute » activée : haute), pour ne rien changer à
+    /// la mise à jour.
+    static var saved: BleedShape { UserDefaults.standard.bool(forKey: "fullBleedTall") ? .tall : .whole }
+
+    var title: String {
+        switch self {
+        case .whole: tr("Entière")
+        case .medium: tr("Moyenne")
+        case .mediumBlur: tr("Moy. floue")
+        case .tall: tr("Haute")
+        }
+    }
+}
+
 /// Mesures du fond de la pochette pleine largeur, en largeurs d'écran (voir `Backdrop.tall` et `Backdrop.inset`).
 private struct BleedFit {
     let tall: CGFloat
@@ -1119,7 +1152,7 @@ private struct Backdrop: View {
     var blurred = false
     /// Hauteur de la pochette pleine largeur / largeur de l'écran (plus haute que large : coupée sur les côtés).
     var zoom: CGFloat = 1
-    /// Pochette entière (« Pochette haute » désactivée) : le flou d'avant (voir `CoverLoader.bleedBackdrop`).
+    /// Pochette entière ou moyenne : le flou d'avant, net sous la pochette (voir `CoverLoader.bleedBackdrop`).
     var classic = false
     @Environment(\.scenePhase) private var phase
     /// Fond précédent (dessous) et nouveau (dessus, qui apparaît en fondu) : d'une pochette à l'autre, jamais de

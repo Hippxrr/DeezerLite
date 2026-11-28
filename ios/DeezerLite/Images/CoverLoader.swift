@@ -208,7 +208,7 @@ final class CoverLoader: @unchecked Sendable {
     /// sur une seule couleur. Fait une fois par
     /// titre, hors du thread principal. `tall` : hauteur de l'écran / largeur ; `inset` : hauteur de la barre d'état / largeur ;
     /// `zoom` : hauteur de la pochette / largeur (plus haute que large, elle est centrée et coupée sur les côtés).
-    /// `classic` : pochette entière (réglage « Pochette haute » désactivé) : le flou d'avant, net sous la pochette.
+    /// `classic` : pochette entière ou moyenne (pas haute ni moyenne floue) : le flou d'avant, net sous la pochette.
     func bleedBackdrop(url: String, download: Bool, tall: CGFloat, inset: CGFloat, zoom: CGFloat = 1, classic: Bool = false) async -> UIImage? {
         let key = "\(tall)|\(inset)|\(zoom)|\(classic)|\(url)" as NSString
         if let hit = backdrops.object(forKey: key) { return hit }
